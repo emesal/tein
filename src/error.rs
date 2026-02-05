@@ -19,6 +19,9 @@ pub enum Error {
 
     /// utf-8 conversion error
     Utf8Error(String),
+
+    /// file io error
+    IoError(String),
 }
 
 impl fmt::Display for Error {
@@ -28,6 +31,7 @@ impl fmt::Display for Error {
             Error::TypeError(msg) => write!(f, "type error: {}", msg),
             Error::InitError(msg) => write!(f, "initialization error: {}", msg),
             Error::Utf8Error(msg) => write!(f, "utf-8 error: {}", msg),
+            Error::IoError(msg) => write!(f, "io error: {}", msg),
         }
     }
 }
@@ -43,5 +47,11 @@ impl From<std::str::Utf8Error> for Error {
 impl From<std::string::FromUtf8Error> for Error {
     fn from(err: std::string::FromUtf8Error) -> Self {
         Error::Utf8Error(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::IoError(err.to_string())
     }
 }

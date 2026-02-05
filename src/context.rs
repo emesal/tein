@@ -6,6 +6,7 @@ use crate::{
     ffi,
 };
 use std::ffi::CString;
+use std::path::Path;
 
 /// a scheme evaluation context
 ///
@@ -135,6 +136,38 @@ impl Context {
 
             Value::from_raw(self.ctx, result)
         }
+    }
+
+    /// load and evaluate a scheme file
+    ///
+    /// reads the file contents and evaluates all expressions sequentially,
+    /// returning the result of the last expression. this is the file-based
+    /// equivalent of [`evaluate`](Self::evaluate).
+    ///
+    /// # examples
+    ///
+    /// ```no_run
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new()?;
+    ///
+    /// // load a config file that defines values and returns a result
+    /// let result = ctx.load_file("config.scm")?;
+    ///
+    /// // load a prelude for side effects (defines), ignore result
+    /// let _ = ctx.load_file("prelude.scm")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # errors
+    ///
+    /// returns [`Error::IoError`] if the file cannot be read, or evaluation
+    /// errors if the scheme code is invalid.
+    pub fn load_file<P: AsRef<Path>>(&self, path: P) -> Result<Value> {
+        let contents = std::fs::read_to_string(path.as_ref())?;
+        self.evaluate(&contents)
     }
 
     /// register a 0-argument foreign function as a scheme primitive
@@ -944,5 +977,89 @@ mod tests {
         for (val, expected) in &cases {
             assert_eq!(format!("{}", val), *expected, "for {:?}", val);
         }
+    }
+
+    // --- file loading ---
+
+    #[test]
+    fn test_load_file_basic() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_basic.scm");
+        std::fs::write(&path, "(+ 1 2 3)").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let result = ctx.load_file(&path).expect("load file");
+        assert_eq!(result, Value::Integer(6));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_multi_expression() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_multi.scm");
+        std::fs::write(&path, "(define x 10)\n(define y 20)\n(+ x y)").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let result = ctx.load_file(&path).expect("load file");
+        assert_eq!(result, Value::Integer(30));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_defines_persist() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_persist.scm");
+        std::fs::write(&path, "(define (square x) (* x x))").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let _ = ctx.load_file(&path).expect("load file");
+
+        // definition from file should be available for subsequent evaluation
+        let result = ctx.evaluate("(square 7)").expect("eval");
+        assert_eq!(result, Value::Integer(49));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_not_found() {
+        let ctx = Context::new().expect("create context");
+        let err = ctx.load_file("/nonexistent/path/to/file.scm").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("io error"), "expected io error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_load_file_syntax_error() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_syntax.scm");
+        std::fs::write(&path, "(define x").expect("write test file"); // unclosed paren
+
+        let ctx = Context::new().expect("create context");
+        let err = ctx.load_file(&path).unwrap_err();
+        // should be an eval error, not io error
+        let msg = format!("{}", err);
+        assert!(
+            !msg.contains("io error"),
+            "expected eval error, got io: {}",
+            msg
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_empty() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_empty.scm");
+        std::fs::write(&path, "").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let result = ctx.load_file(&path).expect("load file");
+        assert!(result.is_unspecified());
+
+        std::fs::remove_file(&path).ok();
     }
 }
