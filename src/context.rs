@@ -709,6 +709,7 @@ mod tests {
     // --- typed extraction helpers ---
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_as_integer() {
         let v = Value::Integer(42);
         assert_eq!(v.as_integer(), Some(42));
@@ -716,6 +717,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_as_float() {
         let v = Value::Float(2.718);
         assert!((v.as_float().unwrap() - 2.718).abs() < 1e-10);
