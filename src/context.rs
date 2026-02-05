@@ -181,9 +181,10 @@ impl Drop for Context {
     }
 }
 
-// context is not send/sync by default - chibi contexts are not thread-safe
-// users who want multiple contexts should create one per thread
-unsafe impl Send for Context {}
+// context is intentionally !Send + !Sync:
+// chibi-scheme contexts are not thread-safe, and the raw sexp pointer
+// provides !Send + !Sync by default. users who need multi-threaded
+// evaluation should create one context per thread.
 
 #[cfg(test)]
 mod tests {
@@ -238,6 +239,13 @@ mod tests {
             Value::Symbol(s) => assert_eq!(s, "foo"),
             _ => panic!("expected symbol, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_unspecified() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(define x 5)").expect("failed to evaluate");
+        assert_eq!(result, Value::Unspecified);
     }
 
     #[test]

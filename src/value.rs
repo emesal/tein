@@ -3,11 +3,15 @@
 use crate::{error::{Error, Result}, ffi};
 use std::fmt;
 
+/// maximum nesting depth for recursive value conversion.
+/// prevents stack overflow on deeply nested or (theoretically) circular structures.
+const MAX_DEPTH: usize = 10_000;
+
 /// a scheme value
 ///
 /// represents the result of evaluating scheme code.
 /// this is a safe wrapper around chibi's internal sexp type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// integer value
     Integer(i64),
@@ -49,6 +53,17 @@ impl Value {
     /// # safety
     /// ctx and raw must be valid pointers from chibi-scheme
     pub(crate) unsafe fn from_raw(ctx: ffi::sexp, raw: ffi::sexp) -> Result<Self> {
+        unsafe { Self::from_raw_depth(ctx, raw, 0) }
+    }
+
+    /// recursive inner conversion with depth tracking to prevent stack overflow
+    unsafe fn from_raw_depth(ctx: ffi::sexp, raw: ffi::sexp, depth: usize) -> Result<Self> {
+        if depth > MAX_DEPTH {
+            return Err(Error::EvalError(
+                "value nesting depth exceeded maximum".to_string(),
+            ));
+        }
+
         unsafe {
         if ffi::sexp_exceptionp(raw) != 0 {
             return Err(Error::EvalError(Self::extract_exception_message(ctx, raw)));
@@ -66,13 +81,16 @@ impl Value {
         }
 
         if ffi::sexp_booleanp(raw) != 0 {
-            // compare against true constant
             let true_val = ffi::get_true();
             return Ok(Value::Boolean(raw == true_val));
         }
 
         if ffi::sexp_nullp(raw) != 0 {
             return Ok(Value::Nil);
+        }
+
+        if raw == ffi::get_void() {
+            return Ok(Value::Unspecified);
         }
 
         if ffi::sexp_stringp(raw) != 0 {
@@ -98,31 +116,29 @@ impl Value {
             let mut items = Vec::with_capacity(len);
             for i in 0..len {
                 let elem = *data.add(i);
-                items.push(Value::from_raw(ctx, elem)?);
+                items.push(Value::from_raw_depth(ctx, elem, depth + 1)?);
             }
             return Ok(Value::Vector(items));
         }
 
         if ffi::sexp_pairp(raw) != 0 {
-            // check if it's a proper list
             if Self::is_proper_list(raw) {
                 let mut items = Vec::new();
                 let mut current = raw;
 
                 while ffi::sexp_pairp(current) != 0 {
                     let car = ffi::sexp_car(current);
-                    items.push(Value::from_raw(ctx, car)?);
+                    items.push(Value::from_raw_depth(ctx, car, depth + 1)?);
                     current = ffi::sexp_cdr(current);
                 }
 
                 return Ok(Value::List(items));
             } else {
-                // improper list or dotted pair
                 let car = ffi::sexp_car(raw);
                 let cdr = ffi::sexp_cdr(raw);
                 return Ok(Value::Pair(
-                    Box::new(Value::from_raw(ctx, car)?),
-                    Box::new(Value::from_raw(ctx, cdr)?),
+                    Box::new(Value::from_raw_depth(ctx, car, depth + 1)?),
+                    Box::new(Value::from_raw_depth(ctx, cdr, depth + 1)?),
                 ));
             }
         }
@@ -133,12 +149,31 @@ impl Value {
     }
 
     /// check if a sexp is a proper list (ends in nil)
-    unsafe fn is_proper_list(mut sexp: ffi::sexp) -> bool {
+    ///
+    /// uses tortoise-and-hare cycle detection to avoid infinite loops
+    /// on circular lists constructed via set-cdr!.
+    unsafe fn is_proper_list(sexp: ffi::sexp) -> bool {
         unsafe {
-        while ffi::sexp_pairp(sexp) != 0 {
-            sexp = ffi::sexp_cdr(sexp);
+        let mut tortoise = sexp;
+        let mut hare = sexp;
+
+        loop {
+            if ffi::sexp_pairp(hare) == 0 {
+                return ffi::sexp_nullp(hare) != 0;
+            }
+            hare = ffi::sexp_cdr(hare);
+
+            if ffi::sexp_pairp(hare) == 0 {
+                return ffi::sexp_nullp(hare) != 0;
+            }
+            hare = ffi::sexp_cdr(hare);
+
+            tortoise = ffi::sexp_cdr(tortoise);
+
+            if hare == tortoise {
+                return false; // cycle detected
+            }
         }
-        ffi::sexp_nullp(sexp) != 0
         }
     }
 
@@ -170,22 +205,45 @@ impl Value {
     /// convert a rust value to a raw chibi sexp
     ///
     /// useful for returning values from foreign functions registered
-    /// with [`Context::define_fn_raw`].
+    /// with [`Context::define_fn0`] through [`Context::define_fn3`].
+    ///
+    /// currently supports: Integer, Float, Boolean, String, Symbol, Nil, Unspecified.
+    /// returns an error for List, Pair, Vector, and Other (use the raw API for these).
     ///
     /// # safety
     /// ctx must be a valid chibi context pointer
-    pub unsafe fn to_raw(&self, ctx: ffi::sexp) -> ffi::sexp {
+    pub unsafe fn to_raw(&self, ctx: ffi::sexp) -> Result<ffi::sexp> {
         unsafe {
         match self {
-            Value::Integer(n) => ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t),
-            Value::Float(f) => ffi::sexp_make_flonum(ctx, *f),
-            Value::Boolean(b) => ffi::sexp_make_boolean(*b),
+            Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
+            Value::Float(f) => Ok(ffi::sexp_make_flonum(ctx, *f)),
+            Value::Boolean(b) => Ok(ffi::sexp_make_boolean(*b)),
             Value::String(s) => {
-                let c_str = std::ffi::CString::new(s.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t)
+                let c_str = std::ffi::CString::new(s.as_str()).map_err(|_| {
+                    Error::TypeError("string contains null bytes".to_string())
+                })?;
+                Ok(ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t))
             }
-            Value::Nil => ffi::get_null(),
-            _ => ffi::get_void(),
+            Value::Symbol(s) => {
+                let c_str = std::ffi::CString::new(s.as_str()).map_err(|_| {
+                    Error::TypeError("symbol contains null bytes".to_string())
+                })?;
+                Ok(ffi::sexp_intern(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t))
+            }
+            Value::Nil => Ok(ffi::get_null()),
+            Value::Unspecified => Ok(ffi::get_void()),
+            Value::List(_) => Err(Error::TypeError(
+                "cannot convert List to raw sexp (use raw API for compound types)".to_string(),
+            )),
+            Value::Pair(_, _) => Err(Error::TypeError(
+                "cannot convert Pair to raw sexp (use raw API for compound types)".to_string(),
+            )),
+            Value::Vector(_) => Err(Error::TypeError(
+                "cannot convert Vector to raw sexp (use raw API for compound types)".to_string(),
+            )),
+            Value::Other(desc) => Err(Error::TypeError(format!(
+                "cannot convert Other({}) to raw sexp", desc,
+            ))),
         }
         }
     }

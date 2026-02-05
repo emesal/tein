@@ -8,12 +8,12 @@
 #![allow(dead_code)]
 #![allow(missing_docs)]
 
-use std::os::raw::{c_char, c_int, c_long, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 
 // opaque types from chibi
 pub type sexp = *mut c_void;
 pub type sexp_sint_t = c_long;
-pub type sexp_uint_t = c_long;
+pub type sexp_uint_t = c_ulong;
 
 unsafe extern "C" {
     // context management

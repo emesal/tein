@@ -28,7 +28,8 @@ pub use error::{Error, Result};
 /// raw ffi types for advanced use (foreign functions, etc.)
 ///
 /// these are thin wrappers over chibi's c api. use them to build
-/// foreign functions that can be registered with [`Context::define_fn_raw`].
+/// foreign functions that can be registered with [`Context::define_fn0`]
+/// through [`Context::define_fn3`].
 #[allow(missing_docs)]
 pub mod raw {
     pub use crate::ffi::{sexp, sexp_sint_t};

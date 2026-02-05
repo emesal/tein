@@ -98,9 +98,40 @@ none currently
   - cap memory usage
   - restrict available functions
 
-## 🐛 known issues
+## 🐛 known issues (code review, 2026-02-05)
 
-- none! tests passing, no crashes :3
+### critical
+
+- [x] **CR-C1: `sexp_uint_t` declared as signed `c_long`** — ✅ fixed: `c_ulong`
+- [x] **CR-C2: `unsafe impl Send` without documented invariants** — ✅ removed, documented why !Send
+- [x] **CR-C3: `is_proper_list` infinite loop on circular lists** — ✅ tortoise-and-hare + depth limit
+
+### important
+
+- [x] **CR-I1: `Value::Unspecified` unreachable from `from_raw`** — ✅ void check added + test
+- [ ] **CR-I2: `transmute` for FFI fn pointer lacks type annotations** — `src/context.rs:151`
+  - fragile, hard to verify ABI compatibility
+  - fix: add explicit source/target type annotations
+
+- [x] **CR-I3: broken rustdoc links to `Context::define_fn_raw`** — ✅ updated to define_fn0..3
+- [x] **CR-I4: `Value` missing `PartialEq` derive** — ✅ derived
+- [x] **CR-I5: `to_raw` silently converts most variants to void** — ✅ returns Result, errors on unsupported
+
+- [ ] **CR-I6: all 3 doc-tests are `#[ignore]`-d** — never actually run
+  - fix: make them compile and run (likely blocked by I4, now resolved)
+
+- [ ] **CR-I7: no GC pinning during vector/list iteration** — `src/value.rs:95-103`
+  - recursive `from_raw` calls could trigger chibi GC mid-iteration
+  - fix: use `sexp_preserve_object` or `sexp_gc_var` before iterating
+
+### minor
+
+- [ ] **CR-M1: redundant `c_fname` clone** — `src/context.rs:139`
+- [ ] **CR-M2: 24 public unsafe fns missing `# Safety` docs** — `src/ffi.rs`
+- [ ] **CR-M3: `rerun-if-changed` on directories doesn't track file changes** — `build.rs:42-43`
+- [ ] **CR-M4: `Cargo.lock` both gitignored and committed** — pick one
+- [ ] **CR-M5: `Display` for `Value::String` doesn't escape special chars** — `src/value.rs:199`
+- [ ] **CR-M6: README license "tbd" vs Cargo.toml MIT/Apache-2.0** — inconsistent
 
 ## 📝 notes
 
