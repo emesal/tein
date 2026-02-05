@@ -231,13 +231,23 @@ impl Value {
     /// useful for returning values from foreign functions registered
     /// with [`Context::define_fn0`] through [`Context::define_fn3`].
     ///
-    /// currently supports: Integer, Float, Boolean, String, Symbol, Nil, Unspecified.
-    /// returns an error for List, Pair, Vector, and Other (use the raw API for these).
+    /// supports all value types except `Other`.
     ///
     /// # Safety
     ///
     /// `ctx` must be a valid, live chibi-scheme context pointer.
     pub unsafe fn to_raw(&self, ctx: ffi::sexp) -> Result<ffi::sexp> {
+        unsafe { self.to_raw_depth(ctx, 0) }
+    }
+
+    /// recursive inner conversion with depth tracking to prevent stack overflow
+    unsafe fn to_raw_depth(&self, ctx: ffi::sexp, depth: usize) -> Result<ffi::sexp> {
+        if depth > MAX_DEPTH {
+            return Err(Error::EvalError(
+                "value nesting depth exceeded maximum".to_string(),
+            ));
+        }
+
         unsafe {
             match self {
                 Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
@@ -263,16 +273,29 @@ impl Value {
                 }
                 Value::Nil => Ok(ffi::get_null()),
                 Value::Unspecified => Ok(ffi::get_void()),
-                Value::List(_) => Err(Error::TypeError(
-                    "cannot convert List to raw sexp (use raw API for compound types)".to_string(),
-                )),
-                Value::Pair(_, _) => Err(Error::TypeError(
-                    "cannot convert Pair to raw sexp (use raw API for compound types)".to_string(),
-                )),
-                Value::Vector(_) => Err(Error::TypeError(
-                    "cannot convert Vector to raw sexp (use raw API for compound types)"
-                        .to_string(),
-                )),
+                Value::List(items) => {
+                    // build list from back to front: (cons last (cons ... (cons first nil)))
+                    let mut result = ffi::get_null();
+                    for item in items.iter().rev() {
+                        let raw_item = item.to_raw_depth(ctx, depth + 1)?;
+                        result = ffi::sexp_cons(ctx, raw_item, result);
+                    }
+                    Ok(result)
+                }
+                Value::Pair(car, cdr) => {
+                    let raw_car = car.to_raw_depth(ctx, depth + 1)?;
+                    let raw_cdr = cdr.to_raw_depth(ctx, depth + 1)?;
+                    Ok(ffi::sexp_cons(ctx, raw_car, raw_cdr))
+                }
+                Value::Vector(items) => {
+                    let len = items.len();
+                    let vec = ffi::sexp_make_vector(ctx, len as ffi::sexp_uint_t, ffi::get_void());
+                    for (i, item) in items.iter().enumerate() {
+                        let raw_item = item.to_raw_depth(ctx, depth + 1)?;
+                        ffi::sexp_vector_set(vec, i as ffi::sexp_uint_t, raw_item);
+                    }
+                    Ok(vec)
+                }
                 Value::Other(desc) => Err(Error::TypeError(format!(
                     "cannot convert Other({}) to raw sexp",
                     desc,

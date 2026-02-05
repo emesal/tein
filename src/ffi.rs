@@ -101,6 +101,13 @@ unsafe extern "C" {
     pub fn tein_get_true() -> sexp;
     pub fn tein_get_false() -> sexp;
     pub fn tein_get_null() -> sexp;
+
+    // pair/list construction (via tein shim)
+    pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
+
+    // vector construction (via tein shim)
+    pub fn tein_sexp_make_vector(ctx: sexp, len: sexp_uint_t, dflt: sexp) -> sexp;
+    pub fn tein_sexp_vector_set(vec: sexp, i: sexp_uint_t, val: sexp);
 }
 
 // convenience wrappers that call our shim layer
@@ -268,4 +275,21 @@ pub unsafe fn get_false() -> sexp {
 #[inline]
 pub unsafe fn get_null() -> sexp {
     unsafe { tein_get_null() }
+}
+
+// pair/list construction
+#[inline]
+pub unsafe fn sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp {
+    unsafe { tein_sexp_cons(ctx, head, tail) }
+}
+
+// vector construction
+#[inline]
+pub unsafe fn sexp_make_vector(ctx: sexp, len: sexp_uint_t, dflt: sexp) -> sexp {
+    unsafe { tein_sexp_make_vector(ctx, len, dflt) }
+}
+
+#[inline]
+pub unsafe fn sexp_vector_set(vec: sexp, i: sexp_uint_t, val: sexp) {
+    unsafe { tein_sexp_vector_set(vec, i, val) }
 }

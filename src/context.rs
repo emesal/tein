@@ -659,6 +659,184 @@ mod tests {
         assert!(!Value::Nil.is_unspecified());
     }
 
+    // --- to_raw round-trip tests ---
+
+    #[test]
+    fn test_list_to_raw_roundtrip() {
+        unsafe extern "C" fn get_test_list(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let list = Value::List(vec![
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                ]);
+                list.to_raw(ctx_ptr).unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-test-list", get_test_list)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-test-list)").expect("eval");
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].as_integer(), Some(1));
+                assert_eq!(items[1].as_integer(), Some(2));
+                assert_eq!(items[2].as_integer(), Some(3));
+            }
+            _ => panic!("expected list, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pair_to_raw_roundtrip() {
+        unsafe extern "C" fn get_test_pair(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let pair = Value::Pair(
+                    Box::new(Value::Symbol("key".into())),
+                    Box::new(Value::Integer(42)),
+                );
+                pair.to_raw(ctx_ptr).unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-test-pair", get_test_pair)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-test-pair)").expect("eval");
+        match result {
+            Value::Pair(car, cdr) => {
+                assert_eq!(car.as_symbol(), Some("key"));
+                assert_eq!(cdr.as_integer(), Some(42));
+            }
+            _ => panic!("expected pair, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_vector_to_raw_roundtrip() {
+        unsafe extern "C" fn get_test_vector(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let vec = Value::Vector(vec![
+                    Value::String("a".into()),
+                    Value::String("b".into()),
+                ]);
+                vec.to_raw(ctx_ptr).unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-test-vector", get_test_vector)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-test-vector)").expect("eval");
+        match result {
+            Value::Vector(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].as_string(), Some("a"));
+                assert_eq!(items[1].as_string(), Some("b"));
+            }
+            _ => panic!("expected vector, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_nested_list_to_raw_roundtrip() {
+        unsafe extern "C" fn get_nested_list(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let nested = Value::List(vec![
+                    Value::Integer(1),
+                    Value::List(vec![Value::Integer(2), Value::Integer(3)]),
+                    Value::Integer(4),
+                ]);
+                nested
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-nested-list", get_nested_list)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-nested-list)").expect("eval");
+        match &result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].as_integer(), Some(1));
+                assert!(matches!(&items[1], Value::List(inner) if inner.len() == 2));
+                assert_eq!(items[2].as_integer(), Some(4));
+            }
+            _ => panic!("expected list, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_empty_list_to_raw() {
+        unsafe extern "C" fn get_empty_list(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let empty = Value::List(vec![]);
+                empty
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-empty-list", get_empty_list)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-empty-list)").expect("eval");
+        assert!(
+            result.is_nil(),
+            "empty list should become nil, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_empty_vector_to_raw() {
+        unsafe extern "C" fn get_empty_vector(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let empty = Value::Vector(vec![]);
+                empty
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-empty-vector", get_empty_vector)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-empty-vector)").expect("eval");
+        match result {
+            Value::Vector(items) => assert_eq!(items.len(), 0),
+            _ => panic!("expected empty vector, got {:?}", result),
+        }
+    }
+
     // --- value display ---
 
     #[test]
