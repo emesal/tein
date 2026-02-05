@@ -257,6 +257,7 @@ mod tests {
         let ctx = Context::new().expect("failed to create context");
         let result = ctx.evaluate("3.14").expect("failed to evaluate");
         match result {
+            #[allow(clippy::approx_constant)]
             Value::Float(f) => assert!((f - 3.14).abs() < 1e-10),
             _ => panic!("expected float, got {:?}", result),
         }
@@ -589,6 +590,7 @@ mod tests {
     fn test_display_roundtrip() {
         let cases = [
             (Value::Integer(42), "42"),
+            #[allow(clippy::approx_constant)]
             (Value::Float(3.14), "3.14"),
             (Value::String("hi".into()), "\"hi\""),
             (Value::Symbol("foo".into()), "foo"),
