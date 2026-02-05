@@ -1,0 +1,19 @@
+# rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# generated files
+vendor/chibi-scheme/include/chibi/install.h
+
+# ide
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# os
+.DS_Store
+Thumbs.db
