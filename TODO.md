@@ -35,68 +35,122 @@
 
 none currently
 
-## 📋 pending (prioritized)
+## 🗺️ roadmap
 
-### medium priority
+### milestone 1 — ergonomics & round-trip
 
-- [ ] **setup r7rs standard environment**
-  - complex: requires static library mechanism
-  - or: enable dynamic loading (conflicts with vendoring)
-  - alternative: manually expose needed functions
-  - impacts: most r7rs functions unavailable currently
+*make the existing api a joy to use before adding new capabilities.*
 
-- [ ] **add more value types**
-  - procedures (scheme functions as values)
+- [ ] **typed extraction helpers on Value**
+  - `v.as_integer()? → i64`, `v.as_string()? → &str`, etc.
+  - eliminates repetitive pattern matching for callers
+  - small, self-contained, high-value
+
+- [ ] **complete bidirectional value bridge**
+  - `to_raw()` for all Value variants (lists, pairs, vectors, symbols)
+  - every type that can come out of scheme can go back in
+  - prerequisite for callbacks and higher-level ffi
+
+- [ ] **multi-expression evaluation**
+  - `evaluate("(define x 5) (+ x 3)")` → returns last value
+  - essential for scripting / config-loading UX
+
+- [ ] **file evaluation**
+  - `ctx.load_file("config.scm")` — evaluate a whole file
+  - natural extension of multi-expression support
+
+### milestone 2 — scheme as extension language
+
+*transform tein from "eval strings" into a real scripting engine.*
+
+- [ ] **scheme→rust callbacks (procedures as values)**
+  - `Value::Procedure` variant holding a callable sexp
+  - `ctx.call(proc, &[args])` invokes a scheme lambda from rust
+  - gateway to using scheme as a true extension language
+
+- [ ] **variadic foreign functions**
+  - `define_fn_variadic(name, f)` — rest-args support
+  - covers more use cases without needing the proc macro yet
+
+- [ ] **higher-level ffi (proc macro)**
+  - `#[scheme_fn] fn add(a: i64, b: i64) -> i64`
+  - automatic argument extraction and return conversion
+  - error propagation from rust to scheme exceptions
+  - depends on: complete value bridge, procedures as values
+
+### milestone 3 — standalone s-expression toolkit
+
+*high-utility, zero-eval tools for config and data.*
+
+- [ ] **s-expression parser (no eval)**
+  - standalone `tein::sexp::parse("(key (nested value))")` → rust AST
+  - no chibi dependency — pure rust parser
+  - feature-gated or separate crate (`tein-sexp`?)
+  - s-exprs as a config format without the interpreter
+
+- [ ] **serde integration** (feature-gated)
+  - `#[derive(Deserialize)]` from s-expressions → rust structs
+  - `#[derive(Serialize)]` from rust structs → s-expressions
+  - depends on: s-expression parser
+  - *chef's kiss* for config files
+
+### milestone 4 — production hardening
+
+*make tein safe for untrusted input and real deployments.*
+
+- [ ] **sandboxed evaluation / resource limits**
+  - cap evaluation time (step limit or wall-clock timeout)
+  - cap memory usage (chibi heap limits are already partially there)
+  - restrict available primitives (allowlist/denylist)
+  - critical for agent DSLs and untrusted scheme
+
+- [ ] **r7rs standard environment**
+  - figure out static library setup (or accept dynamic loading)
+  - alternative: manually expose needed functions incrementally
+  - impacts: most r7rs functions unavailable until this lands
+
+- [ ] **additional value types**
   - bytevectors
   - hash tables
   - ports (for io)
+  - continuations (as opaque values, at minimum)
 
-- [ ] **higher-level ffi**
-  - proc macro: `#[scheme_fn] fn add(a: i64, b: i64) -> i64`
-  - automatic argument extraction and return conversion
-  - error propagation from rust to scheme
+### milestone 5 — reach
 
-- [ ] **add repl example**
-  - interactive scheme session
-  - useful for testing
-  - could use rustyline for nice editing
+*expand where tein can run and how people interact with it.*
 
-### low priority
+- [ ] **REPL example**
+  - interactive scheme session with rustyline
+  - useful for testing and exploration
 
-- [ ] **continuation support**
-  - represent call/cc continuations as values?
-  - challenging but cool
+- [ ] **WASM target**
+  - chibi-scheme can compile via emscripten
+  - tein in the browser / wasm runtimes — unique offering
 
 - [ ] **macro expansion hooks**
   - expose scheme macro system to rust
 
 - [ ] **custom reader extensions**
-  - extend scheme reader syntax
+  - extend scheme reader syntax from rust
 
-## 💡 ideas
+## 💡 ideas (unscheduled)
 
-- **naming scheme modules with norse terms?**
+- **norse naming for modules?**
   - core primitives: `yggdrasil`
   - io: `bifrost` (rainbow bridge)
   - macros: `galdr` (spells)
+  - sexp parser: `rúnar` (runes/letters)
 
-- **proc macro for rust fn → scheme**
-  ```rust
-  #[scheme_fn]
-  fn add(a: i64, b: i64) -> i64 {
-      a + b
-  }
-  // exposes (add x y) in scheme
-  ```
+- **scheme test harness**
+  - run `.scm` test files as cargo integration tests
+  - would make r7rs conformance testing easier
 
-- **s-expression parser separate from evaluation**
-  - `sexp::parse("(+ 1 2)")` → rust ast
-  - useful for config files without full evaluation
+- **context pooling / thread-local contexts**
+  - since contexts are !Send, provide ergonomic per-thread patterns
 
-- **sandboxing / resource limits**
-  - cap evaluation time
-  - cap memory usage
-  - restrict available functions
+- **scheme-defined foreign type protocol**
+  - let rust types register as opaque scheme objects
+  - scheme can hold references, pass them back to rust ffi
 
 ## 🐛 known issues (code review, 2026-02-05)
 
