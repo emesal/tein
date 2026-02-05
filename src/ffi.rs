@@ -101,6 +101,13 @@ unsafe extern "C" {
     pub fn tein_get_true() -> sexp;
     pub fn tein_get_false() -> sexp;
     pub fn tein_get_null() -> sexp;
+    pub fn tein_get_eof() -> sexp;
+
+    // multi-expression evaluation (via tein shim)
+    pub fn tein_sexp_eofp(x: sexp) -> c_int;
+    pub fn tein_sexp_open_input_string(ctx: sexp, str: sexp) -> sexp;
+    pub fn tein_sexp_read(ctx: sexp, port: sexp) -> sexp;
+    pub fn tein_sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp;
 
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
@@ -292,4 +299,31 @@ pub unsafe fn sexp_make_vector(ctx: sexp, len: sexp_uint_t, dflt: sexp) -> sexp 
 #[inline]
 pub unsafe fn sexp_vector_set(vec: sexp, i: sexp_uint_t, val: sexp) {
     unsafe { tein_sexp_vector_set(vec, i, val) }
+}
+
+// eof constant
+#[inline]
+pub unsafe fn get_eof() -> sexp {
+    unsafe { tein_get_eof() }
+}
+
+// multi-expression evaluation
+#[inline]
+pub unsafe fn sexp_eofp(x: sexp) -> c_int {
+    unsafe { tein_sexp_eofp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_open_input_string(ctx: sexp, str: sexp) -> sexp {
+    unsafe { tein_sexp_open_input_string(ctx, str) }
+}
+
+#[inline]
+pub unsafe fn sexp_read(ctx: sexp, port: sexp) -> sexp {
+    unsafe { tein_sexp_read(ctx, port) }
+}
+
+#[inline]
+pub unsafe fn sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp {
+    unsafe { tein_sexp_evaluate(ctx, obj, env) }
 }

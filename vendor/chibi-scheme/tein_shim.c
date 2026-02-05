@@ -70,3 +70,12 @@ sexp tein_sexp_make_vector(sexp ctx, sexp_uint_t len, sexp dflt) {
 void tein_sexp_vector_set(sexp vec, sexp_uint_t i, sexp val) {
     sexp_vector_data(vec)[i] = val;
 }
+
+// multi-expression evaluation support
+sexp tein_get_eof() { return SEXP_EOF; }
+int tein_sexp_eofp(sexp x) { return x == SEXP_EOF; }
+sexp tein_sexp_open_input_string(sexp ctx, sexp str) {
+    return sexp_open_input_string(ctx, str);
+}
+sexp tein_sexp_read(sexp ctx, sexp port) { return sexp_read(ctx, port); }
+sexp tein_sexp_evaluate(sexp ctx, sexp obj, sexp env) { return sexp_eval(ctx, obj, env); }

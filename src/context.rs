@@ -68,7 +68,11 @@ impl Context {
         }
     }
 
-    /// evaluate a scheme expression string
+    /// evaluate one or more scheme expressions
+    ///
+    /// evaluates all expressions in the string sequentially, returning the
+    /// result of the last expression. this enables natural scripting patterns
+    /// like defining values and then using them.
     ///
     /// # examples
     ///
@@ -77,8 +81,14 @@ impl Context {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ctx = Context::new()?;
+    ///
+    /// // single expression
     /// let result = ctx.evaluate("(+ 1 2 3)")?;
     /// assert_eq!(result, Value::Integer(6));
+    ///
+    /// // multiple expressions - returns the last result
+    /// let result = ctx.evaluate("(define x 5) (+ x 3)")?;
+    /// assert_eq!(result, Value::Integer(8));
     /// # Ok(())
     /// # }
     /// ```
@@ -88,12 +98,40 @@ impl Context {
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
-            let result = ffi::sexp_eval_string(
-                self.ctx,
-                c_str.as_ptr(),
-                code.len() as ffi::sexp_sint_t,
-                env,
-            );
+
+            // create a scheme string from the code
+            let scheme_str =
+                ffi::sexp_c_str(self.ctx, c_str.as_ptr(), code.len() as ffi::sexp_sint_t);
+
+            // open an input port on the string
+            let port = ffi::sexp_open_input_string(self.ctx, scheme_str);
+            if ffi::sexp_exceptionp(port) != 0 {
+                return Value::from_raw(self.ctx, port);
+            }
+
+            // read and evaluate expressions until EOF
+            let mut result = ffi::get_void();
+            loop {
+                let expr = ffi::sexp_read(self.ctx, port);
+
+                // EOF means we're done
+                if ffi::sexp_eofp(expr) != 0 {
+                    break;
+                }
+
+                // read error
+                if ffi::sexp_exceptionp(expr) != 0 {
+                    return Value::from_raw(self.ctx, expr);
+                }
+
+                // evaluate the expression
+                result = ffi::sexp_evaluate(self.ctx, expr, env);
+
+                // evaluation error
+                if ffi::sexp_exceptionp(result) != 0 {
+                    return Value::from_raw(self.ctx, result);
+                }
+            }
 
             Value::from_raw(self.ctx, result)
         }
@@ -229,6 +267,57 @@ mod tests {
             Value::Integer(n) => assert_eq!(n, 6),
             _ => panic!("expected integer, got {:?}", result),
         }
+    }
+
+    // --- multi-expression evaluation ---
+
+    #[test]
+    fn test_multi_expression_define_and_use() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx
+            .evaluate("(define x 5) (+ x 3)")
+            .expect("failed to evaluate");
+        assert_eq!(result, Value::Integer(8));
+    }
+
+    #[test]
+    fn test_multi_expression_returns_last() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("1 2 3").expect("failed to evaluate");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_multi_expression_with_procedure() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx
+            .evaluate("(define (square x) (* x x)) (square 7)")
+            .expect("failed to evaluate");
+        assert_eq!(result, Value::Integer(49));
+    }
+
+    #[test]
+    fn test_multi_expression_error_stops_early() {
+        let ctx = Context::new().expect("failed to create context");
+        // error in first expression should prevent second from running
+        let err = ctx.evaluate("(car 42) (+ 1 2)").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("pair"), "expected pair error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("").expect("failed to evaluate");
+        // empty input returns void/unspecified
+        assert!(result.is_unspecified());
+    }
+
+    #[test]
+    fn test_whitespace_only() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("   \n\t  ").expect("failed to evaluate");
+        assert!(result.is_unspecified());
     }
 
     #[test]
@@ -674,7 +763,8 @@ mod tests {
                     Value::Integer(2),
                     Value::Integer(3),
                 ]);
-                list.to_raw(ctx_ptr).unwrap_or_else(|_| crate::ffi::get_void())
+                list.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
             }
         }
 
@@ -705,7 +795,8 @@ mod tests {
                     Box::new(Value::Symbol("key".into())),
                     Box::new(Value::Integer(42)),
                 );
-                pair.to_raw(ctx_ptr).unwrap_or_else(|_| crate::ffi::get_void())
+                pair.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
             }
         }
 
@@ -730,11 +821,9 @@ mod tests {
             _n: crate::ffi::sexp_sint_t,
         ) -> crate::ffi::sexp {
             unsafe {
-                let vec = Value::Vector(vec![
-                    Value::String("a".into()),
-                    Value::String("b".into()),
-                ]);
-                vec.to_raw(ctx_ptr).unwrap_or_else(|_| crate::ffi::get_void())
+                let vec = Value::Vector(vec![Value::String("a".into()), Value::String("b".into())]);
+                vec.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
             }
         }
 
