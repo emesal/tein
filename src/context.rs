@@ -1,6 +1,10 @@
 //! scheme evaluation context
 
-use crate::{error::{Error, Result}, ffi, Value};
+use crate::{
+    Value,
+    error::{Error, Result},
+    ffi,
+};
 use std::ffi::CString;
 
 /// a scheme evaluation context
@@ -79,9 +83,8 @@ impl Context {
     /// # }
     /// ```
     pub fn evaluate(&self, code: &str) -> Result<Value> {
-        let c_str = CString::new(code).map_err(|_| {
-            Error::EvalError("code contains null bytes".to_string())
-        })?;
+        let c_str = CString::new(code)
+            .map_err(|_| Error::EvalError("code contains null bytes".to_string()))?;
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
@@ -124,7 +127,13 @@ impl Context {
     pub fn define_fn2(
         &self,
         name: &str,
-        f: unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp, ffi::sexp) -> ffi::sexp,
+        f: unsafe extern "C" fn(
+            ffi::sexp,
+            ffi::sexp,
+            ffi::sexp_sint_t,
+            ffi::sexp,
+            ffi::sexp,
+        ) -> ffi::sexp,
     ) -> Result<()> {
         self.define_foreign(name, 2, f as *const std::ffi::c_void)
     }
@@ -135,16 +144,22 @@ impl Context {
     pub fn define_fn3(
         &self,
         name: &str,
-        f: unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp, ffi::sexp, ffi::sexp) -> ffi::sexp,
+        f: unsafe extern "C" fn(
+            ffi::sexp,
+            ffi::sexp,
+            ffi::sexp_sint_t,
+            ffi::sexp,
+            ffi::sexp,
+            ffi::sexp,
+        ) -> ffi::sexp,
     ) -> Result<()> {
         self.define_foreign(name, 3, f as *const std::ffi::c_void)
     }
 
     /// internal: register a foreign function with chibi
     fn define_foreign(&self, name: &str, num_args: i32, f: *const std::ffi::c_void) -> Result<()> {
-        let c_name = CString::new(name).map_err(|_| {
-            Error::EvalError("function name contains null bytes".to_string())
-        })?;
+        let c_name = CString::new(name)
+            .map_err(|_| Error::EvalError("function name contains null bytes".to_string()))?;
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
@@ -152,8 +167,9 @@ impl Context {
             // based on the opcode's num_args — this is safe because we match arity.
             // the transmute converts *const c_void to the expected Option<extern "C" fn>
             // that chibi's FFI registration expects.
-            let f_typed: Option<unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp> =
-                std::mem::transmute::<*const std::ffi::c_void, _>(f);
+            let f_typed: Option<
+                unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
+            > = std::mem::transmute::<*const std::ffi::c_void, _>(f);
             let result = ffi::sexp_define_foreign(
                 self.ctx,
                 env,
@@ -165,7 +181,8 @@ impl Context {
 
             if ffi::sexp_exceptionp(result) != 0 {
                 return Err(Error::EvalError(format!(
-                    "failed to define foreign function '{}'", name
+                    "failed to define foreign function '{}'",
+                    name
                 )));
             }
         }
@@ -217,7 +234,9 @@ mod tests {
     #[test]
     fn test_string_evaluation() {
         let ctx = Context::new().expect("failed to create context");
-        let result = ctx.evaluate(r#""hello world""#).expect("failed to evaluate");
+        let result = ctx
+            .evaluate(r#""hello world""#)
+            .expect("failed to evaluate");
         match result {
             Value::String(s) => assert_eq!(s, "hello world"),
             _ => panic!("expected string, got {:?}", result),
@@ -300,7 +319,9 @@ mod tests {
     #[test]
     fn test_nested_list() {
         let ctx = Context::new().expect("failed to create context");
-        let result = ctx.evaluate("(quote (a (b c) d))").expect("failed to evaluate");
+        let result = ctx
+            .evaluate("(quote (a (b c) d))")
+            .expect("failed to evaluate");
         match result {
             Value::List(items) => {
                 assert_eq!(items.len(), 3);
@@ -315,7 +336,9 @@ mod tests {
     #[test]
     fn test_vector() {
         let ctx = Context::new().expect("failed to create context");
-        let result = ctx.evaluate("(make-vector 3 0)").expect("failed to evaluate");
+        let result = ctx
+            .evaluate("(make-vector 3 0)")
+            .expect("failed to evaluate");
         match result {
             Value::Vector(items) => {
                 assert_eq!(items.len(), 3);
@@ -340,7 +363,9 @@ mod tests {
     #[test]
     fn test_empty_vector() {
         let ctx = Context::new().expect("failed to create context");
-        let result = ctx.evaluate("(make-vector 0 #f)").expect("failed to evaluate");
+        let result = ctx
+            .evaluate("(make-vector 0 #f)")
+            .expect("failed to evaluate");
         match result {
             Value::Vector(items) => assert_eq!(items.len(), 0),
             _ => panic!("expected empty vector, got {:?}", result),
@@ -357,7 +382,8 @@ mod tests {
         // should contain more than just "scheme exception occurred"
         assert!(
             msg.len() > "scheme evaluation error: ".len() + 5,
-            "error message too generic: {}", msg
+            "error message too generic: {}",
+            msg
         );
     }
 
@@ -366,7 +392,11 @@ mod tests {
         let ctx = Context::new().expect("failed to create context");
         let err = ctx.evaluate("undefined-variable").unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("undefined"), "expected 'undefined' in: {}", msg);
+        assert!(
+            msg.contains("undefined"),
+            "expected 'undefined' in: {}",
+            msg
+        );
     }
 
     // --- foreign functions ---
@@ -380,13 +410,14 @@ mod tests {
             arg: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
-            let n = crate::ffi::sexp_unbox_fixnum(arg);
-            crate::ffi::sexp_make_fixnum(n + 42)
+                let n = crate::ffi::sexp_unbox_fixnum(arg);
+                crate::ffi::sexp_make_fixnum(n + 42)
             }
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn1("add42", add_forty_two).expect("failed to define fn");
+        ctx.define_fn1("add42", add_forty_two)
+            .expect("failed to define fn");
         let result = ctx.evaluate("(add42 8)").expect("failed to evaluate");
         match result {
             Value::Integer(n) => assert_eq!(n, 50),
@@ -402,9 +433,9 @@ mod tests {
             _n: crate::ffi::sexp_sint_t,
         ) -> crate::ffi::sexp {
             unsafe {
-            let s = "hello from rust";
-            let c_str = std::ffi::CString::new(s).unwrap();
-            crate::ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as crate::ffi::sexp_sint_t)
+                let s = "hello from rust";
+                let c_str = std::ffi::CString::new(s).unwrap();
+                crate::ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as crate::ffi::sexp_sint_t)
             }
         }
 
@@ -427,14 +458,15 @@ mod tests {
             b: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
-            let x = crate::ffi::sexp_unbox_fixnum(a);
-            let y = crate::ffi::sexp_unbox_fixnum(b);
-            crate::ffi::sexp_make_fixnum(x * y)
+                let x = crate::ffi::sexp_unbox_fixnum(a);
+                let y = crate::ffi::sexp_unbox_fixnum(b);
+                crate::ffi::sexp_make_fixnum(x * y)
             }
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn2("rust-mul", multiply).expect("failed to define fn");
+        ctx.define_fn2("rust-mul", multiply)
+            .expect("failed to define fn");
         let result = ctx.evaluate("(rust-mul 6 7)").expect("failed to evaluate");
         match result {
             Value::Integer(n) => assert_eq!(n, 42),
@@ -452,14 +484,17 @@ mod tests {
             arg: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
-            let n = crate::ffi::sexp_unbox_fixnum(arg);
-            crate::ffi::sexp_make_fixnum(n * n)
+                let n = crate::ffi::sexp_unbox_fixnum(arg);
+                crate::ffi::sexp_make_fixnum(n * n)
             }
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn1("square", square).expect("failed to define fn");
-        let result = ctx.evaluate("(+ (square 3) (square 4))").expect("failed to evaluate");
+        ctx.define_fn1("square", square)
+            .expect("failed to define fn");
+        let result = ctx
+            .evaluate("(+ (square 3) (square 4))")
+            .expect("failed to evaluate");
         match result {
             Value::Integer(n) => assert_eq!(n, 25), // 9 + 16
             _ => panic!("expected integer, got {:?}", result),
@@ -481,9 +516,15 @@ mod tests {
             code.push(')');
         }
         code.push(')');
-        let result = ctx.evaluate(&code).expect("failed to evaluate deeply nested list");
+        let result = ctx
+            .evaluate(&code)
+            .expect("failed to evaluate deeply nested list");
         // outermost should be a list
-        assert!(matches!(result, Value::List(_)), "expected list, got {:?}", result);
+        assert!(
+            matches!(result, Value::List(_)),
+            "expected list, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -501,17 +542,23 @@ mod tests {
         for _ in 0..depth {
             code.push(')');
         }
-        let result = ctx.evaluate(&code).expect("failed to evaluate nested vector");
-        assert!(matches!(result, Value::Vector(_)), "expected vector, got {:?}", result);
+        let result = ctx
+            .evaluate(&code)
+            .expect("failed to evaluate nested vector");
+        assert!(
+            matches!(result, Value::Vector(_)),
+            "expected vector, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_mixed_nested_structures() {
         let ctx = Context::new().expect("failed to create context");
         // list containing vectors containing lists
-        let result = ctx.evaluate(
-            "(quote ((1 2) (3 4)))"
-        ).expect("failed to evaluate");
+        let result = ctx
+            .evaluate("(quote ((1 2) (3 4)))")
+            .expect("failed to evaluate");
         match &result {
             Value::List(items) => {
                 assert_eq!(items.len(), 2);
@@ -522,8 +569,11 @@ mod tests {
         }
 
         // vector inside list
-        ctx.evaluate("(define test-vec (make-vector 3 99))").expect("define vec");
-        let result = ctx.evaluate("(cons test-vec (quote ()))").expect("eval cons");
+        ctx.evaluate("(define test-vec (make-vector 3 99))")
+            .expect("define vec");
+        let result = ctx
+            .evaluate("(cons test-vec (quote ()))")
+            .expect("eval cons");
         match &result {
             Value::List(items) => {
                 assert_eq!(items.len(), 1);

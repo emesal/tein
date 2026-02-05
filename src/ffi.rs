@@ -16,6 +16,7 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 #![allow(missing_docs)]
+#![allow(clippy::missing_safety_doc)]
 
 use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 

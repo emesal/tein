@@ -1,6 +1,9 @@
 //! scheme value representation
 
-use crate::{error::{Error, Result}, ffi};
+use crate::{
+    error::{Error, Result},
+    ffi,
+};
 use std::fmt;
 
 /// maximum nesting depth for recursive value conversion.
@@ -86,86 +89,86 @@ impl Value {
         }
 
         unsafe {
-        if ffi::sexp_exceptionp(raw) != 0 {
-            return Err(Error::EvalError(Self::extract_exception_message(ctx, raw)));
-        }
-
-        // check floats before integers because sexp_integerp matches some floats
-        if ffi::sexp_flonump(raw) != 0 {
-            let f = ffi::sexp_flonum_value(raw);
-            return Ok(Value::Float(f));
-        }
-
-        if ffi::sexp_integerp(raw) != 0 {
-            let i = ffi::sexp_unbox_fixnum(raw);
-            return Ok(Value::Integer(i as i64));
-        }
-
-        if ffi::sexp_booleanp(raw) != 0 {
-            let true_val = ffi::get_true();
-            return Ok(Value::Boolean(raw == true_val));
-        }
-
-        if ffi::sexp_nullp(raw) != 0 {
-            return Ok(Value::Nil);
-        }
-
-        if raw == ffi::get_void() {
-            return Ok(Value::Unspecified);
-        }
-
-        if ffi::sexp_stringp(raw) != 0 {
-            let str_ptr = ffi::sexp_string_data(raw);
-            let str_len = ffi::sexp_string_size(raw);
-            let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
-            let s = String::from_utf8(bytes.to_vec())?;
-            return Ok(Value::String(s));
-        }
-
-        if ffi::sexp_symbolp(raw) != 0 {
-            let str_sexp = ffi::sexp_symbol_to_string(ctx, raw);
-            let str_ptr = ffi::sexp_string_data(str_sexp);
-            let str_len = ffi::sexp_string_size(str_sexp);
-            let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
-            let s = String::from_utf8(bytes.to_vec())?;
-            return Ok(Value::Symbol(s));
-        }
-
-        if ffi::sexp_vectorp(raw) != 0 {
-            let len = ffi::sexp_vector_length(raw) as usize;
-            let data = ffi::sexp_vector_data(raw);
-            let mut items = Vec::with_capacity(len);
-            for i in 0..len {
-                let elem = *data.add(i);
-                items.push(Value::from_raw_depth(ctx, elem, depth + 1)?);
+            if ffi::sexp_exceptionp(raw) != 0 {
+                return Err(Error::EvalError(Self::extract_exception_message(ctx, raw)));
             }
-            return Ok(Value::Vector(items));
-        }
 
-        if ffi::sexp_pairp(raw) != 0 {
-            if Self::is_proper_list(raw) {
-                let mut items = Vec::new();
-                let mut current = raw;
+            // check floats before integers because sexp_integerp matches some floats
+            if ffi::sexp_flonump(raw) != 0 {
+                let f = ffi::sexp_flonum_value(raw);
+                return Ok(Value::Float(f));
+            }
 
-                while ffi::sexp_pairp(current) != 0 {
-                    let car = ffi::sexp_car(current);
-                    items.push(Value::from_raw_depth(ctx, car, depth + 1)?);
-                    current = ffi::sexp_cdr(current);
+            if ffi::sexp_integerp(raw) != 0 {
+                let i = ffi::sexp_unbox_fixnum(raw);
+                return Ok(Value::Integer(i as i64));
+            }
+
+            if ffi::sexp_booleanp(raw) != 0 {
+                let true_val = ffi::get_true();
+                return Ok(Value::Boolean(raw == true_val));
+            }
+
+            if ffi::sexp_nullp(raw) != 0 {
+                return Ok(Value::Nil);
+            }
+
+            if raw == ffi::get_void() {
+                return Ok(Value::Unspecified);
+            }
+
+            if ffi::sexp_stringp(raw) != 0 {
+                let str_ptr = ffi::sexp_string_data(raw);
+                let str_len = ffi::sexp_string_size(raw);
+                let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
+                let s = String::from_utf8(bytes.to_vec())?;
+                return Ok(Value::String(s));
+            }
+
+            if ffi::sexp_symbolp(raw) != 0 {
+                let str_sexp = ffi::sexp_symbol_to_string(ctx, raw);
+                let str_ptr = ffi::sexp_string_data(str_sexp);
+                let str_len = ffi::sexp_string_size(str_sexp);
+                let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
+                let s = String::from_utf8(bytes.to_vec())?;
+                return Ok(Value::Symbol(s));
+            }
+
+            if ffi::sexp_vectorp(raw) != 0 {
+                let len = ffi::sexp_vector_length(raw) as usize;
+                let data = ffi::sexp_vector_data(raw);
+                let mut items = Vec::with_capacity(len);
+                for i in 0..len {
+                    let elem = *data.add(i);
+                    items.push(Value::from_raw_depth(ctx, elem, depth + 1)?);
                 }
-
-                return Ok(Value::List(items));
-            } else {
-                let car = ffi::sexp_car(raw);
-                let cdr = ffi::sexp_cdr(raw);
-                return Ok(Value::Pair(
-                    Box::new(Value::from_raw_depth(ctx, car, depth + 1)?),
-                    Box::new(Value::from_raw_depth(ctx, cdr, depth + 1)?),
-                ));
+                return Ok(Value::Vector(items));
             }
-        }
 
-        // fallback for other types
-        Ok(Value::Other("<unhandled-type>".to_string()))
+            if ffi::sexp_pairp(raw) != 0 {
+                if Self::is_proper_list(raw) {
+                    let mut items = Vec::new();
+                    let mut current = raw;
+
+                    while ffi::sexp_pairp(current) != 0 {
+                        let car = ffi::sexp_car(current);
+                        items.push(Value::from_raw_depth(ctx, car, depth + 1)?);
+                        current = ffi::sexp_cdr(current);
+                    }
+
+                    return Ok(Value::List(items));
+                } else {
+                    let car = ffi::sexp_car(raw);
+                    let cdr = ffi::sexp_cdr(raw);
+                    return Ok(Value::Pair(
+                        Box::new(Value::from_raw_depth(ctx, car, depth + 1)?),
+                        Box::new(Value::from_raw_depth(ctx, cdr, depth + 1)?),
+                    ));
+                }
+            }
+
+            // fallback for other types
+            Ok(Value::Other("<unhandled-type>".to_string()))
         }
     }
 
@@ -175,51 +178,51 @@ impl Value {
     /// on circular lists constructed via set-cdr!.
     unsafe fn is_proper_list(sexp: ffi::sexp) -> bool {
         unsafe {
-        let mut tortoise = sexp;
-        let mut hare = sexp;
+            let mut tortoise = sexp;
+            let mut hare = sexp;
 
-        loop {
-            if ffi::sexp_pairp(hare) == 0 {
-                return ffi::sexp_nullp(hare) != 0;
+            loop {
+                if ffi::sexp_pairp(hare) == 0 {
+                    return ffi::sexp_nullp(hare) != 0;
+                }
+                hare = ffi::sexp_cdr(hare);
+
+                if ffi::sexp_pairp(hare) == 0 {
+                    return ffi::sexp_nullp(hare) != 0;
+                }
+                hare = ffi::sexp_cdr(hare);
+
+                tortoise = ffi::sexp_cdr(tortoise);
+
+                if hare == tortoise {
+                    return false; // cycle detected
+                }
             }
-            hare = ffi::sexp_cdr(hare);
-
-            if ffi::sexp_pairp(hare) == 0 {
-                return ffi::sexp_nullp(hare) != 0;
-            }
-            hare = ffi::sexp_cdr(hare);
-
-            tortoise = ffi::sexp_cdr(tortoise);
-
-            if hare == tortoise {
-                return false; // cycle detected
-            }
-        }
         }
     }
 
     /// extract a human-readable message from a chibi exception
     unsafe fn extract_exception_message(ctx: ffi::sexp, exn: ffi::sexp) -> String {
         unsafe {
-        let msg_sexp = ffi::sexp_exception_message(exn);
-        let message = if ffi::sexp_stringp(msg_sexp) != 0 {
-            let ptr = ffi::sexp_string_data(msg_sexp);
-            let len = ffi::sexp_string_size(msg_sexp) as usize;
-            let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-            std::string::String::from_utf8_lossy(bytes).into_owned()
-        } else {
-            "unknown error".to_owned()
-        };
+            let msg_sexp = ffi::sexp_exception_message(exn);
+            let message = if ffi::sexp_stringp(msg_sexp) != 0 {
+                let ptr = ffi::sexp_string_data(msg_sexp);
+                let len = ffi::sexp_string_size(msg_sexp) as usize;
+                let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+                std::string::String::from_utf8_lossy(bytes).into_owned()
+            } else {
+                "unknown error".to_owned()
+            };
 
-        // append irritants if present (the values that caused the error)
-        let irritants = ffi::sexp_exception_irritants(exn);
-        if ffi::sexp_pairp(irritants) != 0 {
-            if let Ok(val) = Value::from_raw(ctx, irritants) {
+            // append irritants if present (the values that caused the error)
+            let irritants = ffi::sexp_exception_irritants(exn);
+            if ffi::sexp_pairp(irritants) != 0
+                && let Ok(val) = Value::from_raw(ctx, irritants)
+            {
                 return format!("{}: {}", message, val);
             }
-        }
 
-        message
+            message
         }
     }
 
@@ -231,41 +234,50 @@ impl Value {
     /// currently supports: Integer, Float, Boolean, String, Symbol, Nil, Unspecified.
     /// returns an error for List, Pair, Vector, and Other (use the raw API for these).
     ///
-    /// # safety
-    /// ctx must be a valid chibi context pointer
+    /// # Safety
+    ///
+    /// `ctx` must be a valid, live chibi-scheme context pointer.
     pub unsafe fn to_raw(&self, ctx: ffi::sexp) -> Result<ffi::sexp> {
         unsafe {
-        match self {
-            Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
-            Value::Float(f) => Ok(ffi::sexp_make_flonum(ctx, *f)),
-            Value::Boolean(b) => Ok(ffi::sexp_make_boolean(*b)),
-            Value::String(s) => {
-                let c_str = std::ffi::CString::new(s.as_str()).map_err(|_| {
-                    Error::TypeError("string contains null bytes".to_string())
-                })?;
-                Ok(ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t))
+            match self {
+                Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
+                Value::Float(f) => Ok(ffi::sexp_make_flonum(ctx, *f)),
+                Value::Boolean(b) => Ok(ffi::sexp_make_boolean(*b)),
+                Value::String(s) => {
+                    let c_str = std::ffi::CString::new(s.as_str())
+                        .map_err(|_| Error::TypeError("string contains null bytes".to_string()))?;
+                    Ok(ffi::sexp_c_str(
+                        ctx,
+                        c_str.as_ptr(),
+                        s.len() as ffi::sexp_sint_t,
+                    ))
+                }
+                Value::Symbol(s) => {
+                    let c_str = std::ffi::CString::new(s.as_str())
+                        .map_err(|_| Error::TypeError("symbol contains null bytes".to_string()))?;
+                    Ok(ffi::sexp_intern(
+                        ctx,
+                        c_str.as_ptr(),
+                        s.len() as ffi::sexp_sint_t,
+                    ))
+                }
+                Value::Nil => Ok(ffi::get_null()),
+                Value::Unspecified => Ok(ffi::get_void()),
+                Value::List(_) => Err(Error::TypeError(
+                    "cannot convert List to raw sexp (use raw API for compound types)".to_string(),
+                )),
+                Value::Pair(_, _) => Err(Error::TypeError(
+                    "cannot convert Pair to raw sexp (use raw API for compound types)".to_string(),
+                )),
+                Value::Vector(_) => Err(Error::TypeError(
+                    "cannot convert Vector to raw sexp (use raw API for compound types)"
+                        .to_string(),
+                )),
+                Value::Other(desc) => Err(Error::TypeError(format!(
+                    "cannot convert Other({}) to raw sexp",
+                    desc,
+                ))),
             }
-            Value::Symbol(s) => {
-                let c_str = std::ffi::CString::new(s.as_str()).map_err(|_| {
-                    Error::TypeError("symbol contains null bytes".to_string())
-                })?;
-                Ok(ffi::sexp_intern(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t))
-            }
-            Value::Nil => Ok(ffi::get_null()),
-            Value::Unspecified => Ok(ffi::get_void()),
-            Value::List(_) => Err(Error::TypeError(
-                "cannot convert List to raw sexp (use raw API for compound types)".to_string(),
-            )),
-            Value::Pair(_, _) => Err(Error::TypeError(
-                "cannot convert Pair to raw sexp (use raw API for compound types)".to_string(),
-            )),
-            Value::Vector(_) => Err(Error::TypeError(
-                "cannot convert Vector to raw sexp (use raw API for compound types)".to_string(),
-            )),
-            Value::Other(desc) => Err(Error::TypeError(format!(
-                "cannot convert Other({}) to raw sexp", desc,
-            ))),
-        }
         }
     }
 }

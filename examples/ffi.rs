@@ -3,15 +3,11 @@
 use tein::{Context, raw};
 
 // 0 args: returns a greeting string
-unsafe extern "C" fn greet(
-    ctx: raw::sexp,
-    _self: raw::sexp,
-    _n: raw::sexp_sint_t,
-) -> raw::sexp {
+unsafe extern "C" fn greet(ctx: raw::sexp, _self: raw::sexp, _n: raw::sexp_sint_t) -> raw::sexp {
     unsafe {
-    let s = "hail from rust!";
-    let c_str = std::ffi::CString::new(s).unwrap();
-    raw::sexp_c_str(ctx, c_str.as_ptr(), s.len() as raw::sexp_sint_t)
+        let s = "hail from rust!";
+        let c_str = std::ffi::CString::new(s).unwrap();
+        raw::sexp_c_str(ctx, c_str.as_ptr(), s.len() as raw::sexp_sint_t)
     }
 }
 
@@ -23,8 +19,8 @@ unsafe extern "C" fn square(
     arg: raw::sexp,
 ) -> raw::sexp {
     unsafe {
-    let n = raw::sexp_unbox_fixnum(arg);
-    raw::sexp_make_fixnum(n * n)
+        let n = raw::sexp_unbox_fixnum(arg);
+        raw::sexp_make_fixnum(n * n)
     }
 }
 
@@ -37,9 +33,9 @@ unsafe extern "C" fn rust_add(
     b: raw::sexp,
 ) -> raw::sexp {
     unsafe {
-    let x = raw::sexp_unbox_fixnum(a);
-    let y = raw::sexp_unbox_fixnum(b);
-    raw::sexp_make_fixnum(x + y)
+        let x = raw::sexp_unbox_fixnum(a);
+        let y = raw::sexp_unbox_fixnum(b);
+        raw::sexp_make_fixnum(x + y)
     }
 }
 

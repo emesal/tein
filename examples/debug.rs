@@ -1,4 +1,4 @@
-use tein::{Context};
+use tein::Context;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Context::new()?;
