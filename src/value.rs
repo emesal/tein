@@ -282,6 +282,84 @@ impl Value {
     }
 }
 
+// --- typed extraction helpers ---
+
+impl Value {
+    /// extract as integer, if this value is an `Integer`
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            Value::Integer(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// extract as float, if this value is a `Float`
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// extract as string slice, if this value is a `String`
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// extract as symbol name, if this value is a `Symbol`
+    pub fn as_symbol(&self) -> Option<&str> {
+        match self {
+            Value::Symbol(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// extract as boolean, if this value is a `Boolean`
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Boolean(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// extract as list slice, if this value is a `List`
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(items) => Some(items.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// extract as pair references, if this value is a `Pair`
+    pub fn as_pair(&self) -> Option<(&Value, &Value)> {
+        match self {
+            Value::Pair(car, cdr) => Some((car.as_ref(), cdr.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// extract as vector slice, if this value is a `Vector`
+    pub fn as_vector(&self) -> Option<&[Value]> {
+        match self {
+            Value::Vector(items) => Some(items.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// returns true if this value is `Nil`
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Value::Nil)
+    }
+
+    /// returns true if this value is `Unspecified`
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, Value::Unspecified)
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

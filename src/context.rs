@@ -584,6 +584,81 @@ mod tests {
         }
     }
 
+    // --- typed extraction helpers ---
+
+    #[test]
+    fn test_as_integer() {
+        let v = Value::Integer(42);
+        assert_eq!(v.as_integer(), Some(42));
+        assert_eq!(Value::Float(3.14).as_integer(), None);
+    }
+
+    #[test]
+    fn test_as_float() {
+        let v = Value::Float(2.718);
+        assert!((v.as_float().unwrap() - 2.718).abs() < 1e-10);
+        assert_eq!(Value::Integer(42).as_float(), None);
+    }
+
+    #[test]
+    fn test_as_string() {
+        let v = Value::String("hello".into());
+        assert_eq!(v.as_string(), Some("hello"));
+        assert_eq!(Value::Symbol("hello".into()).as_string(), None);
+    }
+
+    #[test]
+    fn test_as_symbol() {
+        let v = Value::Symbol("foo".into());
+        assert_eq!(v.as_symbol(), Some("foo"));
+        assert_eq!(Value::String("foo".into()).as_symbol(), None);
+    }
+
+    #[test]
+    fn test_as_bool() {
+        assert_eq!(Value::Boolean(true).as_bool(), Some(true));
+        assert_eq!(Value::Boolean(false).as_bool(), Some(false));
+        assert_eq!(Value::Integer(1).as_bool(), None);
+    }
+
+    #[test]
+    fn test_as_list() {
+        let v = Value::List(vec![Value::Integer(1), Value::Integer(2)]);
+        let items = v.as_list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_integer(), Some(1));
+        assert_eq!(Value::Vector(vec![]).as_list(), None);
+    }
+
+    #[test]
+    fn test_as_pair() {
+        let v = Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
+        let (car, cdr) = v.as_pair().unwrap();
+        assert_eq!(car.as_integer(), Some(1));
+        assert_eq!(cdr.as_integer(), Some(2));
+        assert_eq!(Value::List(vec![]).as_pair(), None);
+    }
+
+    #[test]
+    fn test_as_vector() {
+        let v = Value::Vector(vec![Value::Integer(1), Value::Integer(2)]);
+        let items = v.as_vector().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(Value::List(vec![]).as_vector(), None);
+    }
+
+    #[test]
+    fn test_is_nil() {
+        assert!(Value::Nil.is_nil());
+        assert!(!Value::List(vec![]).is_nil());
+    }
+
+    #[test]
+    fn test_is_unspecified() {
+        assert!(Value::Unspecified.is_unspecified());
+        assert!(!Value::Nil.is_unspecified());
+    }
+
     // --- value display ---
 
     #[test]
