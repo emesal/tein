@@ -10,12 +10,15 @@ use std::ffi::CString;
 ///
 /// # examples
 ///
-/// ```ignore
-/// use tein::Context;
+/// ```
+/// use tein::{Context, Value};
 ///
-/// let ctx = Context::new();
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let ctx = Context::new()?;
 /// let result = ctx.evaluate("(+ 1 2 3)")?;
 /// assert_eq!(result, Value::Integer(6));
+/// # Ok(())
+/// # }
 /// ```
 pub struct Context {
     ctx: ffi::sexp,
@@ -65,9 +68,15 @@ impl Context {
     ///
     /// # examples
     ///
-    /// ```ignore
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ctx = Context::new()?;
     /// let result = ctx.evaluate("(+ 1 2 3)")?;
+    /// assert_eq!(result, Value::Integer(6));
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn evaluate(&self, code: &str) -> Result<Value> {
         let c_str = CString::new(code).map_err(|_| {
@@ -136,19 +145,22 @@ impl Context {
         let c_name = CString::new(name).map_err(|_| {
             Error::EvalError("function name contains null bytes".to_string())
         })?;
-        let c_fname = c_name.clone();
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
             // chibi stores the function pointer as sexp_proc1 and casts at call time
-            // based on the opcode's num_args — this is safe because we match arity
+            // based on the opcode's num_args — this is safe because we match arity.
+            // the transmute converts *const c_void to the expected Option<extern "C" fn>
+            // that chibi's FFI registration expects.
+            let f_typed: Option<unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp> =
+                std::mem::transmute::<*const std::ffi::c_void, _>(f);
             let result = ffi::sexp_define_foreign(
                 self.ctx,
                 env,
                 c_name.as_ptr(),
                 num_args as std::os::raw::c_int,
-                c_fname.as_ptr(),
-                std::mem::transmute(f),
+                c_name.as_ptr(),
+                f_typed,
             );
 
             if ffi::sexp_exceptionp(result) != 0 {

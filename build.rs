@@ -38,9 +38,13 @@ fn main() {
 
     build.compile("chibi");
 
-    // tell cargo to rerun if chibi sources change
-    println!("cargo:rerun-if-changed={}", chibi_dir);
-    println!("cargo:rerun-if-changed={}", include_dir);
+    // tell cargo to rerun if chibi sources or shim change
+    for src in &sources {
+        println!("cargo:rerun-if-changed={}/{}", chibi_dir, src);
+    }
+    println!("cargo:rerun-if-changed={}/chibi/sexp.h", include_dir);
+    println!("cargo:rerun-if-changed={}/chibi/features.h", include_dir);
+    println!("cargo:rerun-if-changed=build.rs");
 }
 
 fn generate_install_h(include_dir: &str) {

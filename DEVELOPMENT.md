@@ -33,13 +33,42 @@
   - detailed error messages (extracts exception message + irritants)
 
 - **testing**
-  - 19 unit tests covering all types, vectors, errors, and ffi
+  - 20 unit tests covering all types, vectors, errors, and ffi
+  - 3 doc-tests (lib.rs, Context, Context::evaluate)
   - working examples (`basic.rs`, `floats.rs`, `debug.rs`, `ffi.rs`)
   - all tests passing ✓
 
+- **code review fixes (2026-02-05)**
+  - fixed critical type safety issue (sexp_uint_t signedness)
+  - removed unsound Send impl, documented !Send + !Sync rationale
+  - added tortoise-and-hare cycle detection for circular lists
+  - depth limit (MAX_DEPTH = 10_000) prevents stack overflow
+  - derived PartialEq on Value for ergonomic testing
+  - to_raw returns Result, errors clearly on unsupported types
+  - fixed broken rustdoc links
+  - string Display properly escapes special chars
+  - transmute has explicit type annotations
+  - comprehensive Safety docs in ffi module
+
 ### 🚧 known limitations
 
-1. **no r7rs standard environment**
+1. **gc pinning not implemented (CR-I7)**
+   - recursive `from_raw_depth` calls could trigger chibi's GC mid-iteration
+   - chibi's conservative GC makes this unlikely in practice
+   - **to fix**: add `sexp_preserve_object`/`sexp_gc_release_object` to shim
+   - **where**: wrap vector/list iteration in `from_raw_depth`
+   - **steps**:
+     1. add to `tein_shim.c`: `sexp tein_sexp_preserve_object(sexp ctx, sexp obj)`
+     2. add to `tein_shim.c`: `void tein_sexp_gc_release_object(sexp ctx, sexp obj)`
+     3. add extern declarations to `ffi.rs`
+     4. add rust wrappers in `ffi.rs`
+     5. in `value.rs` `from_raw_depth`, before vector/list iteration:
+        - call `sexp_preserve_object(ctx, raw)`
+        - iterate and convert
+        - call `sexp_gc_release_object(ctx, raw)`
+     6. test with deeply nested structures
+
+2. **no r7rs standard environment**
    - currently running with minimal chibi primitives only
    - basic arithmetic, cons/car/cdr, quote, make-vector work
    - missing: most r7rs standard library functions
@@ -47,14 +76,14 @@
      - setting up static library embedding (complex)
      - enabling dynamic module loading (conflicts with vendoring goals)
 
-2. **limited type coverage**
+3. **limited type coverage**
    - no hash tables
    - no ports/io
    - no procedures (scheme functions as values)
    - no continuations representation
    - no bytevectors
 
-3. **ffi is low-level**
+4. **ffi is low-level**
    - foreign functions use raw `sexp` types
    - no automatic argument/return conversion yet
    - need proc macro for ergonomic api

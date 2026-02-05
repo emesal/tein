@@ -6,12 +6,15 @@
 //!
 //! ## quick start
 //!
-//! ```ignore
-//! use tein::Context;
+//! ```
+//! use tein::{Context, Value};
 //!
-//! let ctx = Context::new();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = Context::new()?;
 //! let result = ctx.evaluate("(+ 1 2 3)")?;
-//! println!("result: {}", result);
+//! assert_eq!(result, Value::Integer(6));
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]

@@ -50,7 +50,7 @@ because embedding scheme in rust shouldn't require wrestling with raw ffi. tein 
 
 ## license
 
-tbd
+dual-licensed under MIT or Apache-2.0, at your option
 
 ---
 

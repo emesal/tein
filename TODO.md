@@ -109,29 +109,25 @@ none currently
 ### important
 
 - [x] **CR-I1: `Value::Unspecified` unreachable from `from_raw`** — ✅ void check added + test
-- [ ] **CR-I2: `transmute` for FFI fn pointer lacks type annotations** — `src/context.rs:151`
-  - fragile, hard to verify ABI compatibility
-  - fix: add explicit source/target type annotations
-
+- [x] **CR-I2: `transmute` for FFI fn pointer lacks type annotations** — ✅ explicit types added
 - [x] **CR-I3: broken rustdoc links to `Context::define_fn_raw`** — ✅ updated to define_fn0..3
 - [x] **CR-I4: `Value` missing `PartialEq` derive** — ✅ derived
 - [x] **CR-I5: `to_raw` silently converts most variants to void** — ✅ returns Result, errors on unsupported
-
-- [ ] **CR-I6: all 3 doc-tests are `#[ignore]`-d** — never actually run
-  - fix: make them compile and run (likely blocked by I4, now resolved)
+- [x] **CR-I6: all 3 doc-tests are `#[ignore]`-d** — ✅ now compile and run (23 tests total)
 
 - [ ] **CR-I7: no GC pinning during vector/list iteration** — `src/value.rs:95-103`
   - recursive `from_raw` calls could trigger chibi GC mid-iteration
   - fix: use `sexp_preserve_object` or `sexp_gc_var` before iterating
+  - note: chibi's conservative GC makes this unlikely in practice, but technically unsound
 
 ### minor
 
-- [ ] **CR-M1: redundant `c_fname` clone** — `src/context.rs:139`
-- [ ] **CR-M2: 24 public unsafe fns missing `# Safety` docs** — `src/ffi.rs`
-- [ ] **CR-M3: `rerun-if-changed` on directories doesn't track file changes** — `build.rs:42-43`
-- [ ] **CR-M4: `Cargo.lock` both gitignored and committed** — pick one
-- [ ] **CR-M5: `Display` for `Value::String` doesn't escape special chars** — `src/value.rs:199`
-- [ ] **CR-M6: README license "tbd" vs Cargo.toml MIT/Apache-2.0** — inconsistent
+- [x] **CR-M1: redundant `c_fname` clone** — ✅ removed
+- [x] **CR-M2: 24 public unsafe fns missing `# Safety` docs** — ✅ module-level safety doc
+- [x] **CR-M3: `rerun-if-changed` on directories doesn't track file changes** — ✅ tracks individual sources
+- [x] **CR-M4: `Cargo.lock` both gitignored and committed** — ✅ removed from gitignore (tracked)
+- [x] **CR-M5: `Display` for `Value::String` doesn't escape special chars** — ✅ escapes \", \\, \n, \r, \t
+- [x] **CR-M6: README license "tbd" vs Cargo.toml MIT/Apache-2.0** — ✅ updated README
 
 ## 📝 notes
 

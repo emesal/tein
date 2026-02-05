@@ -2,6 +2,15 @@
 //!
 //! this module contains unsafe bindings to the underlying chibi-scheme library.
 //! users should prefer the safe wrappers in the parent modules.
+//!
+//! # Safety
+//!
+//! All functions in this module are `unsafe` and require:
+//! - `sexp` pointers must be valid, non-null pointers obtained from chibi-scheme
+//! - `ctx` (context) pointers must be live and not yet destroyed
+//! - String pointers (`*const c_char`) must be valid null-terminated C strings
+//! - Calling functions on invalid or destroyed sexp values is undefined behavior
+//! - The caller must ensure proper memory management across the FFI boundary
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]

@@ -254,7 +254,20 @@ impl fmt::Display for Value {
         match self {
             Value::Integer(i) => write!(f, "{}", i),
             Value::Float(fl) => write!(f, "{}", fl),
-            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::String(s) => {
+                write!(f, "\"")?;
+                for ch in s.chars() {
+                    match ch {
+                        '"' => write!(f, "\\\"")?,
+                        '\\' => write!(f, "\\\\")?,
+                        '\n' => write!(f, "\\n")?,
+                        '\r' => write!(f, "\\r")?,
+                        '\t' => write!(f, "\\t")?,
+                        c => write!(f, "{}", c)?,
+                    }
+                }
+                write!(f, "\"")
+            }
             Value::Symbol(s) => write!(f, "{}", s),
             Value::Boolean(b) => write!(f, "{}", if *b { "#t" } else { "#f" }),
             Value::List(items) => {
