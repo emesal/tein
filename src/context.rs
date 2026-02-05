@@ -466,6 +466,73 @@ mod tests {
         }
     }
 
+    // --- gc pinning (deeply nested structures) ---
+
+    #[test]
+    fn test_deeply_nested_list() {
+        let ctx = Context::new().expect("failed to create context");
+        // build a 100-deep nested list: (1 (1 (1 ... (1) ...)))
+        let mut code = String::from("(quote ");
+        for _ in 0..100 {
+            code.push_str("(1 ");
+        }
+        code.push_str("()");
+        for _ in 0..100 {
+            code.push(')');
+        }
+        code.push(')');
+        let result = ctx.evaluate(&code).expect("failed to evaluate deeply nested list");
+        // outermost should be a list
+        assert!(matches!(result, Value::List(_)), "expected list, got {:?}", result);
+    }
+
+    #[test]
+    fn test_deeply_nested_vector() {
+        let ctx = Context::new().expect("failed to create context");
+        // build 100-deep nested vector from a single expression:
+        // (make-vector 1 (make-vector 1 (make-vector 1 ... 42 ...)))
+        // this creates a true tree (no structural sharing) so extraction is O(n).
+        let depth = 100;
+        let mut code = String::new();
+        for _ in 0..depth {
+            code.push_str("(make-vector 1 ");
+        }
+        code.push_str("42");
+        for _ in 0..depth {
+            code.push(')');
+        }
+        let result = ctx.evaluate(&code).expect("failed to evaluate nested vector");
+        assert!(matches!(result, Value::Vector(_)), "expected vector, got {:?}", result);
+    }
+
+    #[test]
+    fn test_mixed_nested_structures() {
+        let ctx = Context::new().expect("failed to create context");
+        // list containing vectors containing lists
+        let result = ctx.evaluate(
+            "(quote ((1 2) (3 4)))"
+        ).expect("failed to evaluate");
+        match &result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(&items[0], Value::List(inner) if inner.len() == 2));
+                assert!(matches!(&items[1], Value::List(inner) if inner.len() == 2));
+            }
+            _ => panic!("expected list, got {:?}", result),
+        }
+
+        // vector inside list
+        ctx.evaluate("(define test-vec (make-vector 3 99))").expect("define vec");
+        let result = ctx.evaluate("(cons test-vec (quote ()))").expect("eval cons");
+        match &result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 1);
+                assert!(matches!(&items[0], Value::Vector(v) if v.len() == 3));
+            }
+            _ => panic!("expected list containing vector, got {:?}", result),
+        }
+    }
+
     // --- value display ---
 
     #[test]

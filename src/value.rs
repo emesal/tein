@@ -7,6 +7,27 @@ use std::fmt;
 /// prevents stack overflow on deeply nested or (theoretically) circular structures.
 const MAX_DEPTH: usize = 10_000;
 
+// note on gc safety:
+// chibi-scheme uses a conservative garbage collector that scans the c stack
+// for potential pointers. all `sexp` values we work with here are either:
+// 1. passed as function parameters (on the stack)
+// 2. stored in local variables (on the stack)
+// 3. reachable from stack-rooted objects
+//
+// this means the gc will see them and won't collect them during iteration.
+// explicit pinning via `sexp_preserve_object` is unnecessary and causes
+// exponential memory allocation in deeply nested structures (each pin allocates
+// a cons cell on the global preservatives list).
+//
+// if chibi is compiled with boehm gc (SEXP_USE_BOEHM=1), pinning is a no-op anyway.
+// for the native gc, the conservative scanning is sufficient for our use case.
+//
+// note on structural sharing:
+// scheme objects can form DAGs (e.g. (make-vector 2 x) shares x in both slots).
+// from_raw traverses the full tree, visiting shared substructures multiple times.
+// this is fine for typical values but exponential for deeply nested shared structures.
+// a visited-set could fix this but would require representing sharing in Value.
+
 /// a scheme value
 ///
 /// represents the result of evaluating scheme code.

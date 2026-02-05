@@ -115,10 +115,12 @@ none currently
 - [x] **CR-I5: `to_raw` silently converts most variants to void** — ✅ returns Result, errors on unsupported
 - [x] **CR-I6: all 3 doc-tests are `#[ignore]`-d** — ✅ now compile and run (23 tests total)
 
-- [ ] **CR-I7: no GC pinning during vector/list iteration** — `src/value.rs:95-103`
-  - recursive `from_raw` calls could trigger chibi GC mid-iteration
-  - fix: use `sexp_preserve_object` or `sexp_gc_var` before iterating
-  - note: chibi's conservative GC makes this unlikely in practice, but technically unsound
+- [x] **CR-I7: gc pinning caused exponential memory allocation** — ✅ removed pinning
+  - attempted fix with `sexp_preserve_object` caused exponential memory usage
+  - each pin allocated a cons cell on global preservatives list
+  - deeply nested structures (50+ levels) caused oom/slowdown
+  - **actual fix**: removed pinning entirely; chibi's conservative gc scans the stack
+  - stack-allocated sexps are automatically protected during iteration
 
 ### minor
 

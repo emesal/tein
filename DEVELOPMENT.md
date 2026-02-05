@@ -52,23 +52,7 @@
 
 ### 🚧 known limitations
 
-1. **gc pinning not implemented (CR-I7)**
-   - recursive `from_raw_depth` calls could trigger chibi's GC mid-iteration
-   - chibi's conservative GC makes this unlikely in practice
-   - **to fix**: add `sexp_preserve_object`/`sexp_gc_release_object` to shim
-   - **where**: wrap vector/list iteration in `from_raw_depth`
-   - **steps**:
-     1. add to `tein_shim.c`: `sexp tein_sexp_preserve_object(sexp ctx, sexp obj)`
-     2. add to `tein_shim.c`: `void tein_sexp_gc_release_object(sexp ctx, sexp obj)`
-     3. add extern declarations to `ffi.rs`
-     4. add rust wrappers in `ffi.rs`
-     5. in `value.rs` `from_raw_depth`, before vector/list iteration:
-        - call `sexp_preserve_object(ctx, raw)`
-        - iterate and convert
-        - call `sexp_gc_release_object(ctx, raw)`
-     6. test with deeply nested structures
-
-2. **no r7rs standard environment**
+1. **no r7rs standard environment**
    - currently running with minimal chibi primitives only
    - basic arithmetic, cons/car/cdr, quote, make-vector work
    - missing: most r7rs standard library functions
@@ -76,14 +60,14 @@
      - setting up static library embedding (complex)
      - enabling dynamic module loading (conflicts with vendoring goals)
 
-3. **limited type coverage**
+2. **limited type coverage**
    - no hash tables
    - no ports/io
    - no procedures (scheme functions as values)
    - no continuations representation
    - no bytevectors
 
-4. **ffi is low-level**
+3. **ffi is low-level**
    - foreign functions use raw `sexp` types
    - no automatic argument/return conversion yet
    - need proc macro for ergonomic api
