@@ -98,9 +98,38 @@ none currently
   - cap memory usage
   - restrict available functions
 
-## 🐛 known issues
+## 🐛 known issues (code review, 2026-02-05)
 
-- none! tests passing, no crashes :3
+### critical
+
+- [x] **CR-C1: `sexp_uint_t` declared as signed `c_long`** — ✅ fixed: `c_ulong`
+- [x] **CR-C2: `unsafe impl Send` without documented invariants** — ✅ removed, documented why !Send
+- [x] **CR-C3: `is_proper_list` infinite loop on circular lists** — ✅ tortoise-and-hare + depth limit
+
+### important
+
+- [x] **CR-I1: `Value::Unspecified` unreachable from `from_raw`** — ✅ void check added + test
+- [x] **CR-I2: `transmute` for FFI fn pointer lacks type annotations** — ✅ explicit types added
+- [x] **CR-I3: broken rustdoc links to `Context::define_fn_raw`** — ✅ updated to define_fn0..3
+- [x] **CR-I4: `Value` missing `PartialEq` derive** — ✅ derived
+- [x] **CR-I5: `to_raw` silently converts most variants to void** — ✅ returns Result, errors on unsupported
+- [x] **CR-I6: all 3 doc-tests are `#[ignore]`-d** — ✅ now compile and run (23 tests total)
+
+- [x] **CR-I7: gc pinning caused exponential memory allocation** — ✅ removed pinning
+  - attempted fix with `sexp_preserve_object` caused exponential memory usage
+  - each pin allocated a cons cell on global preservatives list
+  - deeply nested structures (50+ levels) caused oom/slowdown
+  - **actual fix**: removed pinning entirely; chibi's conservative gc scans the stack
+  - stack-allocated sexps are automatically protected during iteration
+
+### minor
+
+- [x] **CR-M1: redundant `c_fname` clone** — ✅ removed
+- [x] **CR-M2: 24 public unsafe fns missing `# Safety` docs** — ✅ module-level safety doc
+- [x] **CR-M3: `rerun-if-changed` on directories doesn't track file changes** — ✅ tracks individual sources
+- [x] **CR-M4: `Cargo.lock` both gitignored and committed** — ✅ removed from gitignore (tracked)
+- [x] **CR-M5: `Display` for `Value::String` doesn't escape special chars** — ✅ escapes \", \\, \n, \r, \t
+- [x] **CR-M6: README license "tbd" vs Cargo.toml MIT/Apache-2.0** — ✅ updated README
 
 ## 📝 notes
 

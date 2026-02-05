@@ -1,8 +1,10 @@
+/.serena/
+
 # rust
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# Cargo.lock is committed for reproducible builds (library with examples)
 
 # generated files
 vendor/chibi-scheme/include/chibi/install.h

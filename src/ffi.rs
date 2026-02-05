@@ -2,18 +2,28 @@
 //!
 //! this module contains unsafe bindings to the underlying chibi-scheme library.
 //! users should prefer the safe wrappers in the parent modules.
+//!
+//! # Safety
+//!
+//! All functions in this module are `unsafe` and require:
+//! - `sexp` pointers must be valid, non-null pointers obtained from chibi-scheme
+//! - `ctx` (context) pointers must be live and not yet destroyed
+//! - String pointers (`*const c_char`) must be valid null-terminated C strings
+//! - Calling functions on invalid or destroyed sexp values is undefined behavior
+//! - The caller must ensure proper memory management across the FFI boundary
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 #![allow(missing_docs)]
+#![allow(clippy::missing_safety_doc)]
 
-use std::os::raw::{c_char, c_int, c_long, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 
 // opaque types from chibi
 pub type sexp = *mut c_void;
 pub type sexp_sint_t = c_long;
-pub type sexp_uint_t = c_long;
+pub type sexp_uint_t = c_ulong;
 
 unsafe extern "C" {
     // context management

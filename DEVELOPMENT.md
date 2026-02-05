@@ -33,9 +33,22 @@
   - detailed error messages (extracts exception message + irritants)
 
 - **testing**
-  - 19 unit tests covering all types, vectors, errors, and ffi
+  - 20 unit tests covering all types, vectors, errors, and ffi
+  - 3 doc-tests (lib.rs, Context, Context::evaluate)
   - working examples (`basic.rs`, `floats.rs`, `debug.rs`, `ffi.rs`)
   - all tests passing ✓
+
+- **code review fixes (2026-02-05)**
+  - fixed critical type safety issue (sexp_uint_t signedness)
+  - removed unsound Send impl, documented !Send + !Sync rationale
+  - added tortoise-and-hare cycle detection for circular lists
+  - depth limit (MAX_DEPTH = 10_000) prevents stack overflow
+  - derived PartialEq on Value for ergonomic testing
+  - to_raw returns Result, errors clearly on unsupported types
+  - fixed broken rustdoc links
+  - string Display properly escapes special chars
+  - transmute has explicit type annotations
+  - comprehensive Safety docs in ffi module
 
 ### 🚧 known limitations
 
