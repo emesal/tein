@@ -231,13 +231,23 @@ impl Value {
     /// useful for returning values from foreign functions registered
     /// with [`Context::define_fn0`] through [`Context::define_fn3`].
     ///
-    /// currently supports: Integer, Float, Boolean, String, Symbol, Nil, Unspecified.
-    /// returns an error for List, Pair, Vector, and Other (use the raw API for these).
+    /// supports all value types except `Other`.
     ///
     /// # Safety
     ///
     /// `ctx` must be a valid, live chibi-scheme context pointer.
     pub unsafe fn to_raw(&self, ctx: ffi::sexp) -> Result<ffi::sexp> {
+        unsafe { self.to_raw_depth(ctx, 0) }
+    }
+
+    /// recursive inner conversion with depth tracking to prevent stack overflow
+    unsafe fn to_raw_depth(&self, ctx: ffi::sexp, depth: usize) -> Result<ffi::sexp> {
+        if depth > MAX_DEPTH {
+            return Err(Error::EvalError(
+                "value nesting depth exceeded maximum".to_string(),
+            ));
+        }
+
         unsafe {
             match self {
                 Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
@@ -263,22 +273,113 @@ impl Value {
                 }
                 Value::Nil => Ok(ffi::get_null()),
                 Value::Unspecified => Ok(ffi::get_void()),
-                Value::List(_) => Err(Error::TypeError(
-                    "cannot convert List to raw sexp (use raw API for compound types)".to_string(),
-                )),
-                Value::Pair(_, _) => Err(Error::TypeError(
-                    "cannot convert Pair to raw sexp (use raw API for compound types)".to_string(),
-                )),
-                Value::Vector(_) => Err(Error::TypeError(
-                    "cannot convert Vector to raw sexp (use raw API for compound types)"
-                        .to_string(),
-                )),
+                Value::List(items) => {
+                    // build list from back to front: (cons last (cons ... (cons first nil)))
+                    let mut result = ffi::get_null();
+                    for item in items.iter().rev() {
+                        let raw_item = item.to_raw_depth(ctx, depth + 1)?;
+                        result = ffi::sexp_cons(ctx, raw_item, result);
+                    }
+                    Ok(result)
+                }
+                Value::Pair(car, cdr) => {
+                    let raw_car = car.to_raw_depth(ctx, depth + 1)?;
+                    let raw_cdr = cdr.to_raw_depth(ctx, depth + 1)?;
+                    Ok(ffi::sexp_cons(ctx, raw_car, raw_cdr))
+                }
+                Value::Vector(items) => {
+                    let len = items.len();
+                    let vec = ffi::sexp_make_vector(ctx, len as ffi::sexp_uint_t, ffi::get_void());
+                    for (i, item) in items.iter().enumerate() {
+                        let raw_item = item.to_raw_depth(ctx, depth + 1)?;
+                        ffi::sexp_vector_set(vec, i as ffi::sexp_uint_t, raw_item);
+                    }
+                    Ok(vec)
+                }
                 Value::Other(desc) => Err(Error::TypeError(format!(
                     "cannot convert Other({}) to raw sexp",
                     desc,
                 ))),
             }
         }
+    }
+}
+
+// --- typed extraction helpers ---
+
+impl Value {
+    /// extract as integer, if this value is an `Integer`
+    pub fn as_integer(&self) -> Option<i64> {
+        match self {
+            Value::Integer(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// extract as float, if this value is a `Float`
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// extract as string slice, if this value is a `String`
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Value::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// extract as symbol name, if this value is a `Symbol`
+    pub fn as_symbol(&self) -> Option<&str> {
+        match self {
+            Value::Symbol(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// extract as boolean, if this value is a `Boolean`
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Boolean(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// extract as list slice, if this value is a `List`
+    pub fn as_list(&self) -> Option<&[Value]> {
+        match self {
+            Value::List(items) => Some(items.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// extract as pair references, if this value is a `Pair`
+    pub fn as_pair(&self) -> Option<(&Value, &Value)> {
+        match self {
+            Value::Pair(car, cdr) => Some((car.as_ref(), cdr.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// extract as vector slice, if this value is a `Vector`
+    pub fn as_vector(&self) -> Option<&[Value]> {
+        match self {
+            Value::Vector(items) => Some(items.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// returns true if this value is `Nil`
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Value::Nil)
+    }
+
+    /// returns true if this value is `Unspecified`
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, Value::Unspecified)
     }
 }
 

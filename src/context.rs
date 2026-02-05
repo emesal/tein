@@ -6,6 +6,7 @@ use crate::{
     ffi,
 };
 use std::ffi::CString;
+use std::path::Path;
 
 /// a scheme evaluation context
 ///
@@ -68,7 +69,11 @@ impl Context {
         }
     }
 
-    /// evaluate a scheme expression string
+    /// evaluate one or more scheme expressions
+    ///
+    /// evaluates all expressions in the string sequentially, returning the
+    /// result of the last expression. this enables natural scripting patterns
+    /// like defining values and then using them.
     ///
     /// # examples
     ///
@@ -77,8 +82,14 @@ impl Context {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ctx = Context::new()?;
+    ///
+    /// // single expression
     /// let result = ctx.evaluate("(+ 1 2 3)")?;
     /// assert_eq!(result, Value::Integer(6));
+    ///
+    /// // multiple expressions - returns the last result
+    /// let result = ctx.evaluate("(define x 5) (+ x 3)")?;
+    /// assert_eq!(result, Value::Integer(8));
     /// # Ok(())
     /// # }
     /// ```
@@ -88,15 +99,75 @@ impl Context {
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
-            let result = ffi::sexp_eval_string(
-                self.ctx,
-                c_str.as_ptr(),
-                code.len() as ffi::sexp_sint_t,
-                env,
-            );
+
+            // create a scheme string from the code
+            let scheme_str =
+                ffi::sexp_c_str(self.ctx, c_str.as_ptr(), code.len() as ffi::sexp_sint_t);
+
+            // open an input port on the string
+            let port = ffi::sexp_open_input_string(self.ctx, scheme_str);
+            if ffi::sexp_exceptionp(port) != 0 {
+                return Value::from_raw(self.ctx, port);
+            }
+
+            // read and evaluate expressions until EOF
+            let mut result = ffi::get_void();
+            loop {
+                let expr = ffi::sexp_read(self.ctx, port);
+
+                // EOF means we're done
+                if ffi::sexp_eofp(expr) != 0 {
+                    break;
+                }
+
+                // read error
+                if ffi::sexp_exceptionp(expr) != 0 {
+                    return Value::from_raw(self.ctx, expr);
+                }
+
+                // evaluate the expression
+                result = ffi::sexp_evaluate(self.ctx, expr, env);
+
+                // evaluation error
+                if ffi::sexp_exceptionp(result) != 0 {
+                    return Value::from_raw(self.ctx, result);
+                }
+            }
 
             Value::from_raw(self.ctx, result)
         }
+    }
+
+    /// load and evaluate a scheme file
+    ///
+    /// reads the file contents and evaluates all expressions sequentially,
+    /// returning the result of the last expression. this is the file-based
+    /// equivalent of [`evaluate`](Self::evaluate).
+    ///
+    /// # examples
+    ///
+    /// ```no_run
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new()?;
+    ///
+    /// // load a config file that defines values and returns a result
+    /// let result = ctx.load_file("config.scm")?;
+    ///
+    /// // load a prelude for side effects (defines), ignore result
+    /// let _ = ctx.load_file("prelude.scm")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # errors
+    ///
+    /// returns [`Error::IoError`] if the file cannot be read, or evaluation
+    /// errors if the scheme code is invalid.
+    pub fn load_file<P: AsRef<Path>>(&self, path: P) -> Result<Value> {
+        let contents = std::fs::read_to_string(path.as_ref())?;
+        self.evaluate(&contents)
     }
 
     /// register a 0-argument foreign function as a scheme primitive
@@ -229,6 +300,57 @@ mod tests {
             Value::Integer(n) => assert_eq!(n, 6),
             _ => panic!("expected integer, got {:?}", result),
         }
+    }
+
+    // --- multi-expression evaluation ---
+
+    #[test]
+    fn test_multi_expression_define_and_use() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx
+            .evaluate("(define x 5) (+ x 3)")
+            .expect("failed to evaluate");
+        assert_eq!(result, Value::Integer(8));
+    }
+
+    #[test]
+    fn test_multi_expression_returns_last() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("1 2 3").expect("failed to evaluate");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_multi_expression_with_procedure() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx
+            .evaluate("(define (square x) (* x x)) (square 7)")
+            .expect("failed to evaluate");
+        assert_eq!(result, Value::Integer(49));
+    }
+
+    #[test]
+    fn test_multi_expression_error_stops_early() {
+        let ctx = Context::new().expect("failed to create context");
+        // error in first expression should prevent second from running
+        let err = ctx.evaluate("(car 42) (+ 1 2)").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("pair"), "expected pair error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("").expect("failed to evaluate");
+        // empty input returns void/unspecified
+        assert!(result.is_unspecified());
+    }
+
+    #[test]
+    fn test_whitespace_only() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("   \n\t  ").expect("failed to evaluate");
+        assert!(result.is_unspecified());
     }
 
     #[test]
@@ -584,6 +706,261 @@ mod tests {
         }
     }
 
+    // --- typed extraction helpers ---
+
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn test_as_integer() {
+        let v = Value::Integer(42);
+        assert_eq!(v.as_integer(), Some(42));
+        assert_eq!(Value::Float(3.14).as_integer(), None);
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn test_as_float() {
+        let v = Value::Float(2.718);
+        assert!((v.as_float().unwrap() - 2.718).abs() < 1e-10);
+        assert_eq!(Value::Integer(42).as_float(), None);
+    }
+
+    #[test]
+    fn test_as_string() {
+        let v = Value::String("hello".into());
+        assert_eq!(v.as_string(), Some("hello"));
+        assert_eq!(Value::Symbol("hello".into()).as_string(), None);
+    }
+
+    #[test]
+    fn test_as_symbol() {
+        let v = Value::Symbol("foo".into());
+        assert_eq!(v.as_symbol(), Some("foo"));
+        assert_eq!(Value::String("foo".into()).as_symbol(), None);
+    }
+
+    #[test]
+    fn test_as_bool() {
+        assert_eq!(Value::Boolean(true).as_bool(), Some(true));
+        assert_eq!(Value::Boolean(false).as_bool(), Some(false));
+        assert_eq!(Value::Integer(1).as_bool(), None);
+    }
+
+    #[test]
+    fn test_as_list() {
+        let v = Value::List(vec![Value::Integer(1), Value::Integer(2)]);
+        let items = v.as_list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_integer(), Some(1));
+        assert_eq!(Value::Vector(vec![]).as_list(), None);
+    }
+
+    #[test]
+    fn test_as_pair() {
+        let v = Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
+        let (car, cdr) = v.as_pair().unwrap();
+        assert_eq!(car.as_integer(), Some(1));
+        assert_eq!(cdr.as_integer(), Some(2));
+        assert_eq!(Value::List(vec![]).as_pair(), None);
+    }
+
+    #[test]
+    fn test_as_vector() {
+        let v = Value::Vector(vec![Value::Integer(1), Value::Integer(2)]);
+        let items = v.as_vector().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(Value::List(vec![]).as_vector(), None);
+    }
+
+    #[test]
+    fn test_is_nil() {
+        assert!(Value::Nil.is_nil());
+        assert!(!Value::List(vec![]).is_nil());
+    }
+
+    #[test]
+    fn test_is_unspecified() {
+        assert!(Value::Unspecified.is_unspecified());
+        assert!(!Value::Nil.is_unspecified());
+    }
+
+    // --- to_raw round-trip tests ---
+
+    #[test]
+    fn test_list_to_raw_roundtrip() {
+        unsafe extern "C" fn get_test_list(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let list = Value::List(vec![
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                ]);
+                list.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-test-list", get_test_list)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-test-list)").expect("eval");
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].as_integer(), Some(1));
+                assert_eq!(items[1].as_integer(), Some(2));
+                assert_eq!(items[2].as_integer(), Some(3));
+            }
+            _ => panic!("expected list, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_pair_to_raw_roundtrip() {
+        unsafe extern "C" fn get_test_pair(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let pair = Value::Pair(
+                    Box::new(Value::Symbol("key".into())),
+                    Box::new(Value::Integer(42)),
+                );
+                pair.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-test-pair", get_test_pair)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-test-pair)").expect("eval");
+        match result {
+            Value::Pair(car, cdr) => {
+                assert_eq!(car.as_symbol(), Some("key"));
+                assert_eq!(cdr.as_integer(), Some(42));
+            }
+            _ => panic!("expected pair, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_vector_to_raw_roundtrip() {
+        unsafe extern "C" fn get_test_vector(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let vec = Value::Vector(vec![Value::String("a".into()), Value::String("b".into())]);
+                vec.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-test-vector", get_test_vector)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-test-vector)").expect("eval");
+        match result {
+            Value::Vector(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].as_string(), Some("a"));
+                assert_eq!(items[1].as_string(), Some("b"));
+            }
+            _ => panic!("expected vector, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_nested_list_to_raw_roundtrip() {
+        unsafe extern "C" fn get_nested_list(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let nested = Value::List(vec![
+                    Value::Integer(1),
+                    Value::List(vec![Value::Integer(2), Value::Integer(3)]),
+                    Value::Integer(4),
+                ]);
+                nested
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-nested-list", get_nested_list)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-nested-list)").expect("eval");
+        match &result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].as_integer(), Some(1));
+                assert!(matches!(&items[1], Value::List(inner) if inner.len() == 2));
+                assert_eq!(items[2].as_integer(), Some(4));
+            }
+            _ => panic!("expected list, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_empty_list_to_raw() {
+        unsafe extern "C" fn get_empty_list(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let empty = Value::List(vec![]);
+                empty
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-empty-list", get_empty_list)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-empty-list)").expect("eval");
+        assert!(
+            result.is_nil(),
+            "empty list should become nil, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_empty_vector_to_raw() {
+        unsafe extern "C" fn get_empty_vector(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let empty = Value::Vector(vec![]);
+                empty
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn0("get-empty-vector", get_empty_vector)
+            .expect("define fn");
+        let result = ctx.evaluate("(get-empty-vector)").expect("eval");
+        match result {
+            Value::Vector(items) => assert_eq!(items.len(), 0),
+            _ => panic!("expected empty vector, got {:?}", result),
+        }
+    }
+
     // --- value display ---
 
     #[test]
@@ -602,5 +979,89 @@ mod tests {
         for (val, expected) in &cases {
             assert_eq!(format!("{}", val), *expected, "for {:?}", val);
         }
+    }
+
+    // --- file loading ---
+
+    #[test]
+    fn test_load_file_basic() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_basic.scm");
+        std::fs::write(&path, "(+ 1 2 3)").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let result = ctx.load_file(&path).expect("load file");
+        assert_eq!(result, Value::Integer(6));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_multi_expression() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_multi.scm");
+        std::fs::write(&path, "(define x 10)\n(define y 20)\n(+ x y)").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let result = ctx.load_file(&path).expect("load file");
+        assert_eq!(result, Value::Integer(30));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_defines_persist() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_persist.scm");
+        std::fs::write(&path, "(define (square x) (* x x))").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let _ = ctx.load_file(&path).expect("load file");
+
+        // definition from file should be available for subsequent evaluation
+        let result = ctx.evaluate("(square 7)").expect("eval");
+        assert_eq!(result, Value::Integer(49));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_not_found() {
+        let ctx = Context::new().expect("create context");
+        let err = ctx.load_file("/nonexistent/path/to/file.scm").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("io error"), "expected io error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_load_file_syntax_error() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_syntax.scm");
+        std::fs::write(&path, "(define x").expect("write test file"); // unclosed paren
+
+        let ctx = Context::new().expect("create context");
+        let err = ctx.load_file(&path).unwrap_err();
+        // should be an eval error, not io error
+        let msg = format!("{}", err);
+        assert!(
+            !msg.contains("io error"),
+            "expected eval error, got io: {}",
+            msg
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_load_file_empty() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_empty.scm");
+        std::fs::write(&path, "").expect("write test file");
+
+        let ctx = Context::new().expect("create context");
+        let result = ctx.load_file(&path).expect("load file");
+        assert!(result.is_unspecified());
+
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -57,3 +57,25 @@ sexp tein_sexp_intern(sexp ctx, const char* str, sexp_sint_t len) {
 sexp tein_get_true() { return SEXP_TRUE; }
 sexp tein_get_false() { return SEXP_FALSE; }
 sexp tein_get_null() { return SEXP_NULL; }
+
+// pair/list construction
+sexp tein_sexp_cons(sexp ctx, sexp head, sexp tail) { return sexp_cons(ctx, head, tail); }
+
+// vector construction
+sexp tein_sexp_make_vector(sexp ctx, sexp_uint_t len, sexp dflt) {
+    return sexp_make_vector(ctx, sexp_make_fixnum(len), dflt);
+}
+
+// vector element setting (direct write, no bounds check)
+void tein_sexp_vector_set(sexp vec, sexp_uint_t i, sexp val) {
+    sexp_vector_data(vec)[i] = val;
+}
+
+// multi-expression evaluation support
+sexp tein_get_eof() { return SEXP_EOF; }
+int tein_sexp_eofp(sexp x) { return x == SEXP_EOF; }
+sexp tein_sexp_open_input_string(sexp ctx, sexp str) {
+    return sexp_open_input_string(ctx, str);
+}
+sexp tein_sexp_read(sexp ctx, sexp port) { return sexp_read(ctx, port); }
+sexp tein_sexp_evaluate(sexp ctx, sexp obj, sexp env) { return sexp_eval(ctx, obj, env); }
