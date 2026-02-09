@@ -31,68 +31,86 @@
   - `raw` module re-exports ffi helpers for building foreign functions
   - `Value::to_raw` for converting rust values back to scheme
 
+## ✅ milestone 1 — ergonomics & round-trip
+
+*make the existing api a joy to use before adding new capabilities.*
+
+- [x] **typed extraction helpers on Value**
+  - `as_integer()`, `as_float()`, `as_string()`, `as_symbol()`, `as_bool()`
+  - `as_list()`, `as_pair()`, `as_vector()`, `as_procedure()`
+  - `is_nil()`, `is_unspecified()`, `is_procedure()`
+
+- [x] **complete bidirectional value bridge**
+  - `to_raw()` for all Value variants (lists, pairs, vectors, symbols, procedures)
+  - recursive with depth limit (MAX_DEPTH = 10,000)
+
+- [x] **multi-expression evaluation**
+  - read loop with string port, returns last value
+  - errors stop evaluation early
+
+- [x] **file evaluation**
+  - `ctx.load_file(path)` — delegates to evaluate
+
+## ✅ milestone 2 — scheme as extension language
+
+*transform tein from "eval strings" into a real scripting engine.*
+
+- [x] **scheme→rust callbacks (procedures as values)**
+  - `Value::Procedure` via `sexp_applicablep` (lambdas + builtins)
+  - `ctx.call(proc, &[args])` builds arg list and applies
+
+- [x] **variadic foreign functions**
+  - `define_fn_variadic(name, f)` via `SEXP_PROC_VARIADIC`
+  - replaces old `define_fn0..3` fixed-arity set
+
+- [x] **higher-level ffi (proc macro)**
+  - `#[scheme_fn] fn add(a: i64, b: i64) -> i64`
+  - auto extraction for i64/f64/String/bool args + return
+  - `Result<T, E>` support — Err becomes scheme exception string
+  - panic safety at ffi boundary via `catch_unwind`
+
 ## 🚧 in progress
 
 none currently
 
 ## 🗺️ roadmap
 
-### milestone 1 — ergonomics & round-trip
+### milestone 3 — s-expression data format (`tein-sexp`)
 
-*make the existing api a joy to use before adding new capabilities.*
+*pure rust s-expression toolkit: parse, serialize, convert.*
 
-- [ ] **typed extraction helpers on Value**
-  - `v.as_integer()? → i64`, `v.as_string()? → &str`, etc.
-  - eliminates repetitive pattern matching for callers
-  - small, self-contained, high-value
+separate workspace crate — no chibi dependency, no unsafe, independently publishable.
 
-- [ ] **complete bidirectional value bridge**
-  - `to_raw()` for all Value variants (lists, pairs, vectors, symbols)
-  - every type that can come out of scheme can go back in
-  - prerequisite for callbacks and higher-level ffi
+- [ ] **`Sexp` AST with source spans**
+  - dedicated enum: `Atom` (integer, float, string, symbol, bool) + `List` + `Nil`
+  - every node carries `Span { line, column, byte_offset, len }`
+  - designed in from day one — impossible to retrofit without breaking changes
+  - foundation for error reporting, editor integration, future LSP
 
-- [ ] **multi-expression evaluation**
-  - `evaluate("(define x 5) (+ x 3)")` → returns last value
-  - essential for scripting / config-loading UX
+- [ ] **r7rs-compatible reader**
+  - proper list `(a b c)`, dotted pair `(a . b)`, vector `#(a b c)`
+  - full string escapes: `\n`, `\t`, `\\`, `\"`, `\xNN;` hex escapes, `\` line continuation
+  - `#;` datum comments, `#| block |#` nested comments, `;` line comments
+  - symbol quoting: `|weird symbol|`
+  - character literals: `#\a`, `#\space`, `#\newline`, `#\xNN`
+  - `'x` → `(quote x)`, `` `x `` → `(quasiquote x)`, `,x` → `(unquote x)`
 
-- [ ] **file evaluation**
-  - `ctx.load_file("config.scm")` — evaluate a whole file
-  - natural extension of multi-expression support
+- [ ] **comment preservation mode**
+  - optional parser mode that attaches comments to adjacent AST nodes
+  - enables round-trip editing: read config → modify field → write back without losing comments
+  - AST `Span` type designed to accommodate this from v1
 
-### milestone 2 — scheme as extension language
+- [ ] **pretty printer**
+  - configurable output: compact vs indented
+  - respects preserved comments when present
 
-*transform tein from "eval strings" into a real scripting engine.*
-
-- [ ] **scheme→rust callbacks (procedures as values)**
-  - `Value::Procedure` variant holding a callable sexp
-  - `ctx.call(proc, &[args])` invokes a scheme lambda from rust
-  - gateway to using scheme as a true extension language
-
-- [ ] **variadic foreign functions**
-  - `define_fn_variadic(name, f)` — rest-args support
-  - covers more use cases without needing the proc macro yet
-
-- [ ] **higher-level ffi (proc macro)**
-  - `#[scheme_fn] fn add(a: i64, b: i64) -> i64`
-  - automatic argument extraction and return conversion
-  - error propagation from rust to scheme exceptions
-  - depends on: complete value bridge, procedures as values
-
-### milestone 3 — standalone s-expression toolkit
-
-*high-utility, zero-eval tools for config and data.*
-
-- [ ] **s-expression parser (no eval)**
-  - standalone `tein::sexp::parse("(key (nested value))")` → rust AST
-  - no chibi dependency — pure rust parser
-  - feature-gated or separate crate (`tein-sexp`?)
-  - s-exprs as a config format without the interpreter
-
-- [ ] **serde integration** (feature-gated)
-  - `#[derive(Deserialize)]` from s-expressions → rust structs
-  - `#[derive(Serialize)]` from rust structs → s-expressions
-  - depends on: s-expression parser
-  - *chef's kiss* for config files
+- [ ] **serde data format implementation**
+  - `Deserializer`: s-expression source → rust structs via `#[derive(Deserialize)]`
+  - `Serializer`: rust structs → s-expression string via `#[derive(Serialize)]`
+  - alist convention: `((key val) ...)` with symbol keys → serde map
+  - plain lists → serde sequence
+  - free format conversion via serde ecosystem (json ↔ sexpr ↔ ron ↔ toml ↔ yaml)
+  - source spans in error messages: "expected integer at line 3, column 7"
 
 ### milestone 4 — production hardening
 

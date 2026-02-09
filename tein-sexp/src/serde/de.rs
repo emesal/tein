@@ -1,0 +1,786 @@
+//! serde deserializer for s-expressions
+//!
+//! deserializes s-expression text or [`Sexp`] values into rust types.
+//! self-describing format: the deserializer examines the s-expression
+//! to determine which visitor method to call.
+
+use crate::ast::{Sexp, SexpKind};
+use crate::error::ParseError;
+use crate::parser;
+use serde::de;
+use std::fmt;
+
+/// deserialize a value from s-expression text
+pub fn from_str<'de, T: de::Deserialize<'de>>(input: &str) -> Result<T, ParseError> {
+    let sexp = parser::parse(input)?;
+    from_sexp(&sexp)
+}
+
+/// deserialize a value from an [`Sexp`] node
+pub fn from_sexp<'de, T: de::Deserialize<'de>>(sexp: &Sexp) -> Result<T, ParseError> {
+    T::deserialize(SexpDeserializer { sexp })
+}
+
+/// serde deserializer wrapping a reference to an [`Sexp`]
+struct SexpDeserializer<'a> {
+    sexp: &'a Sexp,
+}
+
+impl<'a> SexpDeserializer<'a> {
+    /// create a parse error pointing at this node's span
+    fn error(&self, msg: impl fmt::Display) -> ParseError {
+        ParseError::new(msg.to_string(), self.sexp.span)
+    }
+}
+
+impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
+    type Error = ParseError;
+
+    fn deserialize_any<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Integer(n) => visitor.visit_i64(*n),
+            SexpKind::Float(f) => visitor.visit_f64(*f),
+            SexpKind::String(s) => visitor.visit_string(s.clone()),
+            SexpKind::Symbol(s) => visitor.visit_string(s.clone()),
+            SexpKind::Boolean(b) => visitor.visit_bool(*b),
+            SexpKind::Char(c) => visitor.visit_char(*c),
+            SexpKind::Nil => visitor.visit_unit(),
+            SexpKind::List(items) => {
+                // heuristic: if all items are dotted pairs with symbol car, treat as map
+                if is_alist(items) {
+                    visitor.visit_map(AlistMapAccess::new(items))
+                } else {
+                    visitor.visit_seq(SexpSeqAccess::new(items))
+                }
+            }
+            SexpKind::DottedList(items, tail) => {
+                // flatten dotted list into a sequence including the tail
+                let mut all = items.clone();
+                all.push(*tail.clone());
+                visitor.visit_seq(SexpSeqAccess::new_owned(all))
+            }
+            SexpKind::Vector(items) => visitor.visit_seq(SexpSeqAccess::new(items)),
+        }
+    }
+
+    fn deserialize_bool<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Boolean(b) => visitor.visit_bool(*b),
+            _ => Err(self.error("expected boolean")),
+        }
+    }
+
+    fn deserialize_i8<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_i64(visitor)
+    }
+
+    fn deserialize_i16<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_i64(visitor)
+    }
+
+    fn deserialize_i32<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_i64(visitor)
+    }
+
+    fn deserialize_i64<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Integer(n) => visitor.visit_i64(*n),
+            _ => Err(self.error("expected integer")),
+        }
+    }
+
+    fn deserialize_u8<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_u64(visitor)
+    }
+
+    fn deserialize_u16<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_u64(visitor)
+    }
+
+    fn deserialize_u32<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_u64(visitor)
+    }
+
+    fn deserialize_u64<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Integer(n) if *n >= 0 => visitor.visit_u64(*n as u64),
+            SexpKind::Integer(_) => Err(self.error("expected non-negative integer")),
+            _ => Err(self.error("expected integer")),
+        }
+    }
+
+    fn deserialize_f32<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_f64(visitor)
+    }
+
+    fn deserialize_f64<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Float(f) => visitor.visit_f64(*f),
+            SexpKind::Integer(n) => visitor.visit_f64(*n as f64),
+            _ => Err(self.error("expected float")),
+        }
+    }
+
+    fn deserialize_char<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Char(c) => visitor.visit_char(*c),
+            _ => Err(self.error("expected char")),
+        }
+    }
+
+    fn deserialize_str<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_string(visitor)
+    }
+
+    fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::String(s) => visitor.visit_string(s.clone()),
+            SexpKind::Symbol(s) => visitor.visit_string(s.clone()),
+            _ => Err(self.error("expected string or symbol")),
+        }
+    }
+
+    fn deserialize_bytes<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        self.deserialize_byte_buf(visitor)
+    }
+
+    fn deserialize_byte_buf<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        // bytes are serialized as a list of integers
+        match &self.sexp.kind {
+            SexpKind::List(items) => {
+                let mut bytes = Vec::with_capacity(items.len());
+                for item in items {
+                    match &item.kind {
+                        SexpKind::Integer(n) if *n >= 0 && *n <= 255 => bytes.push(*n as u8),
+                        _ => return Err(ParseError::new("expected byte value (0-255)", item.span)),
+                    }
+                }
+                visitor.visit_byte_buf(bytes)
+            }
+            _ => Err(self.error("expected list of bytes")),
+        }
+    }
+
+    fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Nil => visitor.visit_none(),
+            _ => visitor.visit_some(self),
+        }
+    }
+
+    fn deserialize_unit<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Nil => visitor.visit_unit(),
+            _ => Err(self.error("expected ()")),
+        }
+    }
+
+    fn deserialize_unit_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        self.deserialize_unit(visitor)
+    }
+
+    fn deserialize_newtype_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        visitor.visit_newtype_struct(self)
+    }
+
+    fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::List(items) => visitor.visit_seq(SexpSeqAccess::new(items)),
+            SexpKind::Vector(items) => visitor.visit_seq(SexpSeqAccess::new(items)),
+            SexpKind::Nil => visitor.visit_seq(SexpSeqAccess::new(&[])),
+            _ => Err(self.error("expected list or vector")),
+        }
+    }
+
+    fn deserialize_tuple<V: de::Visitor<'de>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_tuple_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        self.deserialize_seq(visitor)
+    }
+
+    fn deserialize_map<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::List(items) => visitor.visit_map(AlistMapAccess::new(items)),
+            SexpKind::Nil => visitor.visit_map(AlistMapAccess::new(&[])),
+            _ => Err(self.error("expected alist")),
+        }
+    }
+
+    fn deserialize_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_enum<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            // unit variant: bare symbol
+            SexpKind::Symbol(_) => visitor.visit_enum(EnumAccess { sexp: self.sexp }),
+            // other variants: tagged list (variant ...)
+            SexpKind::List(items) if !items.is_empty() => {
+                visitor.visit_enum(EnumAccess { sexp: self.sexp })
+            }
+            _ => Err(self.error("expected symbol or tagged list for enum")),
+        }
+    }
+
+    fn deserialize_identifier<V: de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        self.deserialize_string(visitor)
+    }
+
+    fn deserialize_ignored_any<V: de::Visitor<'de>>(
+        self,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        self.deserialize_any(visitor)
+    }
+}
+
+// --- sequence access ---
+
+/// provides sequential access to list/vector elements
+enum SexpSeqAccess<'a> {
+    /// borrowed from the original sexp
+    Borrowed { items: &'a [Sexp], index: usize },
+    /// owned (for flattened dotted lists)
+    Owned { items: Vec<Sexp>, index: usize },
+}
+
+impl<'a> SexpSeqAccess<'a> {
+    fn new(items: &'a [Sexp]) -> Self {
+        Self::Borrowed { items, index: 0 }
+    }
+
+    fn new_owned(items: Vec<Sexp>) -> Self {
+        Self::Owned { items, index: 0 }
+    }
+
+    fn next_item(&mut self) -> Option<&Sexp> {
+        match self {
+            Self::Borrowed { items, index } => {
+                if *index < items.len() {
+                    let item = &items[*index];
+                    *index += 1;
+                    Some(item)
+                } else {
+                    None
+                }
+            }
+            Self::Owned { items, index } => {
+                if *index < items.len() {
+                    let item = &items[*index];
+                    *index += 1;
+                    Some(item)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl<'de, 'a> de::SeqAccess<'de> for SexpSeqAccess<'a> {
+    type Error = ParseError;
+
+    fn next_element_seed<T: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: T,
+    ) -> Result<Option<T::Value>, ParseError> {
+        match self.next_item() {
+            Some(item) => seed.deserialize(SexpDeserializer { sexp: item }).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+// --- map access (alists) ---
+
+/// provides map access to alists: `((key . val) ...)`
+struct AlistMapAccess<'a> {
+    items: &'a [Sexp],
+    index: usize,
+}
+
+impl<'a> AlistMapAccess<'a> {
+    fn new(items: &'a [Sexp]) -> Self {
+        Self { items, index: 0 }
+    }
+}
+
+impl<'de, 'a> de::MapAccess<'de> for AlistMapAccess<'a> {
+    type Error = ParseError;
+
+    fn next_key_seed<K: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, ParseError> {
+        if self.index >= self.items.len() {
+            return Ok(None);
+        }
+        let entry = &self.items[self.index];
+        let key = alist_key(entry)?;
+        seed.deserialize(SexpDeserializer { sexp: key }).map(Some)
+    }
+
+    fn next_value_seed<V: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, ParseError> {
+        let entry = &self.items[self.index];
+        self.index += 1;
+        let val = alist_value(entry)?;
+        seed.deserialize(SexpDeserializer { sexp: val })
+    }
+}
+
+/// extract the key from an alist entry (dotted pair)
+fn alist_key(entry: &Sexp) -> Result<&Sexp, ParseError> {
+    match &entry.kind {
+        SexpKind::DottedList(items, _) if items.len() == 1 => Ok(&items[0]),
+        SexpKind::List(items) if items.len() == 2 => Ok(&items[0]),
+        _ => Err(ParseError::new(
+            "expected dotted pair (key . value) in alist",
+            entry.span,
+        )),
+    }
+}
+
+/// extract the value from an alist entry (dotted pair)
+fn alist_value(entry: &Sexp) -> Result<&Sexp, ParseError> {
+    match &entry.kind {
+        SexpKind::DottedList(_, tail) => Ok(tail.as_ref()),
+        SexpKind::List(items) if items.len() == 2 => Ok(&items[1]),
+        _ => Err(ParseError::new(
+            "expected dotted pair (key . value) in alist",
+            entry.span,
+        )),
+    }
+}
+
+/// heuristic: check if a list looks like an alist (all dotted pairs with symbol keys)
+fn is_alist(items: &[Sexp]) -> bool {
+    if items.is_empty() {
+        return false;
+    }
+    items.iter().all(|item| {
+        matches!(
+            &item.kind,
+            SexpKind::DottedList(keys, _) if keys.len() == 1
+                && matches!(&keys[0].kind, SexpKind::Symbol(_))
+        )
+    })
+}
+
+// --- enum access ---
+
+/// handles enum deserialization from symbols and tagged lists
+struct EnumAccess<'a> {
+    sexp: &'a Sexp,
+}
+
+impl<'de, 'a> de::EnumAccess<'de> for EnumAccess<'a> {
+    type Error = ParseError;
+    type Variant = VariantAccess<'a>;
+
+    fn variant_seed<V: de::DeserializeSeed<'de>>(
+        self,
+        seed: V,
+    ) -> Result<(V::Value, Self::Variant), ParseError> {
+        match &self.sexp.kind {
+            // unit variant: bare symbol
+            SexpKind::Symbol(_) => {
+                let variant = seed.deserialize(SexpDeserializer { sexp: self.sexp })?;
+                Ok((variant, VariantAccess { sexp: self.sexp }))
+            }
+            // tagged list: (variant-name value ...)
+            SexpKind::List(items) if !items.is_empty() => {
+                let tag = &items[0];
+                let variant = seed.deserialize(SexpDeserializer { sexp: tag })?;
+                Ok((variant, VariantAccess { sexp: self.sexp }))
+            }
+            _ => Err(ParseError::new("expected enum variant", self.sexp.span)),
+        }
+    }
+}
+
+/// handles the payload of an enum variant
+struct VariantAccess<'a> {
+    sexp: &'a Sexp,
+}
+
+impl<'de, 'a> de::VariantAccess<'de> for VariantAccess<'a> {
+    type Error = ParseError;
+
+    fn unit_variant(self) -> Result<(), ParseError> {
+        match &self.sexp.kind {
+            SexpKind::Symbol(_) => Ok(()),
+            SexpKind::List(items) if items.len() == 1 => Ok(()),
+            _ => Err(ParseError::new("expected unit variant", self.sexp.span)),
+        }
+    }
+
+    fn newtype_variant_seed<T: de::DeserializeSeed<'de>>(
+        self,
+        seed: T,
+    ) -> Result<T::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::List(items) if items.len() == 2 => {
+                seed.deserialize(SexpDeserializer { sexp: &items[1] })
+            }
+            _ => Err(ParseError::new(
+                "expected (variant value) for newtype variant",
+                self.sexp.span,
+            )),
+        }
+    }
+
+    fn tuple_variant<V: de::Visitor<'de>>(
+        self,
+        _len: usize,
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::List(items) if items.len() >= 2 => {
+                visitor.visit_seq(SexpSeqAccess::new(&items[1..]))
+            }
+            _ => Err(ParseError::new(
+                "expected (variant val ...) for tuple variant",
+                self.sexp.span,
+            )),
+        }
+    }
+
+    fn struct_variant<V: de::Visitor<'de>>(
+        self,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, ParseError> {
+        match &self.sexp.kind {
+            SexpKind::List(items) if items.len() >= 2 => {
+                // items[0] is the variant tag, items[1..] are the alist entries
+                visitor.visit_map(AlistMapAccess::new(&items[1..]))
+            }
+            _ => Err(ParseError::new(
+                "expected (variant (field . val) ...) for struct variant",
+                self.sexp.span,
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    // --- primitives ---
+
+    #[test]
+    fn deserialize_integer() {
+        assert_eq!(from_str::<i32>("42").unwrap(), 42);
+        assert_eq!(from_str::<i64>("-7").unwrap(), -7);
+    }
+
+    #[test]
+    fn deserialize_float() {
+        let f: f64 = from_str("3.125").unwrap();
+        assert!((f - 3.125).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn deserialize_bool() {
+        assert_eq!(from_str::<bool>("#t").unwrap(), true);
+        assert_eq!(from_str::<bool>("#f").unwrap(), false);
+    }
+
+    #[test]
+    fn deserialize_string() {
+        assert_eq!(from_str::<String>("\"hello\"").unwrap(), "hello");
+    }
+
+    #[test]
+    fn deserialize_symbol_as_string() {
+        assert_eq!(from_str::<String>("foo").unwrap(), "foo");
+    }
+
+    #[test]
+    fn deserialize_char() {
+        assert_eq!(from_str::<char>("#\\a").unwrap(), 'a');
+        assert_eq!(from_str::<char>("#\\space").unwrap(), ' ');
+    }
+
+    #[test]
+    fn deserialize_unit() {
+        from_str::<()>("()").unwrap();
+    }
+
+    // --- option ---
+
+    #[test]
+    fn deserialize_none() {
+        assert_eq!(from_str::<Option<i32>>("()").unwrap(), None);
+    }
+
+    #[test]
+    fn deserialize_some() {
+        assert_eq!(from_str::<Option<i32>>("42").unwrap(), Some(42));
+    }
+
+    // --- sequences ---
+
+    #[test]
+    fn deserialize_vec() {
+        assert_eq!(from_str::<Vec<i32>>("(1 2 3)").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn deserialize_empty_vec() {
+        assert_eq!(from_str::<Vec<i32>>("()").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn deserialize_tuple() {
+        let t: (i32, String, bool) = from_str("(42 \"hello\" #t)").unwrap();
+        assert_eq!(t, (42, "hello".to_string(), true));
+    }
+
+    // --- map ---
+
+    #[test]
+    fn deserialize_map() {
+        let m: BTreeMap<String, String> =
+            from_str("((\"name\" . \"alice\") (\"role\" . \"admin\"))").unwrap();
+        assert_eq!(m.get("name").unwrap(), "alice");
+        assert_eq!(m.get("role").unwrap(), "admin");
+    }
+
+    // --- struct ---
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    #[test]
+    fn deserialize_struct() {
+        let p: Point = from_str("((x . 1) (y . 2))").unwrap();
+        assert_eq!(p, Point { x: 1, y: 2 });
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Config {
+        name: String,
+        debug: bool,
+        count: i32,
+    }
+
+    #[test]
+    fn deserialize_struct_mixed() {
+        let c: Config = from_str("((name . \"test\") (debug . #t) (count . 42))").unwrap();
+        assert_eq!(
+            c,
+            Config {
+                name: "test".to_string(),
+                debug: true,
+                count: 42,
+            }
+        );
+    }
+
+    // --- enums ---
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    enum Color {
+        Red,
+        Green,
+        Blue,
+    }
+
+    #[test]
+    fn deserialize_unit_variant() {
+        assert_eq!(from_str::<Color>("Red").unwrap(), Color::Red);
+        assert_eq!(from_str::<Color>("Green").unwrap(), Color::Green);
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    enum Shape {
+        Circle(f64),
+        Rectangle(f64, f64),
+        Labeled { name: String, sides: u32 },
+    }
+
+    #[test]
+    fn deserialize_newtype_variant() {
+        let s: Shape = from_str("(Circle 5.0)").unwrap();
+        assert_eq!(s, Shape::Circle(5.0));
+    }
+
+    #[test]
+    fn deserialize_tuple_variant() {
+        let s: Shape = from_str("(Rectangle 3.0 4.0)").unwrap();
+        assert_eq!(s, Shape::Rectangle(3.0, 4.0));
+    }
+
+    #[test]
+    fn deserialize_struct_variant() {
+        let s: Shape = from_str("(Labeled (name . \"triangle\") (sides . 3))").unwrap();
+        assert_eq!(
+            s,
+            Shape::Labeled {
+                name: "triangle".to_string(),
+                sides: 3,
+            }
+        );
+    }
+
+    // --- nested ---
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Nested {
+        items: Vec<i32>,
+        label: Option<String>,
+    }
+
+    #[test]
+    fn deserialize_nested() {
+        let n: Nested = from_str("((items . (1 2 3)) (label . \"test\"))").unwrap();
+        assert_eq!(
+            n,
+            Nested {
+                items: vec![1, 2, 3],
+                label: Some("test".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn deserialize_nested_none() {
+        let n: Nested = from_str("((items . ()) (label . ()))").unwrap();
+        assert_eq!(
+            n,
+            Nested {
+                items: vec![],
+                label: None,
+            }
+        );
+    }
+
+    // --- round-trips (serialize → deserialize) ---
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct RoundTrip {
+        name: String,
+        values: Vec<i32>,
+        active: bool,
+    }
+
+    #[test]
+    fn round_trip_struct() {
+        let original = RoundTrip {
+            name: "test".to_string(),
+            values: vec![1, 2, 3],
+            active: true,
+        };
+        let text = crate::serde::to_string(&original).unwrap();
+        let restored: RoundTrip = from_str(&text).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn round_trip_primitives() {
+        // integers
+        let text = crate::serde::to_string(&42i32).unwrap();
+        assert_eq!(from_str::<i32>(&text).unwrap(), 42);
+
+        // strings
+        let text = crate::serde::to_string(&"hello").unwrap();
+        assert_eq!(from_str::<String>(&text).unwrap(), "hello");
+
+        // booleans
+        let text = crate::serde::to_string(&true).unwrap();
+        assert_eq!(from_str::<bool>(&text).unwrap(), true);
+    }
+
+    #[test]
+    fn round_trip_enum() {
+        let original = Shape::Rectangle(3.0, 4.0);
+        let text = crate::serde::to_string(&original).unwrap();
+        let restored: Shape = from_str(&text).unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn round_trip_option() {
+        let some_val = Some(42i32);
+        let text = crate::serde::to_string(&some_val).unwrap();
+        let restored: Option<i32> = from_str(&text).unwrap();
+        assert_eq!(restored, some_val);
+
+        let none_val: Option<i32> = None;
+        let text = crate::serde::to_string(&none_val).unwrap();
+        let restored: Option<i32> = from_str(&text).unwrap();
+        assert_eq!(restored, none_val);
+    }
+
+    // --- error messages ---
+
+    #[test]
+    fn error_includes_span() {
+        let err = from_str::<i32>("\"not an int\"").unwrap_err();
+        assert!(err.to_string().contains("line"), "error: {err}");
+    }
+
+    #[test]
+    fn error_type_mismatch() {
+        let err = from_str::<bool>("42").unwrap_err();
+        assert!(err.to_string().contains("expected boolean"), "error: {err}");
+    }
+
+    // --- from_sexp ---
+
+    #[test]
+    fn from_sexp_direct() {
+        let sexp = Sexp::integer(42);
+        assert_eq!(from_sexp::<i32>(&sexp).unwrap(), 42);
+    }
+
+    // --- integer coercion to float ---
+
+    #[test]
+    fn integer_to_float_coercion() {
+        // when deserialize_f64 is called, integers should coerce
+        assert_eq!(from_str::<f64>("42").unwrap(), 42.0);
+    }
+}
