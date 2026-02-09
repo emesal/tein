@@ -170,95 +170,125 @@ impl Context {
         self.evaluate(&contents)
     }
 
-    /// register a 0-argument foreign function as a scheme primitive
+    /// register a foreign function as a scheme primitive
     ///
-    /// chibi calls with `(ctx, self, 0)`.
-    pub fn define_fn0(
-        &self,
-        name: &str,
-        f: unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-    ) -> Result<()> {
-        self.define_foreign(name, 0, f as *const std::ffi::c_void)
-    }
-
-    /// register a 1-argument foreign function as a scheme primitive
+    /// all arguments are passed as a single scheme list via the `args` parameter.
+    /// this is the universal registration method — use `#[scheme_fn]` for ergonomic
+    /// wrappers that handle argument extraction and return conversion automatically.
     ///
-    /// chibi calls with `(ctx, self, 1, arg1)`.
-    pub fn define_fn1(
+    /// the function receives all arguments as a single scheme list in the `args`
+    /// parameter. chibi passes `(ctx, self, nargs, args)` where args is a proper
+    /// list of all actual arguments.
+    ///
+    /// this uses `sexp_define_foreign_proc_aux` with `SEXP_PROC_VARIADIC`,
+    /// which wraps the opcode in a real procedure object.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value, raw};
+    ///
+    /// // sum all integer arguments
+    /// unsafe extern "C" fn sum_all(
+    ///     ctx: raw::sexp, _self: raw::sexp, _n: raw::sexp_sint_t, args: raw::sexp,
+    /// ) -> raw::sexp {
+    ///     unsafe {
+    ///         let mut total: i64 = 0;
+    ///         let mut current = args;
+    ///         while raw::sexp_pairp(current) != 0 {
+    ///             total += raw::sexp_unbox_fixnum(raw::sexp_car(current)) as i64;
+    ///             current = raw::sexp_cdr(current);
+    ///         }
+    ///         raw::sexp_make_fixnum(total as raw::sexp_sint_t)
+    ///     }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new()?;
+    /// ctx.define_fn_variadic("sum-all", sum_all)?;
+    /// let result = ctx.evaluate("(sum-all 1 2 3 4 5)")?;
+    /// assert_eq!(result, Value::Integer(15));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn define_fn_variadic(
         &self,
         name: &str,
         f: unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
     ) -> Result<()> {
-        self.define_foreign(name, 1, f as *const std::ffi::c_void)
-    }
-
-    /// register a 2-argument foreign function as a scheme primitive
-    ///
-    /// chibi calls with `(ctx, self, 2, arg1, arg2)`.
-    pub fn define_fn2(
-        &self,
-        name: &str,
-        f: unsafe extern "C" fn(
-            ffi::sexp,
-            ffi::sexp,
-            ffi::sexp_sint_t,
-            ffi::sexp,
-            ffi::sexp,
-        ) -> ffi::sexp,
-    ) -> Result<()> {
-        self.define_foreign(name, 2, f as *const std::ffi::c_void)
-    }
-
-    /// register a 3-argument foreign function as a scheme primitive
-    ///
-    /// chibi calls with `(ctx, self, 3, arg1, arg2, arg3)`.
-    pub fn define_fn3(
-        &self,
-        name: &str,
-        f: unsafe extern "C" fn(
-            ffi::sexp,
-            ffi::sexp,
-            ffi::sexp_sint_t,
-            ffi::sexp,
-            ffi::sexp,
-            ffi::sexp,
-        ) -> ffi::sexp,
-    ) -> Result<()> {
-        self.define_foreign(name, 3, f as *const std::ffi::c_void)
-    }
-
-    /// internal: register a foreign function with chibi
-    fn define_foreign(&self, name: &str, num_args: i32, f: *const std::ffi::c_void) -> Result<()> {
         let c_name = CString::new(name)
             .map_err(|_| Error::EvalError("function name contains null bytes".to_string()))?;
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
-            // chibi stores the function pointer as sexp_proc1 and casts at call time
-            // based on the opcode's num_args — this is safe because we match arity.
-            // the transmute converts *const c_void to the expected Option<extern "C" fn>
-            // that chibi's FFI registration expects.
             let f_typed: Option<
                 unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-            > = std::mem::transmute::<*const std::ffi::c_void, _>(f);
-            let result = ffi::sexp_define_foreign(
+            > = std::mem::transmute::<*const std::ffi::c_void, _>(f as *const std::ffi::c_void);
+            let result = ffi::sexp_define_foreign_proc(
                 self.ctx,
                 env,
                 c_name.as_ptr(),
-                num_args as std::os::raw::c_int,
+                0, // num_args = 0 (variadic handles its own arity)
+                ffi::SEXP_PROC_VARIADIC,
                 c_name.as_ptr(),
                 f_typed,
             );
 
             if ffi::sexp_exceptionp(result) != 0 {
                 return Err(Error::EvalError(format!(
-                    "failed to define foreign function '{}'",
+                    "failed to define variadic function '{}'",
                     name
                 )));
             }
         }
 
         Ok(())
+    }
+
+    /// call a scheme procedure from rust
+    ///
+    /// invokes a `Value::Procedure` (lambda, named function, or builtin)
+    /// with the given arguments and returns the result.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new()?;
+    /// let add = ctx.evaluate("+")?;
+    /// let result = ctx.call(&add, &[Value::Integer(2), Value::Integer(3)])?;
+    /// assert_eq!(result, Value::Integer(5));
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # errors
+    ///
+    /// returns [`Error::TypeError`] if `proc` is not a `Value::Procedure`,
+    /// or [`Error::EvalError`] if the scheme call raises an exception.
+    pub fn call(&self, proc: &Value, args: &[Value]) -> Result<Value> {
+        let raw_proc = proc
+            .as_procedure()
+            .ok_or_else(|| Error::TypeError(format!("expected procedure, got {}", proc)))?;
+
+        unsafe {
+            // build scheme list from args (reverse-iterate with cons, like to_raw does for lists)
+            let mut arg_list = ffi::get_null();
+            for arg in args.iter().rev() {
+                let raw_arg = arg.to_raw(self.ctx)?;
+                arg_list = ffi::sexp_cons(self.ctx, raw_arg, arg_list);
+            }
+
+            let result = ffi::sexp_apply_proc(self.ctx, raw_proc, arg_list);
+
+            if ffi::sexp_exceptionp(result) != 0 {
+                return Value::from_raw(self.ctx, result);
+            }
+
+            Value::from_raw(self.ctx, result)
+        }
     }
 
     /// get the raw context pointer for advanced ffi use
@@ -522,38 +552,36 @@ mod tests {
         );
     }
 
-    // --- foreign functions ---
+    // --- foreign functions (using define_fn_variadic) ---
 
     #[test]
-    fn test_define_fn1() {
+    fn test_foreign_fn_integer() {
         unsafe extern "C" fn add_forty_two(
             _ctx: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
-            arg: crate::ffi::sexp,
+            args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
-                let n = crate::ffi::sexp_unbox_fixnum(arg);
+                let n = crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(args));
                 crate::ffi::sexp_make_fixnum(n + 42)
             }
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn1("add42", add_forty_two)
+        ctx.define_fn_variadic("add42", add_forty_two)
             .expect("failed to define fn");
         let result = ctx.evaluate("(add42 8)").expect("failed to evaluate");
-        match result {
-            Value::Integer(n) => assert_eq!(n, 50),
-            _ => panic!("expected integer, got {:?}", result),
-        }
+        assert_eq!(result, Value::Integer(50));
     }
 
     #[test]
-    fn test_define_fn0_string() {
-        unsafe extern "C" fn hello(
+    fn test_foreign_fn_string() {
+        unsafe extern "C" fn hello_fn(
             ctx: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let s = "hello from rust";
@@ -563,65 +591,56 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("hello", hello).expect("failed to define fn");
+        ctx.define_fn_variadic("hello", hello_fn)
+            .expect("failed to define fn");
         let result = ctx.evaluate("(hello)").expect("failed to evaluate");
-        match result {
-            Value::String(s) => assert_eq!(s, "hello from rust"),
-            _ => panic!("expected string, got {:?}", result),
-        }
+        assert_eq!(result, Value::String("hello from rust".to_string()));
     }
 
     #[test]
-    fn test_define_fn2() {
+    fn test_foreign_fn_two_args() {
         unsafe extern "C" fn multiply(
             _ctx: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
-            a: crate::ffi::sexp,
-            b: crate::ffi::sexp,
+            args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
-                let x = crate::ffi::sexp_unbox_fixnum(a);
-                let y = crate::ffi::sexp_unbox_fixnum(b);
-                crate::ffi::sexp_make_fixnum(x * y)
+                let a = crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(args));
+                let rest = crate::ffi::sexp_cdr(args);
+                let b = crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(rest));
+                crate::ffi::sexp_make_fixnum(a * b)
             }
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn2("rust-mul", multiply)
+        ctx.define_fn_variadic("rust-mul", multiply)
             .expect("failed to define fn");
         let result = ctx.evaluate("(rust-mul 6 7)").expect("failed to evaluate");
-        match result {
-            Value::Integer(n) => assert_eq!(n, 42),
-            _ => panic!("expected integer, got {:?}", result),
-        }
+        assert_eq!(result, Value::Integer(42));
     }
 
     #[test]
     fn test_foreign_fn_uses_scheme_values() {
-        // a foreign fn that squares a number, then scheme uses it in an expression
         unsafe extern "C" fn square(
             _ctx: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
-            arg: crate::ffi::sexp,
+            args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
-                let n = crate::ffi::sexp_unbox_fixnum(arg);
+                let n = crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(args));
                 crate::ffi::sexp_make_fixnum(n * n)
             }
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn1("square", square)
+        ctx.define_fn_variadic("square", square)
             .expect("failed to define fn");
         let result = ctx
             .evaluate("(+ (square 3) (square 4))")
             .expect("failed to evaluate");
-        match result {
-            Value::Integer(n) => assert_eq!(n, 25), // 9 + 16
-            _ => panic!("expected integer, got {:?}", result),
-        }
+        assert_eq!(result, Value::Integer(25)); // 9 + 16
     }
 
     // --- gc pinning (deeply nested structures) ---
@@ -791,6 +810,7 @@ mod tests {
             ctx_ptr: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let list = Value::List(vec![
@@ -804,7 +824,7 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("get-test-list", get_test_list)
+        ctx.define_fn_variadic("get-test-list", get_test_list)
             .expect("define fn");
         let result = ctx.evaluate("(get-test-list)").expect("eval");
         match result {
@@ -824,6 +844,7 @@ mod tests {
             ctx_ptr: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let pair = Value::Pair(
@@ -836,7 +857,7 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("get-test-pair", get_test_pair)
+        ctx.define_fn_variadic("get-test-pair", get_test_pair)
             .expect("define fn");
         let result = ctx.evaluate("(get-test-pair)").expect("eval");
         match result {
@@ -854,6 +875,7 @@ mod tests {
             ctx_ptr: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let vec = Value::Vector(vec![Value::String("a".into()), Value::String("b".into())]);
@@ -863,7 +885,7 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("get-test-vector", get_test_vector)
+        ctx.define_fn_variadic("get-test-vector", get_test_vector)
             .expect("define fn");
         let result = ctx.evaluate("(get-test-vector)").expect("eval");
         match result {
@@ -882,6 +904,7 @@ mod tests {
             ctx_ptr: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let nested = Value::List(vec![
@@ -896,7 +919,7 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("get-nested-list", get_nested_list)
+        ctx.define_fn_variadic("get-nested-list", get_nested_list)
             .expect("define fn");
         let result = ctx.evaluate("(get-nested-list)").expect("eval");
         match &result {
@@ -916,6 +939,7 @@ mod tests {
             ctx_ptr: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let empty = Value::List(vec![]);
@@ -926,7 +950,7 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("get-empty-list", get_empty_list)
+        ctx.define_fn_variadic("get-empty-list", get_empty_list)
             .expect("define fn");
         let result = ctx.evaluate("(get-empty-list)").expect("eval");
         assert!(
@@ -942,6 +966,7 @@ mod tests {
             ctx_ptr: crate::ffi::sexp,
             _self: crate::ffi::sexp,
             _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
         ) -> crate::ffi::sexp {
             unsafe {
                 let empty = Value::Vector(vec![]);
@@ -952,7 +977,7 @@ mod tests {
         }
 
         let ctx = Context::new().expect("failed to create context");
-        ctx.define_fn0("get-empty-vector", get_empty_vector)
+        ctx.define_fn_variadic("get-empty-vector", get_empty_vector)
             .expect("define fn");
         let result = ctx.evaluate("(get-empty-vector)").expect("eval");
         match result {
@@ -1063,5 +1088,265 @@ mod tests {
         assert!(result.is_unspecified());
 
         std::fs::remove_file(&path).ok();
+    }
+
+    // --- procedures as values ---
+
+    #[test]
+    fn test_evaluate_lambda_returns_procedure() {
+        let ctx = Context::new().expect("create context");
+        let result = ctx.evaluate("(lambda (x) (* x x))").expect("eval lambda");
+        assert!(
+            result.is_procedure(),
+            "expected procedure, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_call_lambda() {
+        let ctx = Context::new().expect("create context");
+        let square = ctx.evaluate("(lambda (x) (* x x))").expect("eval lambda");
+        let result = ctx
+            .call(&square, &[Value::Integer(7)])
+            .expect("call lambda");
+        assert_eq!(result, Value::Integer(49));
+    }
+
+    #[test]
+    fn test_call_named_procedure() {
+        let ctx = Context::new().expect("create context");
+        ctx.evaluate("(define (add a b) (+ a b))")
+            .expect("define add");
+        let add = ctx.evaluate("add").expect("get add");
+        assert!(add.is_procedure());
+        let result = ctx
+            .call(&add, &[Value::Integer(3), Value::Integer(4)])
+            .expect("call add");
+        assert_eq!(result, Value::Integer(7));
+    }
+
+    #[test]
+    fn test_call_builtin_procedure() {
+        let ctx = Context::new().expect("create context");
+        // + is a builtin opcode, should come back as Procedure via sexp_applicablep
+        let plus = ctx.evaluate("+").expect("get +");
+        assert!(
+            plus.is_procedure(),
+            "expected procedure for +, got {:?}",
+            plus
+        );
+        let result = ctx
+            .call(&plus, &[Value::Integer(10), Value::Integer(20)])
+            .expect("call +");
+        assert_eq!(result, Value::Integer(30));
+    }
+
+    #[test]
+    fn test_call_with_non_procedure_returns_type_error() {
+        let ctx = Context::new().expect("create context");
+        let not_proc = Value::Integer(42);
+        let err = ctx.call(&not_proc, &[]).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("type error"),
+            "expected type error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_call_wrong_arity_propagates_exception() {
+        let ctx = Context::new().expect("create context");
+        let square = ctx.evaluate("(lambda (x) (* x x))").expect("eval lambda");
+        // call with 2 args when it expects 1
+        let err = ctx
+            .call(&square, &[Value::Integer(1), Value::Integer(2)])
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("error"), "expected exception, got: {}", msg);
+    }
+
+    #[test]
+    fn test_call_zero_args() {
+        let ctx = Context::new().expect("create context");
+        let thunk = ctx.evaluate("(lambda () 42)").expect("eval thunk");
+        let result = ctx.call(&thunk, &[]).expect("call thunk");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_extract_builtin_via_define() {
+        // (define f +) f → Procedure
+        let ctx = Context::new().expect("create context");
+        let f = ctx.evaluate("(define f +) f").expect("eval");
+        assert!(f.is_procedure(), "expected procedure, got {:?}", f);
+        let result = ctx
+            .call(&f, &[Value::Integer(1), Value::Integer(2)])
+            .expect("call f");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_roundtrip_rust_fn_as_procedure() {
+        // register rust fn, get it back as procedure, call from rust
+        unsafe extern "C" fn double_it(
+            _ctx: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let n = crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(args));
+                crate::ffi::sexp_make_fixnum(n * 2)
+            }
+        }
+
+        let ctx = Context::new().expect("create context");
+        ctx.define_fn_variadic("double-it", double_it)
+            .expect("define fn");
+        let proc = ctx.evaluate("double-it").expect("get proc");
+        assert!(proc.is_procedure(), "expected procedure, got {:?}", proc);
+        let result = ctx
+            .call(&proc, &[Value::Integer(21)])
+            .expect("call double-it");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_procedure_display() {
+        let ctx = Context::new().expect("create context");
+        let proc = ctx.evaluate("(lambda (x) x)").expect("eval lambda");
+        assert_eq!(format!("{}", proc), "#<procedure>");
+    }
+
+    #[test]
+    fn test_procedure_equality() {
+        let ctx = Context::new().expect("create context");
+        // same lambda bound to a variable — same object
+        ctx.evaluate("(define f (lambda (x) x))").expect("define f");
+        let f1 = ctx.evaluate("f").expect("get f");
+        let f2 = ctx.evaluate("f").expect("get f again");
+        assert_eq!(f1, f2, "same binding should yield same procedure");
+
+        // different lambdas are different objects
+        let g = ctx.evaluate("(lambda (x) x)").expect("different lambda");
+        assert_ne!(f1, g, "different lambdas should not be equal");
+    }
+
+    // --- variadic foreign functions ---
+
+    #[test]
+    fn test_variadic_sum() {
+        unsafe extern "C" fn sum_all(
+            _ctx: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let mut total: i64 = 0;
+                let mut current = args;
+                while crate::ffi::sexp_pairp(current) != 0 {
+                    total += crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(current)) as i64;
+                    current = crate::ffi::sexp_cdr(current);
+                }
+                crate::ffi::sexp_make_fixnum(total as crate::ffi::sexp_sint_t)
+            }
+        }
+
+        let ctx = Context::new().expect("create context");
+        ctx.define_fn_variadic("sum-all", sum_all)
+            .expect("define fn");
+        let result = ctx.evaluate("(sum-all 1 2 3 4 5)").expect("eval");
+        assert_eq!(result, Value::Integer(15));
+    }
+
+    #[test]
+    fn test_variadic_zero_args() {
+        unsafe extern "C" fn constant(
+            _ctx: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe { crate::ffi::sexp_make_fixnum(42) }
+        }
+
+        let ctx = Context::new().expect("create context");
+        ctx.define_fn_variadic("constant", constant)
+            .expect("define fn");
+        let result = ctx.evaluate("(constant)").expect("eval");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_variadic_many_args() {
+        unsafe extern "C" fn count_args(
+            _ctx: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let mut count: i64 = 0;
+                let mut current = args;
+                while crate::ffi::sexp_pairp(current) != 0 {
+                    count += 1;
+                    current = crate::ffi::sexp_cdr(current);
+                }
+                crate::ffi::sexp_make_fixnum(count as crate::ffi::sexp_sint_t)
+            }
+        }
+
+        let ctx = Context::new().expect("create context");
+        ctx.define_fn_variadic("count-args", count_args)
+            .expect("define fn");
+        let result = ctx
+            .evaluate("(count-args 1 2 3 4 5 6 7 8 9 10 11 12)")
+            .expect("eval");
+        assert_eq!(result, Value::Integer(12));
+    }
+
+    #[test]
+    fn test_variadic_mixed_types() {
+        // returns a string describing the types of all args
+        unsafe extern "C" fn describe_types(
+            ctx: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let mut desc = std::string::String::new();
+                let mut current = args;
+                while crate::ffi::sexp_pairp(current) != 0 {
+                    let item = crate::ffi::sexp_car(current);
+                    if !desc.is_empty() {
+                        desc.push(' ');
+                    }
+                    if crate::ffi::sexp_integerp(item) != 0 {
+                        desc.push_str("int");
+                    } else if crate::ffi::sexp_stringp(item) != 0 {
+                        desc.push_str("str");
+                    } else if crate::ffi::sexp_booleanp(item) != 0 {
+                        desc.push_str("bool");
+                    } else {
+                        desc.push_str("other");
+                    }
+                    current = crate::ffi::sexp_cdr(current);
+                }
+                let c_str = std::ffi::CString::new(desc.as_str()).unwrap();
+                crate::ffi::sexp_c_str(ctx, c_str.as_ptr(), desc.len() as crate::ffi::sexp_sint_t)
+            }
+        }
+
+        let ctx = Context::new().expect("create context");
+        ctx.define_fn_variadic("describe-types", describe_types)
+            .expect("define fn");
+        let result = ctx
+            .evaluate(r#"(describe-types 1 "hello" #t 42)"#)
+            .expect("eval");
+        assert_eq!(result, Value::String("int str bool int".to_string()));
     }
 }

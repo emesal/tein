@@ -91,6 +91,17 @@ unsafe extern "C" {
         f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
     ) -> sexp;
 
+    // foreign function registration (procedure-wrapped, supports variadic)
+    pub fn tein_sexp_define_foreign_proc(
+        ctx: sexp,
+        env: sexp,
+        name: *const c_char,
+        num_args: c_int,
+        flags: c_int,
+        fname: *const c_char,
+        f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
+    ) -> sexp;
+
     // interning symbols
     pub fn tein_sexp_intern(ctx: sexp, str: *const c_char, len: sexp_sint_t) -> sexp;
 
@@ -108,6 +119,14 @@ unsafe extern "C" {
     pub fn tein_sexp_open_input_string(ctx: sexp, str: sexp) -> sexp;
     pub fn tein_sexp_read(ctx: sexp, port: sexp) -> sexp;
     pub fn tein_sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp;
+
+    // procedure/application support (via tein shim)
+    pub fn tein_sexp_procedurep(x: sexp) -> c_int;
+    pub fn tein_sexp_opcodep(x: sexp) -> c_int;
+    pub fn tein_sexp_applicablep(x: sexp) -> c_int;
+
+    // procedure application (chibi SEXP_API — not a macro)
+    pub fn sexp_apply(ctx: sexp, proc: sexp, args: sexp) -> sexp;
 
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
@@ -284,6 +303,23 @@ pub unsafe fn get_null() -> sexp {
     unsafe { tein_get_null() }
 }
 
+// foreign function registration (procedure-wrapped, supports variadic)
+/// flag indicating a variadic foreign function (rest-args)
+pub const SEXP_PROC_VARIADIC: c_int = 1;
+
+#[inline]
+pub unsafe fn sexp_define_foreign_proc(
+    ctx: sexp,
+    env: sexp,
+    name: *const c_char,
+    num_args: c_int,
+    flags: c_int,
+    fname: *const c_char,
+    f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
+) -> sexp {
+    unsafe { tein_sexp_define_foreign_proc(ctx, env, name, num_args, flags, fname, f) }
+}
+
 // pair/list construction
 #[inline]
 pub unsafe fn sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp {
@@ -299,6 +335,27 @@ pub unsafe fn sexp_make_vector(ctx: sexp, len: sexp_uint_t, dflt: sexp) -> sexp 
 #[inline]
 pub unsafe fn sexp_vector_set(vec: sexp, i: sexp_uint_t, val: sexp) {
     unsafe { tein_sexp_vector_set(vec, i, val) }
+}
+
+// procedure/application support
+#[inline]
+pub unsafe fn sexp_procedurep(x: sexp) -> c_int {
+    unsafe { tein_sexp_procedurep(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_opcodep(x: sexp) -> c_int {
+    unsafe { tein_sexp_opcodep(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_applicablep(x: sexp) -> c_int {
+    unsafe { tein_sexp_applicablep(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_apply_proc(ctx: sexp, proc: sexp, args: sexp) -> sexp {
+    unsafe { sexp_apply(ctx, proc, args) }
 }
 
 // eof constant

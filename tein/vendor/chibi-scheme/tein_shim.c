@@ -48,6 +48,13 @@ sexp tein_sexp_define_foreign(sexp ctx, sexp env, const char* name,
     return sexp_define_foreign_aux(ctx, env, name, num_args, 0, fname, f, NULL);
 }
 
+// foreign function registration (procedure-wrapped, supports variadic)
+sexp tein_sexp_define_foreign_proc(sexp ctx, sexp env, const char* name,
+                                   int num_args, int flags,
+                                   const char* fname, sexp_proc1 f) {
+    return sexp_define_foreign_proc_aux(ctx, env, name, num_args, flags, fname, f, NULL);
+}
+
 // interning symbols
 sexp tein_sexp_intern(sexp ctx, const char* str, sexp_sint_t len) {
     return sexp_intern(ctx, str, len);
@@ -70,6 +77,11 @@ sexp tein_sexp_make_vector(sexp ctx, sexp_uint_t len, sexp dflt) {
 void tein_sexp_vector_set(sexp vec, sexp_uint_t i, sexp val) {
     sexp_vector_data(vec)[i] = val;
 }
+
+// procedure/application support
+int tein_sexp_procedurep(sexp x) { return sexp_procedurep(x); }
+int tein_sexp_opcodep(sexp x) { return sexp_opcodep(x); }
+int tein_sexp_applicablep(sexp x) { return sexp_applicablep(x); }
 
 // multi-expression evaluation support
 sexp tein_get_eof() { return SEXP_EOF; }

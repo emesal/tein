@@ -28,18 +28,21 @@ pub use context::Context;
 pub use error::{Error, Result};
 pub use value::Value;
 
-/// raw ffi types for advanced use (foreign functions, etc.)
+/// re-export the `#[scheme_fn]` proc macro for ergonomic foreign function definition
+pub use tein_macros::scheme_fn;
+
+/// raw ffi types for advanced use (foreign functions, proc macro generated code, etc.)
 ///
-/// these are thin wrappers over chibi's c api. use them to build
-/// foreign functions that can be registered with [`Context::define_fn0`]
-/// through [`Context::define_fn3`].
+/// these are thin wrappers over chibi's c api. the `#[scheme_fn]` proc macro
+/// generates code that references these symbols, so they must remain public.
 #[allow(missing_docs)]
 pub mod raw {
     pub use crate::ffi::{
         get_false, get_null, get_true, get_void, sexp_booleanp, sexp_c_str, sexp_car, sexp_cdr,
-        sexp_exceptionp, sexp_flonum_value, sexp_flonump, sexp_integerp, sexp_make_boolean,
-        sexp_make_fixnum, sexp_make_flonum, sexp_nullp, sexp_pairp, sexp_stringp, sexp_symbolp,
-        sexp_unbox_fixnum, sexp_vectorp,
+        sexp_cons, sexp_exceptionp, sexp_flonum_value, sexp_flonump, sexp_integerp,
+        sexp_make_boolean, sexp_make_fixnum, sexp_make_flonum, sexp_nullp, sexp_pairp,
+        sexp_string_data, sexp_string_size, sexp_stringp, sexp_symbolp, sexp_unbox_fixnum,
+        sexp_vectorp,
     };
     pub use crate::ffi::{sexp, sexp_sint_t};
 }
