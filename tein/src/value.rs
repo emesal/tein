@@ -35,7 +35,10 @@ const MAX_DEPTH: usize = 10_000;
 ///
 /// represents the result of evaluating scheme code.
 /// this is a safe wrapper around chibi's internal sexp type.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// most variants own their data, but `Procedure` holds a raw sexp pointer
+/// that is only valid within the originating `Context` (enforced by !Send/!Sync).
+#[derive(Debug, Clone)]
 pub enum Value {
     /// integer value
     Integer(i64),
@@ -66,6 +69,12 @@ pub enum Value {
 
     /// unspecified value (like void in c)
     Unspecified,
+
+    /// a callable scheme procedure or opcode (builtin like `+`)
+    ///
+    /// holds a raw sexp pointer — only valid within the originating Context.
+    /// thread safety is enforced by Context being !Send + !Sync.
+    Procedure(ffi::sexp),
 
     /// other scheme values we don't yet handle
     Other(String),
@@ -132,6 +141,11 @@ impl Value {
                 let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
                 let s = String::from_utf8(bytes.to_vec())?;
                 return Ok(Value::Symbol(s));
+            }
+
+            // check applicablep (procedures + builtins like +) before pairs/lists
+            if ffi::sexp_applicablep(raw) != 0 {
+                return Ok(Value::Procedure(raw));
             }
 
             if ffi::sexp_vectorp(raw) != 0 {
@@ -229,7 +243,7 @@ impl Value {
     /// convert a rust value to a raw chibi sexp
     ///
     /// useful for returning values from foreign functions registered
-    /// with [`Context::define_fn0`] through [`Context::define_fn3`].
+    /// with [`Context::define_fn_variadic`] or `#[scheme_fn]`.
     ///
     /// supports all value types except `Other`.
     ///
@@ -296,6 +310,7 @@ impl Value {
                     }
                     Ok(vec)
                 }
+                Value::Procedure(raw) => Ok(*raw),
                 Value::Other(desc) => Err(Error::TypeError(format!(
                     "cannot convert Other({}) to raw sexp",
                     desc,
@@ -372,6 +387,21 @@ impl Value {
         }
     }
 
+    /// extract the raw sexp pointer, if this value is a `Procedure`
+    ///
+    /// the returned pointer is opaque — pass it to [`Context::call`] to invoke.
+    pub fn as_procedure(&self) -> Option<ffi::sexp> {
+        match self {
+            Value::Procedure(raw) => Some(*raw),
+            _ => None,
+        }
+    }
+
+    /// returns true if this value is a `Procedure`
+    pub fn is_procedure(&self) -> bool {
+        matches!(self, Value::Procedure(_))
+    }
+
     /// returns true if this value is `Nil`
     pub fn is_nil(&self) -> bool {
         matches!(self, Value::Nil)
@@ -380,6 +410,27 @@ impl Value {
     /// returns true if this value is `Unspecified`
     pub fn is_unspecified(&self) -> bool {
         matches!(self, Value::Unspecified)
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Integer(a), Value::Integer(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            (Value::Boolean(a), Value::Boolean(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Pair(a1, a2), Value::Pair(b1, b2)) => a1 == b1 && a2 == b2,
+            (Value::Vector(a), Value::Vector(b)) => a == b,
+            (Value::Nil, Value::Nil) => true,
+            (Value::Unspecified, Value::Unspecified) => true,
+            // procedure equality is raw pointer identity (same scheme object)
+            (Value::Procedure(a), Value::Procedure(b)) => std::ptr::eq(*a, *b),
+            (Value::Other(a), Value::Other(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -429,6 +480,7 @@ impl fmt::Display for Value {
             }
             Value::Nil => write!(f, "()"),
             Value::Unspecified => write!(f, "#<unspecified>"),
+            Value::Procedure(_) => write!(f, "#<procedure>"),
             Value::Other(s) => write!(f, "#<{}>", s),
         }
     }
