@@ -37,6 +37,13 @@
 - `TimeoutContext` for wall-clock deadlines via dedicated thread
 - `Error::StepLimitExceeded` and `Error::Timeout` variants
 
+**milestone 4b — parameterised IO presets**
+- `FsPolicy` with path prefix matching and canonicalisation
+- wrapper foreign functions for all 4 file-open primitives
+- `.file_read(&[...])` / `.file_write(&[...])` builder api
+- support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
+- path traversal and symlink protection via `canonicalize()`
+
 ### known limitations
 
 1. **no r7rs standard environment**
@@ -59,7 +66,7 @@ tein/
     error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
                    IoError, StepLimitExceeded, Timeout)
     ffi.rs       — unsafe c bindings + safe wrappers, `raw` module
-    sandbox.rs   — Preset type + 14 const preset definitions
+    sandbox.rs   — Preset type, FsPolicy, 16 const preset definitions
     timeout.rs   — TimeoutContext: wall-clock timeout via thread wrapper
   vendor/chibi-scheme/
     tein_shim.c  — exports chibi c macros as real functions, fuel control,
@@ -92,6 +99,19 @@ ContextBuilder::build() with presets:
   4. set null env as active → only allowed primitives accessible
 ```
 
+### IO policy flow
+
+```
+ContextBuilder with file_read/file_write:
+  1. capture original file-open procs from full env before restriction
+  2. store in thread-local ORIGINAL_PROCS (4 slots, one per open-*-file)
+  3. register wrapper foreign fns in restricted env
+  4. set FsPolicy thread-local with path prefixes
+  5. on call: wrapper extracts filename → canonicalises path →
+     checks prefix match → delegates to original proc or returns error
+  6. on Context::drop(): clear FsPolicy and ORIGINAL_PROCS thread-locals
+```
+
 ### thread safety
 
 - `Context` is intentionally !Send + !Sync (chibi is not thread-safe)
@@ -112,7 +132,7 @@ ContextBuilder::build() with presets:
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (88 lib + 12 scheme_fn + 8 doc)
+cargo test                         # all tests (100 lib + 12 scheme_fn + 8 doc)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint

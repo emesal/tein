@@ -140,6 +140,9 @@ unsafe extern "C" {
     pub fn tein_sexp_env_ref(ctx: sexp, env: sexp, sym: sexp, dflt: sexp) -> sexp;
     pub fn tein_sexp_context_env_set(ctx: sexp, env: sexp);
 
+    // error construction (for policy violation exceptions)
+    pub fn tein_make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp;
+
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
 
@@ -330,6 +333,12 @@ pub unsafe fn sexp_define_foreign_proc(
     f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
 ) -> sexp {
     unsafe { tein_sexp_define_foreign_proc(ctx, env, name, num_args, flags, fname, f) }
+}
+
+// error construction (policy violations)
+#[inline]
+pub unsafe fn make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp {
+    unsafe { tein_make_error(ctx, msg, len) }
 }
 
 // pair/list construction

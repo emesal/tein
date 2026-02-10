@@ -10,7 +10,7 @@
 #include "chibi/eval.h"
 
 /* tein: fuel limit support — declared in tein_shim.c */
-extern sexp_sint_t tein_fuel_consume_slice(sexp ctx, sexp_sint_t slice_used);
+extern sexp_sint_t tein_fuel_consume_slice(sexp_sint_t slice_used);
 
 #if SEXP_USE_DEBUG_VM > 1
 static void sexp_print_stack (sexp ctx, sexp *stack, int top, int fp, sexp out) {
@@ -1079,6 +1079,9 @@ sexp sexp_apply (sexp ctx, sexp proc, sexp args) {
 #if SEXP_USE_GREEN_THREADS
   sexp root_thread = ctx;
   sexp_sint_t fuel = sexp_context_refuel(ctx);
+#else
+  /* tein: standalone fuel counter for platforms without green threads */
+  sexp_sint_t fuel = SEXP_DEFAULT_QUANTUM;
 #endif
 #if SEXP_USE_PROFILE_VM
   unsigned char last_op = SEXP_OP_NOOP;
@@ -1146,12 +1149,21 @@ sexp sexp_apply (sexp ctx, sexp proc, sexp args) {
 #endif
     }
     /* tein: consume a timeslice from the fuel budget */
-    fuel = tein_fuel_consume_slice(ctx, sexp_context_refuel(ctx));
+    fuel = tein_fuel_consume_slice(sexp_context_refuel(ctx));
+    sexp_context_refuel(ctx) = fuel;
     if (fuel <= 0) goto end_loop;
     if (sexp_context_waitp(ctx)) {
       fuel = 1;
       goto loop;  /* we were still waiting, try again */
     }
+  }
+#else
+  /* tein: standalone fuel check for platforms without green threads.
+     decrements the local fuel counter each opcode; at each timeslice
+     boundary, consumes from the thread-local budget. */
+  if (--fuel <= 0) {
+    fuel = tein_fuel_consume_slice(SEXP_DEFAULT_QUANTUM);
+    if (fuel <= 0) goto end_loop;
   }
 #endif
 #if SEXP_USE_DEBUG_VM

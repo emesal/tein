@@ -29,6 +29,7 @@ fn main() {
         .include(&include_dir)
         .include(chibi_dir)
         .flag("-DSEXP_USE_DL=0") // disable dynamic loading
+        .flag("-DSEXP_STATIC_LIBRARY") // static link, not dll (prevents dllimport on win32)
         .warnings(false); // chibi may have some warnings
 
     // add all source files

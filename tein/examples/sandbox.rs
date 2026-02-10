@@ -94,6 +94,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => println!("    unexpected: {:?}", other),
     }
 
+    println!("\n--- parameterised file IO ---\n");
+
+    // create a temp directory for the IO demo
+    let io_dir = std::env::temp_dir().join("tein-sandbox-demo");
+    std::fs::create_dir_all(&io_dir)?;
+    let canon_dir = io_dir.canonicalize()?;
+    let canon_str = canon_dir.to_str().unwrap();
+
+    // file_read: allow reading only from our temp dir
+    let ctx = Context::builder()
+        .safe()
+        .file_read(&[canon_str])
+        .step_limit(100_000)
+        .build()?;
+
+    // write a test file from rust, then read it from scheme
+    let test_file = io_dir.join("greeting.txt");
+    std::fs::write(&test_file, "hello-from-tein")?;
+
+    println!("==> reading file from allowed path");
+    let code = format!(
+        r#"(define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
+        test_file.display()
+    );
+    let result = ctx.evaluate(&code)?;
+    println!("    read: {}", result);
+
+    println!("\n==> reading file from denied path");
+    match ctx.evaluate(r#"(open-input-file "/etc/passwd")"#) {
+        Err(e) => println!("    blocked: {}", e),
+        Ok(v) => println!("    unexpected: {}", v),
+    }
+
+    // file_write: allow writing only to our temp dir
+    let ctx = Context::builder()
+        .safe()
+        .file_write(&[canon_str])
+        .step_limit(100_000)
+        .build()?;
+
+    let output_file = io_dir.join("output.txt");
+    println!("\n==> writing file to allowed path");
+    let code = format!(
+        r#"(define p (open-output-file "{}")) (write "hello" p) (close-output-port p)"#,
+        output_file.display()
+    );
+    ctx.evaluate(&code)?;
+    let contents = std::fs::read_to_string(&output_file)?;
+    println!("    wrote: {}", contents);
+
+    println!("\n==> writing file to denied path");
+    match ctx.evaluate(r#"(open-output-file "/tmp/tein-nope.txt")"#) {
+        Err(e) => println!("    blocked: {}", e),
+        Ok(v) => println!("    unexpected: {}", v),
+    }
+
+    // cleanup
+    std::fs::remove_dir_all(&io_dir).ok();
+
     println!("\ndone!");
     Ok(())
 }
