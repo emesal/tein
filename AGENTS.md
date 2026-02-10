@@ -14,12 +14,12 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (23 unit + 3 doc-tests)
+cargo test                         # all tests (88 lib + 12 scheme_fn + 8 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
 cargo fmt --check                  # format check
-cargo run --example basic          # run an example (basic|floats|ffi|debug)
+cargo run --example basic          # run an example (basic|floats|ffi|debug|sandbox)
 cargo clean && cargo build         # nuclear option if ffi gets weird
 ```
 
@@ -27,20 +27,26 @@ cargo clean && cargo build         # nuclear option if ffi gets weird
 
 ```
 src/
-  lib.rs       — public api re-exports
-  context.rs   — Context: evaluation entry point, foreign fn registration, all tests
+  lib.rs       — public api re-exports (Context, ContextBuilder, TimeoutContext, Value, Error)
+  context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests
   value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
-  error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error)
+  error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
+                 StepLimitExceeded, Timeout)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
+  sandbox.rs   — Preset type + 14 const preset definitions for env restriction
+  timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
 vendor/chibi-scheme/
-  tein_shim.c  — exports chibi c macros as real functions (rust ffi can't call macros)
+  tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation
+  vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
 build.rs       — compiles chibi + shim, generates install.h
-examples/      — basic.rs, floats.rs, ffi.rs, debug.rs
+examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 ```
 
-**data flow**: rust code → `Context::evaluate()` → ffi.rs safe wrappers → tein_shim.c → chibi-scheme → sexp result → `Value::from_raw()` → rust `Value` enum
+**data flow**: rust code → `Context::evaluate()` → arm_fuel() → ffi.rs safe wrappers → tein_shim.c → chibi-scheme vm → tein_fuel_consume_slice() at timeslice boundary → sexp result → `Value::from_raw()` → check_fuel() → rust `Value` enum
 
-**thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread.
+**sandboxing flow**: ContextBuilder with presets → create full primitive env → create null env (syntax-only) → copy allowed primitives → set as active env
+
+**thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. fuel counters are thread-local.
 
 ## critical gotcha
 
