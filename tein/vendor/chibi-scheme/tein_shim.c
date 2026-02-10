@@ -98,13 +98,25 @@ sexp tein_sexp_evaluate(sexp ctx, sexp obj, sexp env) { return sexp_eval(ctx, ob
 // fuel on a single context. instead we use thread-local counters that
 // the vm checks via a minimal patch in vm.c.
 //
-// the vm's existing fuel/refuel mechanism runs in small timeslices
-// (default 500 ops). our patch subtracts each timeslice from the
-// thread-local budget. when the budget is exhausted, it zeroes
-// refuel so the vm stops.
+// the vm runs opcodes in small timeslices (default 500 ops). our
+// patch in vm.c calls tein_fuel_consume_slice at each timeslice
+// boundary, subtracting from the thread-local budget. when the
+// budget is exhausted, the vm stops.
+//
+// two vm paths exist: with green threads (unix), the fuel check
+// piggybacks on the existing scheduler timeslice loop. without
+// green threads (windows), a standalone decrement loop provides
+// the same fuel semantics.
 
-__thread sexp_sint_t tein_fuel_budget = -1;   // -1 = unlimited
-__thread int tein_fuel_exhausted_flag = 0;
+// MSVC uses __declspec(thread), gcc/clang use __thread
+#ifdef _MSC_VER
+#define TEIN_THREAD_LOCAL __declspec(thread)
+#else
+#define TEIN_THREAD_LOCAL __thread
+#endif
+
+TEIN_THREAD_LOCAL sexp_sint_t tein_fuel_budget = -1;   // -1 = unlimited
+TEIN_THREAD_LOCAL int tein_fuel_exhausted_flag = 0;
 
 void tein_fuel_arm(sexp ctx, sexp_sint_t total_fuel) {
     (void)ctx;
@@ -124,8 +136,9 @@ int tein_fuel_exhausted(sexp ctx) {
 }
 
 // called from vm.c at the timeslice boundary (when local fuel hits 0).
-// returns the next timeslice size, or 0 to stop the vm.
-sexp_sint_t tein_fuel_consume_slice(sexp ctx, sexp_sint_t slice_used) {
+// subtracts the consumed slice from the thread-local budget and returns
+// the next timeslice size, or 0 to stop the vm.
+sexp_sint_t tein_fuel_consume_slice(sexp_sint_t slice_used) {
     if (tein_fuel_budget < 0) {
         // unlimited — return default quantum
         return SEXP_DEFAULT_QUANTUM;
@@ -133,13 +146,10 @@ sexp_sint_t tein_fuel_consume_slice(sexp ctx, sexp_sint_t slice_used) {
     tein_fuel_budget -= slice_used;
     if (tein_fuel_budget <= 0) {
         tein_fuel_exhausted_flag = 1;
-        sexp_context_refuel(ctx) = 0;
         return 0;
     }
-    sexp_sint_t next = (tein_fuel_budget < SEXP_DEFAULT_QUANTUM)
+    return (tein_fuel_budget < SEXP_DEFAULT_QUANTUM)
         ? tein_fuel_budget : SEXP_DEFAULT_QUANTUM;
-    sexp_context_refuel(ctx) = next;
-    return next;
 }
 
 // error construction (for policy violation exceptions)
