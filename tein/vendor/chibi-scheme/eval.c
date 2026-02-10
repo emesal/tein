@@ -8,6 +8,9 @@
 #include "opt/opcode_names.h"
 #endif
 
+/* tein VFS: forward declaration for embedded filesystem (tein_shim.c) */
+extern const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length);
+
 /************************************************************************/
 
 static int scheme_initialized_p = 0;
@@ -1527,7 +1530,16 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
     in = source;
   } else {
     sexp_assert_type(ctx, sexp_stringp, SEXP_STRING, source);
-    in = sexp_open_input_file(ctx, source);
+    /* tein VFS: load from embedded content instead of filesystem (patch B) */
+    { unsigned int vfs_len = 0;
+      const char *vfs_content = tein_vfs_lookup(sexp_string_data(source), &vfs_len);
+      if (vfs_content) {
+        sexp vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
+        in = sexp_open_input_string(ctx, vfs_str);
+      } else {
+        in = sexp_open_input_file(ctx, source);
+      }
+    }
   }
   sexp_gc_preserve5(ctx, ctx2, x, in, res, out);
   if (sexp_exceptionp(in)) {
@@ -2352,6 +2364,7 @@ char* sexp_find_module_file_raw (sexp ctx, const char *file) {
   sexp ls;
   char *dir, *path;
   sexp_uint_t slash, dirlen, filelen, len;
+  unsigned int tein_vfs_dummy; /* tein VFS: scratch var for lookup check */
 #ifdef PLAN9
 #define file_exists_p(path, buf) (stat(path, buf, 128) >= 0)
   unsigned char buf[128];
@@ -2375,7 +2388,8 @@ char* sexp_find_module_file_raw (sexp ctx, const char *file) {
     if (! slash) path[dirlen] = '/';
     memcpy(path+len-filelen-1, file, filelen);
     path[len-1] = '\0';
-    if (sexp_find_static_library(path) || file_exists_p(path, buf))
+    /* tein VFS: check embedded files alongside static libs and filesystem (patch A) */
+    if (tein_vfs_lookup(path, &tein_vfs_dummy) || sexp_find_static_library(path) || file_exists_p(path, buf))
       return path;
     free(path);
   }

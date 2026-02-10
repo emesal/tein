@@ -40,7 +40,11 @@ unsafe extern "C" {
     // evaluation
     pub fn sexp_eval_string(ctx: sexp, str: *const c_char, len: sexp_sint_t, env: sexp) -> sexp;
 
-    pub fn sexp_load_standard_env(ctx: sexp, env: sexp, version: sexp_uint_t) -> sexp;
+    // version param is a tagged fixnum (sexp), not sexp_uint_t
+    pub fn sexp_load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp;
+
+    // standard ports (via tein shim — wraps sexp_load_standard_ports with stdin/stdout/stderr)
+    pub fn tein_sexp_load_standard_ports(ctx: sexp, env: sexp) -> sexp;
 
     // type checking (via tein shim)
     pub fn tein_sexp_integerp(x: sexp) -> c_int;
@@ -446,4 +450,15 @@ pub unsafe fn sexp_env_ref(ctx: sexp, env: sexp, sym: sexp, dflt: sexp) -> sexp 
 #[inline]
 pub unsafe fn sexp_context_env_set(ctx: sexp, env: sexp) {
     unsafe { tein_sexp_context_env_set(ctx, env) }
+}
+
+// standard environment + ports
+#[inline]
+pub unsafe fn load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp {
+    unsafe { sexp_load_standard_env(ctx, env, version) }
+}
+
+#[inline]
+pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
+    unsafe { tein_sexp_load_standard_ports(ctx, env) }
 }

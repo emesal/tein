@@ -6,8 +6,10 @@
 *.pdb
 # Cargo.lock is committed for reproducible builds (library with examples)
 
-# generated files
+# generated files (build.rs)
 vendor/chibi-scheme/include/chibi/install.h
+vendor/chibi-scheme/tein_vfs_data.h
+vendor/chibi-scheme/tein_clibs.c
 
 # ide
 .vscode/

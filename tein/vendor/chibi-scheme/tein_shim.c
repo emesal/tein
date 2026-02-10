@@ -169,3 +169,39 @@ sexp tein_sexp_env_ref(sexp ctx, sexp env, sexp sym, sexp dflt) {
     return sexp_env_ref(ctx, env, sym, dflt);
 }
 void tein_sexp_context_env_set(sexp ctx, sexp env) { sexp_context_env(ctx) = env; }
+
+// --- virtual filesystem (VFS) for embedded scheme files ---
+//
+// the VFS allows sexp_load_standard_env to find init-7.scm, meta-7.scm,
+// and all module .sld/.scm files without filesystem access. the data is
+// embedded at compile time by build.rs into tein_vfs_data.h.
+//
+// two entry points, called from patched eval.c:
+//   tein_vfs_find()   — maps a relative path to a full vfs:// path
+//   tein_vfs_lookup() — returns embedded content for a full vfs:// path
+
+#include "tein_vfs_data.h"
+
+#include <string.h>
+#include <stdlib.h>
+
+// look up embedded content by full VFS path (e.g. "/vfs/lib/init-7.scm").
+// returns the static content string and sets *out_length, or NULL if not found.
+const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length) {
+    for (int i = 0; tein_vfs_table[i].key != NULL; i++) {
+        if (strcmp(tein_vfs_table[i].key, full_path) == 0) {
+            *out_length = tein_vfs_table[i].length;
+            return tein_vfs_table[i].content;
+        }
+    }
+    return NULL;
+}
+
+// --- standard ports ---
+//
+// wraps sexp_load_standard_ports to bind stdin/stdout/stderr in an env.
+// needed after sexp_load_standard_env for IO to work.
+
+sexp tein_sexp_load_standard_ports(sexp ctx, sexp env) {
+    return sexp_load_standard_ports(ctx, env, stdin, stdout, stderr, 1);
+}

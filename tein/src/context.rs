@@ -2380,4 +2380,31 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // --- standard environment ---
+
+    #[test]
+    fn test_standard_env_loads() {
+        // low-level: verify sexp_load_standard_env succeeds with VFS
+        unsafe {
+            let ctx = ffi::sexp_make_eval_context(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                (4 * 1024 * 1024) as ffi::sexp_uint_t,
+                (128 * 1024 * 1024) as ffi::sexp_uint_t,
+            );
+            assert!(!ctx.is_null(), "context creation failed");
+
+            let env = ffi::sexp_context_env(ctx);
+            let version = ffi::sexp_make_fixnum(7);
+            let result = ffi::load_standard_env(ctx, env, version);
+            assert!(
+                ffi::sexp_exceptionp(result) == 0,
+                "sexp_load_standard_env returned an exception"
+            );
+
+            ffi::sexp_destroy_context(ctx);
+        }
+    }
 }
