@@ -9,6 +9,9 @@
 
 #include "chibi/eval.h"
 
+/* tein: fuel limit support — declared in tein_shim.c */
+extern sexp_sint_t tein_fuel_consume_slice(sexp ctx, sexp_sint_t slice_used);
+
 #if SEXP_USE_DEBUG_VM > 1
 static void sexp_print_stack (sexp ctx, sexp *stack, int top, int fp, sexp out) {
   int i;
@@ -1142,7 +1145,8 @@ sexp sexp_apply (sexp ctx, sexp proc, sexp args) {
       }
 #endif
     }
-    fuel = sexp_context_refuel(ctx);
+    /* tein: consume a timeslice from the fuel budget */
+    fuel = tein_fuel_consume_slice(ctx, sexp_context_refuel(ctx));
     if (fuel <= 0) goto end_loop;
     if (sexp_context_waitp(ctx)) {
       fuel = 1;

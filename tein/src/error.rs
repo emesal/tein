@@ -22,6 +22,12 @@ pub enum Error {
 
     /// file io error
     IoError(String),
+
+    /// evaluation exceeded the configured step limit
+    StepLimitExceeded,
+
+    /// evaluation exceeded the configured wall-clock timeout
+    Timeout,
 }
 
 impl fmt::Display for Error {
@@ -32,6 +38,8 @@ impl fmt::Display for Error {
             Error::InitError(msg) => write!(f, "initialization error: {}", msg),
             Error::Utf8Error(msg) => write!(f, "utf-8 error: {}", msg),
             Error::IoError(msg) => write!(f, "io error: {}", msg),
+            Error::StepLimitExceeded => write!(f, "step limit exceeded"),
+            Error::Timeout => write!(f, "evaluation timed out"),
         }
     }
 }

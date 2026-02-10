@@ -4,9 +4,179 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
+    sandbox::Preset,
 };
 use std::ffi::CString;
 use std::path::Path;
+
+// --- default sizes ---
+
+const DEFAULT_HEAP_SIZE: usize = 4 * 1024 * 1024;
+const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
+
+/// builder for configuring a scheme context before creation
+///
+/// provides a fluent api for setting heap sizes, step limits,
+/// and environment restrictions (sandboxing).
+///
+/// # examples
+///
+/// ```
+/// use tein::Context;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // default context
+/// let ctx = Context::new()?;
+///
+/// // configured context
+/// let ctx = Context::builder()
+///     .heap_size(8 * 1024 * 1024)
+///     .step_limit(100_000)
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct ContextBuilder {
+    heap_size: usize,
+    heap_max: usize,
+    step_limit: Option<u64>,
+    allowed_primitives: Option<Vec<&'static str>>,
+}
+
+impl ContextBuilder {
+    /// set the initial heap size in bytes (default: 4mb)
+    pub fn heap_size(mut self, size: usize) -> Self {
+        self.heap_size = size;
+        self
+    }
+
+    /// set the maximum heap size in bytes (default: 128mb)
+    pub fn heap_max(mut self, size: usize) -> Self {
+        self.heap_max = size;
+        self
+    }
+
+    /// set the maximum number of vm steps per evaluation call
+    ///
+    /// when the limit is reached, evaluation returns `Error::StepLimitExceeded`.
+    /// fuel resets before each `evaluate()` or `call()` invocation.
+    pub fn step_limit(mut self, limit: u64) -> Self {
+        self.step_limit = Some(limit);
+        self
+    }
+
+    /// add all primitives from a preset to the allowlist
+    ///
+    /// activating any preset switches the context to restricted mode:
+    /// only explicitly allowed primitives (plus core syntax) are available.
+    /// presets are additive — calling this multiple times combines them.
+    pub fn preset(mut self, preset: &Preset) -> Self {
+        let list = self.allowed_primitives.get_or_insert_with(Vec::new);
+        for name in preset.primitives {
+            if !list.contains(name) {
+                list.push(name);
+            }
+        }
+        self
+    }
+
+    /// add individual primitives to the allowlist
+    ///
+    /// like `preset()`, activates restricted mode. additive with presets.
+    pub fn allow(mut self, names: &[&'static str]) -> Self {
+        let list = self.allowed_primitives.get_or_insert_with(Vec::new);
+        for name in names {
+            if !list.contains(name) {
+                list.push(name);
+            }
+        }
+        self
+    }
+
+    /// convenience: allow arithmetic + math + lists + vectors + strings + characters + type predicates
+    ///
+    /// suitable for pure computation with no side effects or mutation.
+    pub fn pure_computation(self) -> Self {
+        use crate::sandbox::*;
+        self.preset(&ARITHMETIC)
+            .preset(&MATH)
+            .preset(&LISTS)
+            .preset(&VECTORS)
+            .preset(&STRINGS)
+            .preset(&CHARACTERS)
+            .preset(&TYPE_PREDICATES)
+    }
+
+    /// convenience: pure_computation + mutation + string_ports + stdout_only + exceptions
+    ///
+    /// suitable for most sandboxed use cases that don't need file/network io.
+    pub fn safe(self) -> Self {
+        use crate::sandbox::*;
+        self.pure_computation()
+            .preset(&MUTATION)
+            .preset(&STRING_PORTS)
+            .preset(&STDOUT_ONLY)
+            .preset(&EXCEPTIONS)
+    }
+
+    /// check if a step limit has been configured
+    pub(crate) fn has_step_limit(&self) -> bool {
+        self.step_limit.is_some()
+    }
+
+    /// build the configured context
+    pub fn build(self) -> Result<Context> {
+        unsafe {
+            let ctx = ffi::sexp_make_eval_context(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                self.heap_size as ffi::sexp_uint_t,
+                self.heap_max as ffi::sexp_uint_t,
+            );
+
+            if ctx.is_null() {
+                return Err(Error::InitError("failed to create context".to_string()));
+            }
+
+            // apply environment restrictions if presets are active
+            if let Some(ref allowed) = self.allowed_primitives {
+                let primitive_env = ffi::sexp_context_env(ctx);
+                let version = ffi::sexp_make_fixnum(7);
+                let null_env = ffi::sexp_make_null_env(ctx, version);
+
+                if ffi::sexp_exceptionp(null_env) != 0 {
+                    ffi::sexp_destroy_context(ctx);
+                    return Err(Error::InitError(
+                        "failed to create null environment".to_string(),
+                    ));
+                }
+
+                // copy allowed primitives from the full env into the restricted env
+                let undefined = ffi::get_void();
+                for name in allowed {
+                    let c_name = CString::new(*name).map_err(|_| {
+                        ffi::sexp_destroy_context(ctx);
+                        Error::InitError(format!("primitive name contains null bytes: {}", name))
+                    })?;
+                    let sym =
+                        ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+                    let val = ffi::sexp_env_ref(ctx, primitive_env, sym, undefined);
+                    if val != undefined {
+                        ffi::sexp_env_define(ctx, null_env, sym, val);
+                    }
+                }
+
+                ffi::sexp_context_env_set(ctx, null_env);
+            }
+
+            Ok(Context {
+                ctx,
+                step_limit: self.step_limit,
+            })
+        }
+    }
+}
 
 /// a scheme evaluation context
 ///
@@ -27,6 +197,7 @@ use std::path::Path;
 /// ```
 pub struct Context {
     ctx: ffi::sexp,
+    step_limit: Option<u64>,
 }
 
 impl Context {
@@ -35,38 +206,43 @@ impl Context {
     /// initializes a chibi-scheme context with:
     /// - 4mb initial heap
     /// - 128mb max heap
-    /// - 1mb stack
-    /// - r7rs standard environment
+    /// - full primitive environment (no restrictions)
+    /// - no step limit
     pub fn new() -> Result<Self> {
-        Self::with_sizes(4 * 1024 * 1024, 128 * 1024 * 1024, 1024 * 1024)
+        Self::builder().build()
     }
 
-    /// create a new scheme context with custom memory settings
-    ///
-    /// # arguments
-    /// * `heap_size` - initial heap size in bytes
-    /// * `heap_max` - maximum heap size in bytes
-    /// * `_stack_size` - stack size in bytes (unused in chibi's current api)
-    pub fn with_sizes(heap_size: usize, heap_max: usize, _stack_size: usize) -> Result<Self> {
-        unsafe {
-            let ctx = ffi::sexp_make_eval_context(
-                std::ptr::null_mut(), // parent context
-                std::ptr::null_mut(), // stack
-                std::ptr::null_mut(), // env
-                heap_size as ffi::sexp_uint_t,
-                heap_max as ffi::sexp_uint_t,
-            );
-
-            if ctx.is_null() {
-                return Err(Error::InitError("failed to create context".to_string()));
-            }
-
-            // note: we're not loading r7rs environment for now
-            // this gives us a minimal scheme with basic primitives
-            // TODO: figure out static library setup for r7rs
-
-            Ok(Context { ctx })
+    /// create a builder for configuring a context
+    pub fn builder() -> ContextBuilder {
+        ContextBuilder {
+            heap_size: DEFAULT_HEAP_SIZE,
+            heap_max: DEFAULT_HEAP_MAX,
+            step_limit: None,
+            allowed_primitives: None,
         }
+    }
+
+    /// set fuel before an evaluation call (if step limit is configured)
+    fn arm_fuel(&self) {
+        if let Some(limit) = self.step_limit {
+            unsafe {
+                ffi::fuel_arm(self.ctx, limit as ffi::sexp_sint_t);
+            }
+        }
+    }
+
+    /// check if fuel was exhausted after an evaluation call, then disarm
+    fn check_fuel(&self) -> Result<()> {
+        if self.step_limit.is_some() {
+            unsafe {
+                let exhausted = ffi::fuel_exhausted(self.ctx) != 0;
+                ffi::fuel_disarm(self.ctx);
+                if exhausted {
+                    return Err(Error::StepLimitExceeded);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// evaluate one or more scheme expressions
@@ -96,6 +272,8 @@ impl Context {
     pub fn evaluate(&self, code: &str) -> Result<Value> {
         let c_str = CString::new(code)
             .map_err(|_| Error::EvalError("code contains null bytes".to_string()))?;
+
+        self.arm_fuel();
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
@@ -127,6 +305,10 @@ impl Context {
 
                 // evaluate the expression
                 result = ffi::sexp_evaluate(self.ctx, expr, env);
+
+                // check fuel exhaustion before exception status
+                // (fuel exhaustion returns a normal-looking value, not an exception)
+                self.check_fuel()?;
 
                 // evaluation error
                 if ffi::sexp_exceptionp(result) != 0 {
@@ -273,6 +455,8 @@ impl Context {
             .as_procedure()
             .ok_or_else(|| Error::TypeError(format!("expected procedure, got {}", proc)))?;
 
+        self.arm_fuel();
+
         unsafe {
             // build scheme list from args (reverse-iterate with cons, like to_raw does for lists)
             let mut arg_list = ffi::get_null();
@@ -282,6 +466,9 @@ impl Context {
             }
 
             let result = ffi::sexp_apply_proc(self.ctx, raw_proc, arg_list);
+
+            // check fuel before exception status
+            self.check_fuel()?;
 
             if ffi::sexp_exceptionp(result) != 0 {
                 return Value::from_raw(self.ctx, result);
@@ -1348,5 +1535,293 @@ mod tests {
             .evaluate(r#"(describe-types 1 "hello" #t 42)"#)
             .expect("eval");
         assert_eq!(result, Value::String("int str bool int".to_string()));
+    }
+
+    // --- phase 1: builder + step limits ---
+
+    #[test]
+    fn test_builder_default() {
+        let ctx = Context::builder().build().expect("builder default");
+        let result = ctx.evaluate("(+ 1 2 3)").expect("should work");
+        assert_eq!(result, Value::Integer(6));
+    }
+
+    #[test]
+    fn test_builder_custom_heap() {
+        let ctx = Context::builder()
+            .heap_size(8 * 1024 * 1024)
+            .heap_max(64 * 1024 * 1024)
+            .build()
+            .expect("builder custom heap");
+        let result = ctx.evaluate("(+ 1 1)").expect("should work");
+        assert_eq!(result, Value::Integer(2));
+    }
+
+    #[test]
+    fn test_step_limit_infinite_loop() {
+        let ctx = Context::builder()
+            .step_limit(1000)
+            .build()
+            .expect("builder");
+        let err = ctx
+            .evaluate("((lambda () (define (loop) (loop)) (loop)))")
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::StepLimitExceeded),
+            "expected StepLimitExceeded, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_step_limit_short_computation_succeeds() {
+        let ctx = Context::builder()
+            .step_limit(100_000)
+            .build()
+            .expect("builder");
+        let result = ctx.evaluate("(+ 1 2 3)").expect("should work");
+        assert_eq!(result, Value::Integer(6));
+    }
+
+    #[test]
+    fn test_no_step_limit_backwards_compat() {
+        let ctx = Context::new().expect("context");
+        let result = ctx
+            .evaluate("(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 10)")
+            .expect("should work");
+        assert_eq!(result, Value::Integer(55));
+    }
+
+    #[test]
+    fn test_fuel_resets_between_evaluations() {
+        let ctx = Context::builder()
+            .step_limit(100_000)
+            .build()
+            .expect("builder");
+        let r1 = ctx.evaluate("(+ 1 2)").expect("first");
+        assert_eq!(r1, Value::Integer(3));
+        let r2 = ctx.evaluate("(* 3 4)").expect("second");
+        assert_eq!(r2, Value::Integer(12));
+    }
+
+    #[test]
+    fn test_call_respects_step_limit() {
+        let ctx = Context::builder()
+            .step_limit(1000)
+            .build()
+            .expect("builder");
+        let looper = ctx
+            .evaluate("(lambda () ((lambda () (define (loop) (loop)) (loop))))")
+            .expect("lambda");
+        let err = ctx.call(&looper, &[]).unwrap_err();
+        assert!(
+            matches!(err, Error::StepLimitExceeded),
+            "expected StepLimitExceeded, got: {}",
+            err
+        );
+    }
+
+    // --- phase 2: restricted environments + presets ---
+
+    #[test]
+    fn test_arithmetic_only_env() {
+        let ctx = Context::builder()
+            .preset(&crate::sandbox::ARITHMETIC)
+            .build()
+            .expect("builder");
+        let result = ctx.evaluate("(+ 1 2)").expect("should work");
+        assert_eq!(result, Value::Integer(3));
+        let err = ctx.evaluate("(cons 1 2)");
+        assert!(
+            err.is_err(),
+            "cons should be undefined in arithmetic-only env"
+        );
+    }
+
+    #[test]
+    fn test_syntax_forms_always_available() {
+        let ctx = Context::builder()
+            .preset(&crate::sandbox::ARITHMETIC)
+            .build()
+            .expect("builder");
+        let result = ctx
+            .evaluate("(define x 5) (if #t (+ x 1) 0)")
+            .expect("should work");
+        assert_eq!(result, Value::Integer(6));
+
+        let result = ctx
+            .evaluate("((lambda (a b) (+ a b)) 3 4)")
+            .expect("lambda");
+        assert_eq!(result, Value::Integer(7));
+
+        let result = ctx.evaluate("(begin (+ 1 1) (+ 2 2))").expect("begin");
+        assert_eq!(result, Value::Integer(4));
+
+        let result = ctx.evaluate("(quote hello)").expect("quote");
+        assert_eq!(result, Value::Symbol("hello".into()));
+    }
+
+    #[test]
+    fn test_preset_composition() {
+        let ctx = Context::builder()
+            .preset(&crate::sandbox::ARITHMETIC)
+            .preset(&crate::sandbox::LISTS)
+            .build()
+            .expect("builder");
+        let result = ctx.evaluate("(+ 1 2)").expect("arithmetic");
+        assert_eq!(result, Value::Integer(3));
+        let result = ctx.evaluate("(car (cons 1 2))").expect("lists");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_allow_individual_primitives() {
+        let ctx = Context::builder()
+            .allow(&["+", "-"])
+            .build()
+            .expect("builder");
+        let result = ctx.evaluate("(+ 10 (- 5 3))").expect("should work");
+        assert_eq!(result, Value::Integer(12));
+        let err = ctx.evaluate("(* 2 3)");
+        assert!(err.is_err(), "* should be undefined");
+    }
+
+    #[test]
+    fn test_no_preset_full_env() {
+        let ctx = Context::builder().build().expect("builder");
+        let result = ctx
+            .evaluate("(cons 1 (cons 2 (quote ())))")
+            .expect("should work");
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Integer(1), Value::Integer(2)])
+        );
+    }
+
+    #[test]
+    fn test_pure_computation_convenience() {
+        let ctx = Context::builder()
+            .pure_computation()
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(+ 1 2)").expect("arithmetic");
+        assert_eq!(r, Value::Integer(3));
+        let r = ctx.evaluate("(car (cons 1 2))").expect("lists");
+        assert_eq!(r, Value::Integer(1));
+        let r = ctx.evaluate("(string? \"hello\")").expect("strings");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_safe_convenience() {
+        let ctx = Context::builder().safe().build().expect("builder");
+        let r = ctx
+            .evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")
+            .expect("should work");
+        assert_eq!(r, Value::Integer(99));
+    }
+
+    #[test]
+    fn test_foreign_fn_works_in_restricted_env() {
+        unsafe extern "C" fn add100(
+            _ctx: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let n = crate::ffi::sexp_unbox_fixnum(crate::ffi::sexp_car(args));
+                crate::ffi::sexp_make_fixnum(n + 100)
+            }
+        }
+
+        let ctx = Context::builder()
+            .preset(&crate::sandbox::ARITHMETIC)
+            .build()
+            .expect("builder");
+        ctx.define_fn_variadic("add100", add100).expect("define fn");
+        let result = ctx.evaluate("(add100 5)").expect("should work");
+        assert_eq!(result, Value::Integer(105));
+    }
+
+    #[test]
+    fn test_file_io_absent_in_safe_preset() {
+        let ctx = Context::builder().safe().build().expect("builder");
+        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
+        assert!(err.is_err(), "file io should be unavailable in safe preset");
+    }
+
+    // --- phase 3: timeout context ---
+
+    #[test]
+    fn test_timeout_basic() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_timeout(std::time::Duration::from_secs(5))
+            .expect("build_timeout");
+        let result = ctx.evaluate("(+ 1 2 3)").expect("should work");
+        assert_eq!(result, Value::Integer(6));
+    }
+
+    #[test]
+    fn test_timeout_infinite_loop() {
+        let ctx = Context::builder()
+            .step_limit(10_000)
+            .build_timeout(std::time::Duration::from_millis(500))
+            .expect("build_timeout");
+        let err = ctx
+            .evaluate("((lambda () (define (loop) (loop)) (loop)))")
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Timeout | Error::StepLimitExceeded),
+            "expected Timeout or StepLimitExceeded, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_timeout_multiple_sequential() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_timeout(std::time::Duration::from_secs(5))
+            .expect("build_timeout");
+        let r1 = ctx.evaluate("(+ 1 2)").expect("first");
+        let r2 = ctx.evaluate("(* 3 4)").expect("second");
+        assert_eq!(r1, Value::Integer(3));
+        assert_eq!(r2, Value::Integer(12));
+    }
+
+    #[test]
+    fn test_timeout_state_persists() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_timeout(std::time::Duration::from_secs(5))
+            .expect("build_timeout");
+        ctx.evaluate("(define x 42)").expect("define");
+        let result = ctx.evaluate("x").expect("lookup");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_build_timeout_without_step_limit_fails() {
+        let err = Context::builder()
+            .build_timeout(std::time::Duration::from_secs(1))
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("step_limit"),
+            "expected step_limit error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_timeout_drop_cleans_up() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_timeout(std::time::Duration::from_secs(5))
+            .expect("build_timeout");
+        let _ = ctx.evaluate("(+ 1 1)");
+        drop(ctx);
     }
 }

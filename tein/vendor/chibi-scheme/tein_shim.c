@@ -91,3 +91,65 @@ sexp tein_sexp_open_input_string(sexp ctx, sexp str) {
 }
 sexp tein_sexp_read(sexp ctx, sexp port) { return sexp_read(ctx, port); }
 sexp tein_sexp_evaluate(sexp ctx, sexp obj, sexp env) { return sexp_eval(ctx, obj, env); }
+
+// fuel control (step limiting)
+//
+// chibi's vm creates child contexts for each eval, so we can't set
+// fuel on a single context. instead we use thread-local counters that
+// the vm checks via a minimal patch in vm.c.
+//
+// the vm's existing fuel/refuel mechanism runs in small timeslices
+// (default 500 ops). our patch subtracts each timeslice from the
+// thread-local budget. when the budget is exhausted, it zeroes
+// refuel so the vm stops.
+
+__thread sexp_sint_t tein_fuel_budget = -1;   // -1 = unlimited
+__thread int tein_fuel_exhausted_flag = 0;
+
+void tein_fuel_arm(sexp ctx, sexp_sint_t total_fuel) {
+    (void)ctx;
+    tein_fuel_budget = total_fuel;
+    tein_fuel_exhausted_flag = 0;
+}
+
+void tein_fuel_disarm(sexp ctx) {
+    (void)ctx;
+    tein_fuel_budget = -1;
+    tein_fuel_exhausted_flag = 0;
+}
+
+int tein_fuel_exhausted(sexp ctx) {
+    (void)ctx;
+    return tein_fuel_exhausted_flag;
+}
+
+// called from vm.c at the timeslice boundary (when local fuel hits 0).
+// returns the next timeslice size, or 0 to stop the vm.
+sexp_sint_t tein_fuel_consume_slice(sexp ctx, sexp_sint_t slice_used) {
+    if (tein_fuel_budget < 0) {
+        // unlimited — return default quantum
+        return SEXP_DEFAULT_QUANTUM;
+    }
+    tein_fuel_budget -= slice_used;
+    if (tein_fuel_budget <= 0) {
+        tein_fuel_exhausted_flag = 1;
+        sexp_context_refuel(ctx) = 0;
+        return 0;
+    }
+    sexp_sint_t next = (tein_fuel_budget < SEXP_DEFAULT_QUANTUM)
+        ? tein_fuel_budget : SEXP_DEFAULT_QUANTUM;
+    sexp_context_refuel(ctx) = next;
+    return next;
+}
+
+// environment manipulation (sandboxing)
+sexp tein_sexp_make_null_env(sexp ctx, sexp version) { return sexp_make_null_env(ctx, version); }
+sexp tein_sexp_make_primitive_env(sexp ctx, sexp version) { return sexp_make_primitive_env(ctx, version); }
+sexp tein_sexp_env_define(sexp ctx, sexp env, sexp sym, sexp val) {
+    sexp_env_define(ctx, env, sym, val);
+    return SEXP_VOID;
+}
+sexp tein_sexp_env_ref(sexp ctx, sexp env, sexp sym, sexp dflt) {
+    return sexp_env_ref(ctx, env, sym, dflt);
+}
+void tein_sexp_context_env_set(sexp ctx, sexp env) { sexp_context_env(ctx) = env; }
