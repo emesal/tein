@@ -205,3 +205,59 @@ const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length) {
 sexp tein_sexp_load_standard_ports(sexp ctx, sexp env) {
     return sexp_load_standard_ports(ctx, env, stdin, stdout, stderr, 1);
 }
+
+// --- env copy helper for sandbox + standard env ---
+//
+// copies a single named binding from src_env to dst_env, searching both
+// direct bindings and rename bindings (needed because sexp_load_standard_env
+// stores most bindings as renames via the module system).
+//
+// walks the full env parent chain. for rename entries, the synclo key is
+// unwrapped to compare against the bare symbol name.
+//
+// returns 1 if the binding was found and copied, 0 otherwise.
+
+int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
+                        const char *name, sexp_sint_t name_len) {
+    sexp sym = sexp_intern(ctx, name, name_len);
+    sexp val = SEXP_VOID;
+    int found = 0;
+
+    // first try: direct lookup via sexp_env_ref (handles direct bindings
+    // and parent chain, but NOT rename-to-bare matching)
+    val = sexp_env_ref(ctx, src_env, sym, SEXP_VOID);
+    if (val != SEXP_VOID) {
+        sexp_env_define(ctx, dst_env, sym, val);
+        return 1;
+    }
+
+    // second try: scan rename bindings for synclos whose underlying
+    // expression matches our bare symbol
+    sexp env = src_env;
+    while (sexp_envp(env)) {
+#if SEXP_USE_RENAME_BINDINGS
+        sexp ls;
+        for (ls = sexp_env_renames(env); sexp_pairp(ls); ls = sexp_env_next_cell(ls)) {
+            sexp key = sexp_car(ls);
+            // rename keys are syntactic closures wrapping the original symbol
+            if (sexp_synclop(key) && sexp_synclo_expr(key) == sym) {
+                // found it — the value is in cdr of the rename cell,
+                // which is itself a binding cell (car=key, cdr=value)
+                sexp cell = sexp_cdr(ls);
+                if (sexp_pairp(cell)) {
+                    val = sexp_cdr(cell);
+                } else {
+                    val = cell;
+                }
+                // define using the bare symbol so it's accessible without
+                // the module system's rename machinery
+                sexp_env_define(ctx, dst_env, sym, val);
+                return 1;
+            }
+        }
+#endif
+        env = sexp_env_parent(env);
+    }
+
+    return 0;
+}

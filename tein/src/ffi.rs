@@ -46,6 +46,16 @@ unsafe extern "C" {
     // standard ports (via tein shim — wraps sexp_load_standard_ports with stdin/stdout/stderr)
     pub fn tein_sexp_load_standard_ports(ctx: sexp, env: sexp) -> sexp;
 
+    // copy a named binding from one env to another (searches direct + rename bindings).
+    // returns 1 if found and copied, 0 if not found.
+    pub fn tein_env_copy_named(
+        ctx: sexp,
+        src_env: sexp,
+        dst_env: sexp,
+        name: *const c_char,
+        name_len: sexp_sint_t,
+    ) -> c_int;
+
     // type checking (via tein shim)
     pub fn tein_sexp_integerp(x: sexp) -> c_int;
     pub fn tein_sexp_flonump(x: sexp) -> c_int;
@@ -461,4 +471,17 @@ pub unsafe fn load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp {
 #[inline]
 pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_load_standard_ports(ctx, env) }
+}
+
+/// copy a named binding from src_env to dst_env, searching both direct
+/// bindings and rename bindings (module system). returns true if found.
+#[inline]
+pub unsafe fn env_copy_named(
+    ctx: sexp,
+    src_env: sexp,
+    dst_env: sexp,
+    name: *const std::os::raw::c_char,
+    name_len: sexp_sint_t,
+) -> bool {
+    unsafe { tein_env_copy_named(ctx, src_env, dst_env, name, name_len) != 0 }
 }

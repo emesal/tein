@@ -193,6 +193,7 @@ pub struct ContextBuilder {
     heap_size: usize,
     heap_max: usize,
     step_limit: Option<u64>,
+    standard_env: bool,
     allowed_primitives: Option<Vec<&'static str>>,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
@@ -217,6 +218,20 @@ impl ContextBuilder {
     /// fuel resets before each `evaluate()` or `call()` invocation.
     pub fn step_limit(mut self, limit: u64) -> Self {
         self.step_limit = Some(limit);
+        self
+    }
+
+    /// enable the r7rs standard environment
+    ///
+    /// loads `(scheme base)` and supporting modules via the embedded VFS,
+    /// providing `define-record-type`, `import`, `map`, `for-each`, etc.
+    /// standard ports (stdin/stdout/stderr) are also initialised.
+    ///
+    /// when combined with presets, the standard env is loaded first, then
+    /// the sandbox restricts it — so sandboxed code can use allowed r7rs
+    /// procedures that aren't bare primitives.
+    pub fn standard_env(mut self) -> Self {
+        self.standard_env = true;
         self
     }
 
@@ -335,14 +350,41 @@ impl ContextBuilder {
                 return Err(Error::InitError("failed to create context".to_string()));
             }
 
+            // load r7rs standard environment if requested.
+            // this enriches the context env with (scheme base) etc. via the
+            // embedded VFS, and must happen before sandbox restriction so the
+            // restricted env can copy from the full standard env.
+            if self.standard_env {
+                let env = ffi::sexp_context_env(ctx);
+                let version = ffi::sexp_make_fixnum(7);
+
+                let result = ffi::load_standard_env(ctx, env, version);
+                if ffi::sexp_exceptionp(result) != 0 {
+                    ffi::sexp_destroy_context(ctx);
+                    return Err(Error::InitError(
+                        "failed to load standard environment".to_string(),
+                    ));
+                }
+
+                let result = ffi::load_standard_ports(ctx, env);
+                if ffi::sexp_exceptionp(result) != 0 {
+                    ffi::sexp_destroy_context(ctx);
+                    return Err(Error::InitError(
+                        "failed to load standard ports".to_string(),
+                    ));
+                }
+            }
+
             // extract IO prefixes before borrowing self for allowed_primitives
             let file_read_prefixes = self.file_read_prefixes.take();
             let file_write_prefixes = self.file_write_prefixes.take();
             let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
 
-            // apply environment restrictions if presets are active
+            // apply environment restrictions if presets are active.
+            // source_env is the context's current env — either the bare primitive
+            // env or the enriched standard env if standard_env was loaded above.
             if let Some(ref allowed) = self.allowed_primitives {
-                let primitive_env = ffi::sexp_context_env(ctx);
+                let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
                 let null_env = ffi::sexp_make_null_env(ctx, version);
 
@@ -361,26 +403,29 @@ impl ContextBuilder {
                         let c_name = CString::new(name).unwrap();
                         let sym =
                             ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                        let val = ffi::sexp_env_ref(ctx, primitive_env, sym, undefined);
+                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
                         if val != undefined {
                             ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
                         }
                     }
                 }
 
-                // copy allowed primitives from the full env into the restricted env
-                let undefined = ffi::get_void();
+                // copy allowed primitives from the source env into the restricted env.
+                // uses env_copy_named which searches both direct bindings and
+                // rename bindings (needed when standard_env is active, since the
+                // module system stores most bindings as renames).
                 for name in allowed {
                     let c_name = CString::new(*name).map_err(|_| {
                         ffi::sexp_destroy_context(ctx);
                         Error::InitError(format!("primitive name contains null bytes: {}", name))
                     })?;
-                    let sym =
-                        ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                    let val = ffi::sexp_env_ref(ctx, primitive_env, sym, undefined);
-                    if val != undefined {
-                        ffi::sexp_env_define(ctx, null_env, sym, val);
-                    }
+                    ffi::env_copy_named(
+                        ctx,
+                        source_env,
+                        null_env,
+                        c_name.as_ptr(),
+                        name.len() as ffi::sexp_sint_t,
+                    );
                 }
 
                 ffi::sexp_context_env_set(ctx, null_env);
@@ -473,12 +518,22 @@ impl Context {
         Self::builder().build()
     }
 
+    /// create a new context with the r7rs standard environment
+    ///
+    /// equivalent to `Context::builder().standard_env().build()`.
+    /// provides `(scheme base)` and supporting modules — `map`, `for-each`,
+    /// `import`, `define-record-type`, etc.
+    pub fn new_standard() -> Result<Self> {
+        Self::builder().standard_env().build()
+    }
+
     /// create a builder for configuring a context
     pub fn builder() -> ContextBuilder {
         ContextBuilder {
             heap_size: DEFAULT_HEAP_SIZE,
             heap_max: DEFAULT_HEAP_MAX,
             step_limit: None,
+            standard_env: false,
             allowed_primitives: None,
             file_read_prefixes: None,
             file_write_prefixes: None,
@@ -2406,5 +2461,135 @@ mod tests {
 
             ffi::sexp_destroy_context(ctx);
         }
+    }
+
+    #[test]
+    fn test_new_standard_convenience() {
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx.evaluate("(+ 1 2)").expect("basic arithmetic");
+        assert_eq!(r, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_standard_env_map() {
+        // map is defined in (scheme base), not available in bare primitive env
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx.evaluate("(map + '(1 2 3) '(10 20 30))").expect("map");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Integer(11),
+                Value::Integer(22),
+                Value::Integer(33),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_standard_env_for_each() {
+        let ctx = Context::new_standard().expect("new_standard");
+        // for-each returns void but shouldn't error
+        let r = ctx
+            .evaluate("(let ((sum 0)) (for-each (lambda (x) (set! sum (+ sum x))) '(1 2 3)) sum)")
+            .expect("for-each");
+        assert_eq!(r, Value::Integer(6));
+    }
+
+    #[test]
+    fn test_standard_env_with_sandbox() {
+        // standard_env + presets: sandbox copies from the enriched standard env,
+        // but only bindings explicitly in the allowlist are available.
+        // "map" and "for-each" come from (scheme base), not from C primitives,
+        // so they must be explicitly allowed.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .preset(&LISTS)
+            .allow(&["map", "for-each"])
+            .build()
+            .expect("standard + sandbox");
+
+        // map is allowed and comes from the standard env
+        let r = ctx
+            .evaluate("(map + '(1 2 3) '(10 20 30))")
+            .expect("map in sandbox");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Integer(11),
+                Value::Integer(22),
+                Value::Integer(33),
+            ])
+        );
+
+        // for-each works too (side-effect only, returns void)
+        // use define instead of let since for-each's closure sees the
+        // restricted env, and define creates top-level bindings.
+        ctx.evaluate("(define sandbox-sum 0)").expect("define");
+        ctx.evaluate("(for-each (lambda (x) (set! sandbox-sum (+ sandbox-sum x))) '(1 2 3))")
+            .expect("for-each in sandbox");
+        let r = ctx.evaluate("sandbox-sum").expect("read sum");
+        assert_eq!(r, Value::Integer(6));
+
+        // display is NOT in the allowlist — should be blocked
+        let err = ctx.evaluate("(display 42)");
+        assert!(err.is_err(), "display should be blocked by sandbox");
+    }
+
+    #[test]
+    fn test_standard_env_values() {
+        // values and call-with-values are r7rs features from (scheme base)
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx
+            .evaluate("(call-with-values (lambda () (values 1 2)) +)")
+            .expect("values + call-with-values");
+        assert_eq!(r, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_standard_env_dynamic_wind() {
+        // dynamic-wind is a key r7rs feature from the standard env
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx
+            .evaluate(
+                "(let ((log '())) \
+                   (dynamic-wind \
+                     (lambda () (set! log (cons 'in log))) \
+                     (lambda () (set! log (cons 'body log)) 42) \
+                     (lambda () (set! log (cons 'out log)))) \
+                   (reverse log))",
+            )
+            .expect("dynamic-wind");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Symbol("in".to_string()),
+                Value::Symbol("body".to_string()),
+                Value::Symbol("out".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_standard_env_with_step_limit() {
+        // standard_env + step limit should work together
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(1_000_000)
+            .build()
+            .expect("standard + step limit");
+
+        let r = ctx
+            .evaluate("(map car '((1 2) (3 4) (5 6)))")
+            .expect("map + step limit");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(3),
+                Value::Integer(5),
+            ])
+        );
     }
 }

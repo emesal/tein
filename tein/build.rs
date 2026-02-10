@@ -75,8 +75,16 @@ const VFS_FILES: &[&str] = &[
 const CLIB_ENTRIES: &[(&str, &str, &str)] = &[
     ("lib/chibi/ast.c", "chibi_ast", "/vfs/lib/chibi/ast"),
     ("lib/chibi/io/io.c", "chibi_io", "/vfs/lib/chibi/io/io"),
-    ("lib/srfi/39/param.c", "srfi_39_param", "/vfs/lib/srfi/39/param"),
-    ("lib/srfi/69/hash.c", "srfi_69_hash", "/vfs/lib/srfi/69/hash"),
+    (
+        "lib/srfi/39/param.c",
+        "srfi_39_param",
+        "/vfs/lib/srfi/39/param",
+    ),
+    (
+        "lib/srfi/69/hash.c",
+        "srfi_69_hash",
+        "/vfs/lib/srfi/69/hash",
+    ),
     (
         "lib/srfi/151/bit.c",
         "srfi_151_bit",
@@ -116,11 +124,11 @@ fn main() {
     build
         .include(&include_dir)
         .include(chibi_dir)
-        .flag("-DSEXP_USE_DL=0")                    // disable dynamic loading
-        .flag("-DSEXP_STATIC_LIBRARY")              // static link (prevents dllimport on win32)
-        .flag("-DSEXP_USE_STATIC_LIBS=1")           // enable static library lookup in eval.c
+        .flag("-DSEXP_USE_DL=0") // disable dynamic loading
+        .flag("-DSEXP_STATIC_LIBRARY") // static link (prevents dllimport on win32)
+        .flag("-DSEXP_USE_STATIC_LIBS=1") // enable static library lookup in eval.c
         .flag("-DSEXP_USE_STATIC_LIBS_NO_INCLUDE=1") // we define sexp_static_libraries ourselves
-        .warnings(false);                           // chibi may have warnings
+        .warnings(false); // chibi may have warnings
 
     // include paths for C files referenced by the static library table.
     // ast.c uses `#include <chibi/eval.h>` (covered by include_dir).
@@ -235,7 +243,9 @@ fn generate_clibs(chibi_dir: &str) {
 
     // include each C library with a unique init function name
     for &(c_file, suffix, _) in CLIB_ENTRIES {
-        out.push_str(&format!("#define sexp_init_library sexp_init_lib_{suffix}\n"));
+        out.push_str(&format!(
+            "#define sexp_init_library sexp_init_lib_{suffix}\n"
+        ));
         out.push_str(&format!("#include \"{c_file}\"\n"));
         out.push_str("#undef sexp_init_library\n\n");
     }

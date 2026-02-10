@@ -1304,6 +1304,23 @@ sexp sexp_open_input_file_op (sexp ctx, sexp self, sexp_sint_t n, sexp path) {
   FILE *in;
   int count = 0;
   sexp_assert_type(ctx, sexp_stringp, SEXP_STRING, path);
+  /* tein VFS: return a string input port for embedded files (patch C).
+   * the module system (meta-7.scm) calls open-input-file to read .sld
+   * files, so this must intercept VFS paths before trying fopen().
+   * the port name is set to the VFS path so relative includes resolve. */
+  { unsigned int vfs_len = 0;
+    const char *vfs_content = tein_vfs_lookup(sexp_string_data(path), &vfs_len);
+    if (vfs_content) {
+      sexp_gc_var2(vfs_str, port);
+      sexp_gc_preserve2(ctx, vfs_str, port);
+      vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
+      port = sexp_open_input_string(ctx, vfs_str);
+      if (sexp_portp(port))
+        sexp_port_name(port) = path;
+      sexp_gc_release2(ctx);
+      return port;
+    }
+  }
   do {
     if (count != 0) sexp_gc(ctx, NULL);
     in = fopen(sexp_string_data(path), "r");
@@ -1536,6 +1553,8 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
       if (vfs_content) {
         sexp vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
         in = sexp_open_input_string(ctx, vfs_str);
+        if (sexp_portp(in))
+          sexp_port_name(in) = source;
       } else {
         in = sexp_open_input_file(ctx, source);
       }

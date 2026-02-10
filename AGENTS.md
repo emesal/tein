@@ -37,15 +37,18 @@ src/
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
 vendor/chibi-scheme/
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
-                 error construction
+                 env_copy_named (rename-aware binding copy), error construction
+  eval.c       — 3 patches: VFS module lookup (A), VFS load (B), VFS open-input-file (C)
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
-build.rs       — compiles chibi + shim, generates install.h
+build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 ```
 
 **data flow**: rust code → `Context::evaluate()` → arm_fuel() → ffi.rs safe wrappers → tein_shim.c → chibi-scheme vm → tein_fuel_consume_slice() at timeslice boundary → sexp result → `Value::from_raw()` → check_fuel() → rust `Value` enum
 
-**sandboxing flow**: ContextBuilder with presets → create full primitive env → create null env (syntax-only) → copy allowed primitives → set as active env
+**standard env flow**: ContextBuilder with `.standard_env()` → load_standard_env (init-7 + meta-7 via VFS) → load_standard_ports → ~200 bindings (map, for-each, values, dynamic-wind, etc.)
+
+**sandboxing flow**: ContextBuilder with presets → get source env (primitive or standard) → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames) → set as active env
 
 **IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
 
