@@ -22,10 +22,13 @@
 mod context;
 mod error;
 mod ffi;
+pub mod sandbox;
+mod timeout;
 mod value;
 
-pub use context::Context;
+pub use context::{Context, ContextBuilder};
 pub use error::{Error, Result};
+pub use timeout::TimeoutContext;
 pub use value::Value;
 
 /// re-export the `#[scheme_fn]` proc macro for ergonomic foreign function definition

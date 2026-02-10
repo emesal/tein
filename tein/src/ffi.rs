@@ -128,6 +128,18 @@ unsafe extern "C" {
     // procedure application (chibi SEXP_API — not a macro)
     pub fn sexp_apply(ctx: sexp, proc: sexp, args: sexp) -> sexp;
 
+    // fuel control (step limiting)
+    pub fn tein_fuel_arm(ctx: sexp, total_fuel: sexp_sint_t);
+    pub fn tein_fuel_disarm(ctx: sexp);
+    pub fn tein_fuel_exhausted(ctx: sexp) -> c_int;
+
+    // environment manipulation (sandboxing)
+    pub fn tein_sexp_make_null_env(ctx: sexp, version: sexp) -> sexp;
+    pub fn tein_sexp_make_primitive_env(ctx: sexp, version: sexp) -> sexp;
+    pub fn tein_sexp_env_define(ctx: sexp, env: sexp, sym: sexp, val: sexp) -> sexp;
+    pub fn tein_sexp_env_ref(ctx: sexp, env: sexp, sym: sexp, dflt: sexp) -> sexp;
+    pub fn tein_sexp_context_env_set(ctx: sexp, env: sexp);
+
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
 
@@ -383,4 +395,46 @@ pub unsafe fn sexp_read(ctx: sexp, port: sexp) -> sexp {
 #[inline]
 pub unsafe fn sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_evaluate(ctx, obj, env) }
+}
+
+// fuel control
+#[inline]
+pub unsafe fn fuel_arm(ctx: sexp, total_fuel: sexp_sint_t) {
+    unsafe { tein_fuel_arm(ctx, total_fuel) }
+}
+
+#[inline]
+pub unsafe fn fuel_disarm(ctx: sexp) {
+    unsafe { tein_fuel_disarm(ctx) }
+}
+
+#[inline]
+pub unsafe fn fuel_exhausted(ctx: sexp) -> c_int {
+    unsafe { tein_fuel_exhausted(ctx) }
+}
+
+// environment manipulation (sandboxing)
+#[inline]
+pub unsafe fn sexp_make_null_env(ctx: sexp, version: sexp) -> sexp {
+    unsafe { tein_sexp_make_null_env(ctx, version) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_primitive_env(ctx: sexp, version: sexp) -> sexp {
+    unsafe { tein_sexp_make_primitive_env(ctx, version) }
+}
+
+#[inline]
+pub unsafe fn sexp_env_define(ctx: sexp, env: sexp, sym: sexp, val: sexp) -> sexp {
+    unsafe { tein_sexp_env_define(ctx, env, sym, val) }
+}
+
+#[inline]
+pub unsafe fn sexp_env_ref(ctx: sexp, env: sexp, sym: sexp, dflt: sexp) -> sexp {
+    unsafe { tein_sexp_env_ref(ctx, env, sym, dflt) }
+}
+
+#[inline]
+pub unsafe fn sexp_context_env_set(ctx: sexp, env: sexp) {
+    unsafe { tein_sexp_context_env_set(ctx, env) }
 }
