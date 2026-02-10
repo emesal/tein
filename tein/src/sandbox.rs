@@ -1,8 +1,72 @@
-//! sandboxing presets for restricted scheme environments
+//! sandboxing presets and filesystem policy for restricted scheme environments
 //!
 //! each preset defines a set of chibi-scheme primitive names that can be
 //! selectively allowed in a restricted context. presets are additive —
 //! combine them via [`ContextBuilder::preset()`](crate::ContextBuilder::preset).
+//!
+//! [`FsPolicy`] controls which filesystem paths scheme code can access.
+//! used internally by the IO wrapper functions registered via
+//! [`ContextBuilder::file_read()`](crate::ContextBuilder::file_read) and
+//! [`ContextBuilder::file_write()`](crate::ContextBuilder::file_write).
+
+use std::cell::RefCell;
+use std::path::Path;
+
+/// filesystem access policy for sandboxed IO
+///
+/// controls which paths scheme code can read from and write to.
+/// uses prefix matching against canonicalised paths.
+pub(crate) struct FsPolicy {
+    /// allowed path prefixes for reading
+    pub read_prefixes: Vec<String>,
+    /// allowed path prefixes for writing
+    pub write_prefixes: Vec<String>,
+}
+
+impl FsPolicy {
+    /// check if a path is allowed for reading
+    ///
+    /// canonicalises the full path (file must exist for reads).
+    /// returns false if path is invalid or canonicalisation fails.
+    pub fn check_read(&self, path: &str) -> bool {
+        Path::new(path)
+            .canonicalize()
+            .ok()
+            .map(|canon| {
+                let canon_str = canon.to_string_lossy();
+                self.read_prefixes
+                    .iter()
+                    .any(|prefix| canon_str.starts_with(prefix))
+            })
+            .unwrap_or(false)
+    }
+
+    /// check if a path is allowed for writing
+    ///
+    /// canonicalises the parent directory (must exist), appends filename.
+    /// the file itself doesn't need to exist (r7rs: open-output-file creates it).
+    pub fn check_write(&self, path: &str) -> bool {
+        let p = Path::new(path);
+        let parent = match p.parent().and_then(|d| d.canonicalize().ok()) {
+            Some(d) => d,
+            None => return false,
+        };
+        let filename = match p.file_name() {
+            Some(f) => f,
+            None => return false,
+        };
+        let full = parent.join(filename);
+        let full_str = full.to_string_lossy();
+        self.write_prefixes
+            .iter()
+            .any(|prefix| full_str.starts_with(prefix))
+    }
+}
+
+thread_local! {
+    /// active filesystem policy for the current context (set during build, cleared on drop)
+    pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
+}
 
 /// a named set of scheme primitives for environment restriction
 ///
@@ -196,4 +260,36 @@ pub const IO_READ: Preset = Preset {
 pub const CONTROL: Preset = Preset {
     name: "control",
     primitives: &["apply1", "%call/cc"],
+};
+
+/// port-reading support primitives (used alongside file_read() policy)
+///
+/// these are the port operations needed to actually read data once a
+/// file port has been opened via the policy-checked wrapper.
+pub const FILE_READ_SUPPORT: Preset = Preset {
+    name: "file-read-support",
+    primitives: &[
+        "close-input-port",
+        "read",
+        "read-char",
+        "peek-char",
+        "char-ready?",
+        "current-input-port",
+    ],
+};
+
+/// port-writing support primitives (used alongside file_write() policy)
+///
+/// these are the port operations needed to actually write data once a
+/// file port has been opened via the policy-checked wrapper.
+pub const FILE_WRITE_SUPPORT: Preset = Preset {
+    name: "file-write-support",
+    primitives: &[
+        "close-output-port",
+        "write",
+        "write-char",
+        "flush-output",
+        "current-output-port",
+        "current-error-port",
+    ],
 };

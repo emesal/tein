@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (88 lib + 12 scheme_fn + 8 doc-tests)
+cargo test                         # all tests (100 lib + 12 scheme_fn + 8 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
@@ -33,10 +33,11 @@ src/
   error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
                  StepLimitExceeded, Timeout)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
-  sandbox.rs   — Preset type + 14 const preset definitions for env restriction
+  sandbox.rs   — Preset type, FsPolicy, 16 const preset definitions for env restriction
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
 vendor/chibi-scheme/
-  tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation
+  tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
+                 error construction
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
 build.rs       — compiles chibi + shim, generates install.h
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
@@ -45,6 +46,8 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 **data flow**: rust code → `Context::evaluate()` → arm_fuel() → ffi.rs safe wrappers → tein_shim.c → chibi-scheme vm → tein_fuel_consume_slice() at timeslice boundary → sexp result → `Value::from_raw()` → check_fuel() → rust `Value` enum
 
 **sandboxing flow**: ContextBuilder with presets → create full primitive env → create null env (syntax-only) → copy allowed primitives → set as active env
+
+**IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. fuel counters are thread-local.
 

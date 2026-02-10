@@ -4,10 +4,163 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
-    sandbox::Preset,
+    sandbox::{FS_POLICY, FsPolicy, Preset},
 };
+use std::cell::Cell;
 use std::ffi::CString;
+use std::os::raw::c_char;
 use std::path::Path;
+
+// --- original proc thread-locals for IO wrappers ---
+//
+// when file_read() or file_write() is configured, we capture the original
+// chibi primitives before switching to the restricted env, then store them
+// here so our wrapper functions can delegate after policy checks.
+
+// original procs for the 4 wrapped file-opening primitives.
+// indexed by IoOp discriminant.
+thread_local! {
+    static ORIGINAL_PROCS: [Cell<ffi::sexp>; 4] = const {
+        [
+            Cell::new(std::ptr::null_mut()),
+            Cell::new(std::ptr::null_mut()),
+            Cell::new(std::ptr::null_mut()),
+            Cell::new(std::ptr::null_mut()),
+        ]
+    };
+}
+
+/// the 4 file-opening primitives we wrap with policy checks
+#[derive(Clone, Copy)]
+#[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
+enum IoOp {
+    InputFile = 0,
+    BinaryInputFile = 1,
+    OutputFile = 2,
+    BinaryOutputFile = 3,
+}
+
+impl IoOp {
+    /// scheme primitive name for this operation
+    const fn name(self) -> &'static str {
+        match self {
+            IoOp::InputFile => "open-input-file",
+            IoOp::BinaryInputFile => "open-binary-input-file",
+            IoOp::OutputFile => "open-output-file",
+            IoOp::BinaryOutputFile => "open-binary-output-file",
+        }
+    }
+
+    /// whether this is a read or write operation
+    const fn is_read(self) -> bool {
+        matches!(self, IoOp::InputFile | IoOp::BinaryInputFile)
+    }
+
+    /// all operations as a slice for iteration
+    const ALL: [IoOp; 4] = [
+        IoOp::InputFile,
+        IoOp::BinaryInputFile,
+        IoOp::OutputFile,
+        IoOp::BinaryOutputFile,
+    ];
+}
+
+/// shared policy check + delegation for all file-open wrappers
+///
+/// extracts the filename from the first arg, checks against FsPolicy,
+/// and either delegates to the original primitive or returns a policy error.
+unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::sexp {
+    unsafe {
+        // extract filename string from first arg
+        let first_arg = ffi::sexp_car(args);
+        if ffi::sexp_stringp(first_arg) == 0 {
+            let msg = "open-file: expected string argument";
+            let c_msg = msg.as_ptr() as *const c_char;
+            return ffi::make_error(ctx, c_msg, msg.len() as ffi::sexp_sint_t);
+        }
+
+        let c_str = ffi::sexp_string_data(first_arg);
+        let len = ffi::sexp_string_size(first_arg) as usize;
+        let path =
+            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
+
+        // check policy
+        let allowed = FS_POLICY.with(|cell| {
+            let policy = cell.borrow();
+            match &*policy {
+                Some(p) => {
+                    if op.is_read() {
+                        p.check_read(path)
+                    } else {
+                        p.check_write(path)
+                    }
+                }
+                None => false,
+            }
+        });
+
+        if !allowed {
+            let msg = format!("access denied: {}", path);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        // delegate to original primitive
+        let original = ORIGINAL_PROCS.with(|procs| procs[op as usize].get());
+        ffi::sexp_apply_proc(ctx, original, args)
+    }
+}
+
+// 4 wrapper functions — one per file-opening primitive.
+// each is a thin shim that calls check_and_delegate with the right IoOp.
+
+unsafe extern "C" fn wrapper_open_input_file(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe { check_and_delegate(ctx, args, IoOp::InputFile) }
+}
+
+unsafe extern "C" fn wrapper_open_binary_input_file(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe { check_and_delegate(ctx, args, IoOp::BinaryInputFile) }
+}
+
+unsafe extern "C" fn wrapper_open_output_file(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe { check_and_delegate(ctx, args, IoOp::OutputFile) }
+}
+
+unsafe extern "C" fn wrapper_open_binary_output_file(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe { check_and_delegate(ctx, args, IoOp::BinaryOutputFile) }
+}
+
+/// get the wrapper function pointer for a given IoOp
+fn wrapper_fn_for(
+    op: IoOp,
+) -> unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp {
+    match op {
+        IoOp::InputFile => wrapper_open_input_file,
+        IoOp::BinaryInputFile => wrapper_open_binary_input_file,
+        IoOp::OutputFile => wrapper_open_output_file,
+        IoOp::BinaryOutputFile => wrapper_open_binary_output_file,
+    }
+}
 
 // --- default sizes ---
 
@@ -41,6 +194,8 @@ pub struct ContextBuilder {
     heap_max: usize,
     step_limit: Option<u64>,
     allowed_primitives: Option<Vec<&'static str>>,
+    file_read_prefixes: Option<Vec<String>>,
+    file_write_prefixes: Option<Vec<String>>,
 }
 
 impl ContextBuilder {
@@ -119,13 +274,54 @@ impl ContextBuilder {
             .preset(&EXCEPTIONS)
     }
 
+    /// allow file reading from paths under the given prefixes
+    ///
+    /// activates restricted mode and registers policy-checked wrapper
+    /// functions for `open-input-file` and `open-binary-input-file`.
+    /// also adds port-reading support primitives (read, read-char, etc.).
+    ///
+    /// prefixes should be absolute paths (e.g. "/config/", "/data/").
+    /// paths are canonicalised before checking, so symlinks and `..`
+    /// traversals are resolved.
+    pub fn file_read(mut self, prefixes: &[&str]) -> Self {
+        let list = self.file_read_prefixes.get_or_insert_with(Vec::new);
+        for p in prefixes {
+            list.push(p.to_string());
+        }
+        // ensure restricted mode is active (IO wrappers require restricted env)
+        self.allowed_primitives.get_or_insert_with(Vec::new);
+        // ensure support primitives are in the allowlist
+        self = self.preset(&crate::sandbox::FILE_READ_SUPPORT);
+        self
+    }
+
+    /// allow file writing to paths under the given prefixes
+    ///
+    /// activates restricted mode and registers policy-checked wrapper
+    /// functions for `open-output-file` and `open-binary-output-file`.
+    /// also adds port-writing support primitives (write, write-char, etc.).
+    ///
+    /// parent directories must exist; files will be created as needed (r7rs).
+    /// prefixes should be absolute paths (e.g. "/tmp/", "/output/").
+    pub fn file_write(mut self, prefixes: &[&str]) -> Self {
+        let list = self.file_write_prefixes.get_or_insert_with(Vec::new);
+        for p in prefixes {
+            list.push(p.to_string());
+        }
+        // ensure restricted mode is active (IO wrappers require restricted env)
+        self.allowed_primitives.get_or_insert_with(Vec::new);
+        // ensure support primitives are in the allowlist
+        self = self.preset(&crate::sandbox::FILE_WRITE_SUPPORT);
+        self
+    }
+
     /// check if a step limit has been configured
     pub(crate) fn has_step_limit(&self) -> bool {
         self.step_limit.is_some()
     }
 
     /// build the configured context
-    pub fn build(self) -> Result<Context> {
+    pub fn build(mut self) -> Result<Context> {
         unsafe {
             let ctx = ffi::sexp_make_eval_context(
                 std::ptr::null_mut(),
@@ -139,6 +335,11 @@ impl ContextBuilder {
                 return Err(Error::InitError("failed to create context".to_string()));
             }
 
+            // extract IO prefixes before borrowing self for allowed_primitives
+            let file_read_prefixes = self.file_read_prefixes.take();
+            let file_write_prefixes = self.file_write_prefixes.take();
+            let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
+
             // apply environment restrictions if presets are active
             if let Some(ref allowed) = self.allowed_primitives {
                 let primitive_env = ffi::sexp_context_env(ctx);
@@ -150,6 +351,21 @@ impl ContextBuilder {
                     return Err(Error::InitError(
                         "failed to create null environment".to_string(),
                     ));
+                }
+
+                // if IO wrappers needed, capture original procs from full env first
+                if has_io {
+                    let undefined = ffi::get_void();
+                    for op in IoOp::ALL {
+                        let name = op.name();
+                        let c_name = CString::new(name).unwrap();
+                        let sym =
+                            ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+                        let val = ffi::sexp_env_ref(ctx, primitive_env, sym, undefined);
+                        if val != undefined {
+                            ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
+                        }
+                    }
                 }
 
                 // copy allowed primitives from the full env into the restricted env
@@ -168,11 +384,55 @@ impl ContextBuilder {
                 }
 
                 ffi::sexp_context_env_set(ctx, null_env);
+
+                // register wrapper functions in the restricted env
+                if has_io {
+                    let read_ops = file_read_prefixes.is_some();
+                    let write_ops = file_write_prefixes.is_some();
+
+                    for op in IoOp::ALL {
+                        let want = if op.is_read() { read_ops } else { write_ops };
+                        if !want {
+                            continue;
+                        }
+                        let name = op.name();
+                        let c_name = CString::new(name).unwrap();
+                        let wrapper = wrapper_fn_for(op);
+                        // transmute to match the 3-arg signature ffi expects
+                        let f_typed: Option<
+                            unsafe extern "C" fn(
+                                ffi::sexp,
+                                ffi::sexp,
+                                ffi::sexp_sint_t,
+                            ) -> ffi::sexp,
+                        > = std::mem::transmute::<*const std::ffi::c_void, _>(
+                            wrapper as *const std::ffi::c_void,
+                        );
+                        ffi::sexp_define_foreign_proc(
+                            ctx,
+                            null_env,
+                            c_name.as_ptr(),
+                            0,
+                            ffi::SEXP_PROC_VARIADIC,
+                            c_name.as_ptr(),
+                            f_typed,
+                        );
+                    }
+
+                    // set up the FsPolicy thread-local
+                    FS_POLICY.with(|cell| {
+                        *cell.borrow_mut() = Some(FsPolicy {
+                            read_prefixes: file_read_prefixes.unwrap_or_default(),
+                            write_prefixes: file_write_prefixes.unwrap_or_default(),
+                        });
+                    });
+                }
             }
 
             Ok(Context {
                 ctx,
                 step_limit: self.step_limit,
+                has_io_wrappers: has_io,
             })
         }
     }
@@ -198,6 +458,7 @@ impl ContextBuilder {
 pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
+    has_io_wrappers: bool,
 }
 
 impl Context {
@@ -219,6 +480,8 @@ impl Context {
             heap_max: DEFAULT_HEAP_MAX,
             step_limit: None,
             allowed_primitives: None,
+            file_read_prefixes: None,
+            file_write_prefixes: None,
         }
     }
 
@@ -490,6 +753,18 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // clean up IO wrapper state if active
+        if self.has_io_wrappers {
+            FS_POLICY.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+            ORIGINAL_PROCS.with(|procs| {
+                for p in procs {
+                    p.set(std::ptr::null_mut());
+                }
+            });
+        }
+
         unsafe {
             if !self.ctx.is_null() {
                 ffi::sexp_destroy_context(self.ctx);
@@ -1823,5 +2098,286 @@ mod tests {
             .expect("build_timeout");
         let _ = ctx.evaluate("(+ 1 1)");
         drop(ctx);
+    }
+
+    // --- phase 4: parameterised IO presets ---
+    //
+    // IO tests use thread-local state (FS_POLICY, ORIGINAL_PROCS) so they
+    // must not run concurrently on the same thread. we use a mutex to
+    // serialise them.
+
+    static IO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// helper: create a temp directory with a known prefix for IO tests
+    fn io_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("tein-io-test").join(name);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    #[test]
+    fn test_file_read_allowed_path() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("read_allowed");
+        let file = dir.join("hello.txt");
+        std::fs::write(&file, "hello").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        let code = format!(
+            r#"(define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
+            file.display()
+        );
+        let result = ctx.evaluate(&code).expect("should succeed");
+        // file contains "hello", read returns the symbol hello
+        assert_eq!(result, Value::Symbol("hello".to_string()));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_file_read_denied_path() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("read_denied");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
+        assert!(err.is_err(), "read from /etc/passwd should be denied");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(
+            msg.contains("access denied"),
+            "expected 'access denied', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_file_write_allowed_path() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("write_allowed");
+        let file = dir.join("output.txt");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        let code = format!(
+            r#"(define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
+            file.display()
+        );
+        ctx.evaluate(&code).expect("should succeed");
+
+        let contents = std::fs::read_to_string(&file).expect("read back");
+        assert_eq!(contents, "X");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_file_write_denied_path() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("write_denied");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        let err = ctx.evaluate("(open-output-file \"/tmp/tein-io-test-nope.txt\")");
+        assert!(err.is_err(), "write to unallowed path should be denied");
+    }
+
+    #[test]
+    fn test_file_read_path_traversal() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("traversal");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        // try to escape via ../ — canonicalisation should catch this
+        let evil_path = format!("{}/../../../etc/passwd", dir.display());
+        let code = format!(r#"(open-input-file "{}")"#, evil_path);
+        let err = ctx.evaluate(&code);
+        assert!(err.is_err(), "path traversal should be denied");
+    }
+
+    #[test]
+    fn test_file_read_symlink_resolved() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("symlink");
+        let target = dir.join("secret.txt");
+        std::fs::write(&target, "secret").expect("write");
+        let link = dir.join("link.txt");
+        // create symlink pointing to /etc/hostname (exists on most linux)
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink("/etc/hostname", &link).ok();
+            let canon_dir = dir.canonicalize().unwrap();
+
+            let ctx = Context::builder()
+                .safe()
+                .file_read(&[canon_dir.to_str().unwrap()])
+                .build()
+                .expect("builder");
+
+            // the symlink points outside the allowed prefix, so should be denied
+            let code = format!(r#"(open-input-file "{}")"#, link.display());
+            let err = ctx.evaluate(&code);
+            assert!(
+                err.is_err(),
+                "symlink escaping allowed prefix should be denied"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_file_write_creates_new_file() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("write_new");
+        let file = dir.join("new_file.txt");
+        assert!(!file.exists());
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        let code = format!(
+            r#"(define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
+            file.display()
+        );
+        ctx.evaluate(&code).expect("should create new file");
+        assert!(file.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_file_write_parent_must_exist() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("write_no_parent");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        // parent dir doesn't exist, so check_write fails (can't canonicalise parent)
+        let code = format!(
+            r#"(open-output-file "{}/nonexistent_subdir/file.txt")"#,
+            dir.display()
+        );
+        let err = ctx.evaluate(&code);
+        assert!(err.is_err(), "write with non-existent parent should fail");
+    }
+
+    #[test]
+    fn test_file_read_without_policy() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        // safe preset without file_read — open-input-file should be absent
+        let ctx = Context::builder().safe().build().expect("builder");
+        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
+        assert!(
+            err.is_err(),
+            "open-input-file should be undefined without file_read()"
+        );
+    }
+
+    #[test]
+    fn test_file_write_without_policy() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        // safe preset without file_write — open-output-file should be absent
+        let ctx = Context::builder().safe().build().expect("builder");
+        let err = ctx.evaluate("(open-output-file \"/tmp/nope.txt\")");
+        assert!(
+            err.is_err(),
+            "open-output-file should be undefined without file_write()"
+        );
+    }
+
+    #[test]
+    fn test_file_io_with_safe_preset() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        // .safe().file_read() should compose correctly
+        let dir = io_test_dir("safe_compose");
+        let file = dir.join("data.txt");
+        std::fs::write(&file, "42").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        // arithmetic still works
+        let r = ctx.evaluate("(+ 1 2)").expect("arithmetic");
+        assert_eq!(r, Value::Integer(3));
+
+        // mutation still works
+        let r = ctx
+            .evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")
+            .expect("mutation");
+        assert_eq!(r, Value::Integer(99));
+
+        // file read works
+        let code = format!(
+            r#"(define p (open-input-file "{}")) (read p)"#,
+            file.display()
+        );
+        let r = ctx.evaluate(&code).expect("file read");
+        assert_eq!(r, Value::Integer(42));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_fd_primitives_never_exposed() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        // open-*-file-descriptor should never be available, even with file_read/file_write
+        let dir = io_test_dir("fd_blocked");
+        let canon_dir = dir.canonicalize().unwrap();
+
+        let ctx = Context::builder()
+            .safe()
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+
+        let err = ctx.evaluate("(open-input-file-descriptor 0)");
+        assert!(err.is_err(), "fd primitives should be blocked");
+        let err = ctx.evaluate("(open-output-file-descriptor 1)");
+        assert!(err.is_err(), "fd primitives should be blocked");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

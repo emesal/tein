@@ -142,6 +142,12 @@ sexp_sint_t tein_fuel_consume_slice(sexp ctx, sexp_sint_t slice_used) {
     return next;
 }
 
+// error construction (for policy violation exceptions)
+sexp tein_make_error(sexp ctx, const char* msg, sexp_sint_t len) {
+    sexp s = sexp_c_string(ctx, msg, len);
+    return sexp_user_exception(ctx, SEXP_FALSE, "policy violation", s);
+}
+
 // environment manipulation (sandboxing)
 sexp tein_sexp_make_null_env(sexp ctx, sexp version) { return sexp_make_null_env(ctx, version); }
 sexp tein_sexp_make_primitive_env(sexp ctx, sexp version) { return sexp_make_primitive_env(ctx, version); }
