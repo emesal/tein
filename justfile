@@ -245,10 +245,6 @@ pre-push: check-freeze lint test
 push: pre-push
   git push
 
-# Install to ~/.cargo/bin
-install:
-  cargo install --path crates/chibi-cli
-
 # === Documentation ===
 
 # Build and open documentation locally
