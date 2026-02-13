@@ -44,12 +44,19 @@
 - support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
 - path traversal and symlink protection via `canonicalize()`
 
+**r7rs standard environment**
+- VFS + static libs + eval.c patches for embedded module loading
+- `Context::new_standard()` / `ContextBuilder::standard_env()` API
+- ~200 bindings (map, for-each, values, dynamic-wind, etc.)
+- `ModulePolicy`: VFS-only import restriction in sandboxed standard-env contexts
+- C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
+
 ### known limitations
 
-1. **no r7rs standard environment**
-   - running with chibi primitives only (arithmetic, cons/car/cdr, define, if, lambda, etc.)
-   - missing: most r7rs standard library functions
-   - requires static library embedding or dynamic module loading
+1. **import finalization bug** — `(import ...)` in sandboxed standard-env contexts
+   triggers a port type assertion failure during module finalization (see handoff.md).
+   the module policy (VFS-only restriction) is fully implemented but the import-based
+   tests are blocked by this bug.
 
 2. **limited type coverage**
    - no hash tables, ports, continuations, bytevectors as Value variants
@@ -66,11 +73,11 @@ tein/
     error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
                    IoError, StepLimitExceeded, Timeout)
     ffi.rs       — unsafe c bindings + safe wrappers, `raw` module
-    sandbox.rs   — Preset type, FsPolicy, 16 const preset definitions
+    sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
     timeout.rs   — TimeoutContext: wall-clock timeout via thread wrapper
   vendor/chibi-scheme/
     tein_shim.c  — exports chibi c macros as real functions, fuel control,
-                   environment manipulation
+                   environment manipulation, module import policy
     vm.c         — 2-line patch: fuel budget consumption at timeslice boundary
   build.rs       — compiles chibi + shim, generates install.h
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
@@ -111,6 +118,33 @@ ContextBuilder with file_read/file_write:
      checks prefix match → delegates to original proc or returns error
   6. on Context::drop(): clear FsPolicy and ORIGINAL_PROCS thread-locals
 ```
+
+### module import policy
+
+```
+ContextBuilder with standard_env + presets:
+  1. set MODULE_POLICY thread-local = VfsOnly
+  2. set C-level tein_module_policy = 1 (vfs-only)
+  3. load standard env (init-7, meta-7 via VFS — allowed under VfsOnly)
+  4. apply sandbox restrictions (presets, IO wrappers)
+  5. on (import ...): sexp_find_module_file_raw calls tein_module_allowed()
+     → VFS paths (/vfs/lib/...) pass, filesystem paths blocked
+  6. on Context::drop(): reset both thread-local and C-level to Unrestricted
+```
+
+**VFS safety contract**: VFS modules are safe by construction — tein curates
+the embedded virtual filesystem to ensure no module can bypass the existing
+safety layers (preset allowlists, FsPolicy, fuel/timeout). capabilities
+exposed by VFS modules remain subject to these controls.
+
+**security layers** (independent, composable):
+
+| layer              | gates                                    |
+|--------------------|------------------------------------------|
+| module allowlist   | which libraries can be `import`ed        |
+| preset allowlist   | which primitives/bindings are in scope   |
+| FsPolicy           | which filesystem paths can be opened     |
+| fuel/timeout       | resource exhaustion                      |
 
 ### thread safety
 

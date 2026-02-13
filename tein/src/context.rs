@@ -4,7 +4,7 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
-    sandbox::{FS_POLICY, FsPolicy, Preset},
+    sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
 };
 use std::cell::Cell;
 use std::ffi::CString;
@@ -375,6 +375,18 @@ impl ContextBuilder {
                 }
             }
 
+            // activate VFS-only module policy if both standard_env and
+            // sandbox (presets) are configured. this restricts (import ...)
+            // to only load modules from the embedded VFS, blocking
+            // filesystem-based modules like (chibi process).
+            // set early so it's active during sandbox setup (which may
+            // trigger transitive module loads).
+            let has_module_policy = self.standard_env && self.allowed_primitives.is_some();
+            if has_module_policy {
+                MODULE_POLICY.with(|cell| cell.set(ModulePolicy::VfsOnly));
+                ffi::module_policy_set(ModulePolicy::VfsOnly as i32);
+            }
+
             // extract IO prefixes before borrowing self for allowed_primitives
             let file_read_prefixes = self.file_read_prefixes.take();
             let file_write_prefixes = self.file_write_prefixes.take();
@@ -478,6 +490,7 @@ impl ContextBuilder {
                 ctx,
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
+                has_module_policy,
             })
         }
     }
@@ -504,6 +517,7 @@ pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
     has_io_wrappers: bool,
+    has_module_policy: bool,
 }
 
 impl Context {
@@ -808,6 +822,12 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // clean up module policy if active
+        if self.has_module_policy {
+            MODULE_POLICY.with(|cell| cell.set(ModulePolicy::Unrestricted));
+            unsafe { ffi::module_policy_set(ModulePolicy::Unrestricted as i32) };
+        }
+
         // clean up IO wrapper state if active
         if self.has_io_wrappers {
             FS_POLICY.with(|cell| {
@@ -2592,4 +2612,94 @@ mod tests {
             ])
         );
     }
+
+    // --- module policy ---
+
+    #[test]
+    fn test_module_policy_blocks_non_vfs() {
+        // a sandboxed standard-env context should activate VfsOnly policy,
+        // blocking attempts to import filesystem-based modules.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .build()
+            .expect("standard + sandbox");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::VfsOnly,
+                "sandboxed standard env should activate VfsOnly policy"
+            );
+        });
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_unrestricted_without_sandbox() {
+        // standard env without sandbox should leave module policy unrestricted
+        let ctx = Context::new_standard().expect("new_standard");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::Unrestricted,
+                "unsandboxed standard env should be unrestricted"
+            );
+        });
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_cleared_on_drop() {
+        use crate::sandbox::*;
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .preset(&ARITHMETIC)
+                .build()
+                .expect("standard + sandbox");
+
+            MODULE_POLICY.with(|cell| {
+                assert_eq!(cell.get(), ModulePolicy::VfsOnly);
+            });
+        }
+        // after drop, policy should reset
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::Unrestricted,
+                "module policy should reset to unrestricted after context drop"
+            );
+        });
+    }
+
+    #[test]
+    fn test_module_policy_not_set_without_standard_env() {
+        // sandbox without standard_env should NOT activate module policy
+        // (there's no module system to restrict)
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .preset(&ARITHMETIC)
+            .build()
+            .expect("sandbox without standard env");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::Unrestricted,
+                "non-standard-env sandbox should not set module policy"
+            );
+        });
+
+        drop(ctx);
+    }
+
+    // TODO: add test_module_policy_blocks_filesystem_import once the import
+    // finalization port type bug is resolved (see handoff.md). this test
+    // should verify that (import (chibi process)) fails in a sandboxed
+    // standard-env context while (import (scheme write)) succeeds.
 }

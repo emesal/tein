@@ -33,12 +33,13 @@ src/
   error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
                  StepLimitExceeded, Timeout)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
-  sandbox.rs   — Preset type, FsPolicy, 16 const preset definitions for env restriction
+  sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions for env restriction
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
 vendor/chibi-scheme/
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
-                 env_copy_named (rename-aware binding copy), error construction
-  eval.c       — 3 patches: VFS module lookup (A), VFS load (B), VFS open-input-file (C)
+                 env_copy_named (rename-aware binding copy), error construction,
+                 module import policy (tein_module_allowed, tein_module_policy_set)
+  eval.c       — 3 patches: VFS module lookup (A + module policy gate), VFS load (B), VFS open-input-file (C)
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
 build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
@@ -51,6 +52,8 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 **sandboxing flow**: ContextBuilder with presets → get source env (primitive or standard) → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames) → set as active env
 
 **IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
+
+**module policy flow**: ContextBuilder with standard_env + presets → set MODULE_POLICY = VfsOnly (thread-local + C-level) → sexp_find_module_file_raw checks tein_module_allowed() → VFS paths pass, filesystem paths blocked → policy cleared on Context::drop()
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. fuel counters are thread-local.
 

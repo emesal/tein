@@ -158,6 +158,26 @@ sexp tein_make_error(sexp ctx, const char* msg, sexp_sint_t len) {
     return sexp_user_exception(ctx, SEXP_FALSE, "policy violation", s);
 }
 
+// --- module import policy ---
+//
+// controls which modules can be loaded via sexp_find_module_file_raw.
+// 0 = unrestricted (all modules allowed), 1 = vfs-only (only /vfs/lib/ paths).
+// set from rust before loading the standard env in sandboxed contexts.
+
+TEIN_THREAD_LOCAL int tein_module_policy = 0;
+
+// check if a module path is allowed under the current policy.
+// called from eval.c patch A (sexp_find_module_file_raw).
+int tein_module_allowed(const char *path) {
+    if (tein_module_policy == 0) return 1;
+    return strncmp(path, "/vfs/lib/", 9) == 0;
+}
+
+// set the module policy. called from rust ffi.
+void tein_module_policy_set(int policy) {
+    tein_module_policy = policy;
+}
+
 // environment manipulation (sandboxing)
 sexp tein_sexp_make_null_env(sexp ctx, sexp version) { return sexp_make_null_env(ctx, version); }
 sexp tein_sexp_make_primitive_env(sexp ctx, sexp version) { return sexp_make_primitive_env(ctx, version); }

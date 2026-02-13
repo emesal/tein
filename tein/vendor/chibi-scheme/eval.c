@@ -10,6 +10,8 @@
 
 /* tein VFS: forward declaration for embedded filesystem (tein_shim.c) */
 extern const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length);
+/* tein module policy: forward declaration for import restriction (tein_shim.c) */
+extern int tein_module_allowed(const char *path);
 
 /************************************************************************/
 
@@ -2408,9 +2410,14 @@ char* sexp_find_module_file_raw (sexp ctx, const char *file) {
     memcpy(path+len-filelen-1, file, filelen);
     path[len-1] = '\0';
     /* tein VFS: check embedded files alongside static libs and filesystem (patch A) */
-    if (tein_vfs_lookup(path, &tein_vfs_dummy) || sexp_find_static_library(path) || file_exists_p(path, buf))
-      return path;
-    free(path);
+    if (tein_vfs_lookup(path, &tein_vfs_dummy) || sexp_find_static_library(path) || file_exists_p(path, buf)) {
+      /* tein module policy: reject paths not allowed by current policy */
+      if (tein_module_allowed(path))
+        return path;
+      free(path);
+    } else {
+      free(path);
+    }
   }
 
   return NULL;

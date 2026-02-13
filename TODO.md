@@ -52,18 +52,15 @@
   - support presets for port read/write operations
   - path traversal and symlink protection via canonicalisation
 
-- [ ] **r7rs standard environment**
-  - figure out static library setup (or accept dynamic loading)
-  - alternative: manually expose needed functions incrementally
-  - **security: module loading must be sandboxed** — two approaches to evaluate:
-    - *option 1 — module allowlist*: whitelist-based, consistent with primitive allowlist.
-      `ContextBuilder::allow_modules(&["(scheme base)", "(scheme write)"])`.
-      modules not on the list simply can't load. blocks `(chibi process)`,
-      `(chibi filesystem)`, `(scheme load)` etc. by omission.
-    - *option 3 — patched module loader*: intercept `%import` at C level to check
-      against an allowlist before loading. more invasive but airtight against any
-      scheme-level workaround. may be needed if `eval`/`compile` become available
-      and could construct import forms dynamically.
+- [x] **r7rs standard environment**
+  - [x] VFS + static libs + eval.c patches for module loading
+  - [x] rust API + sandbox integration (Context::new_standard, ContextBuilder::standard_env)
+  - [x] module import policy: VFS-only restriction in sandboxed standard-env contexts
+    - C-level interception in sexp_find_module_file_raw via tein_module_allowed()
+    - automatic: standard_env + any preset → VfsOnly, no explicit API needed
+  - [ ] import finalization port type bug (see handoff.md)
+    - blocks: test_module_policy_blocks_filesystem_import (import-based test)
+    - blocks: test_standard_env_sandbox_allows_vfs_import (VFS import test)
 
 - [ ] **additional value types**
   - bytevectors, hash tables, ports, continuations (as opaque values)

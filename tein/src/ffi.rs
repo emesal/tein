@@ -157,6 +157,9 @@ unsafe extern "C" {
     // error construction (for policy violation exceptions)
     pub fn tein_make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp;
 
+    // module import policy (for sandboxed standard env)
+    pub fn tein_module_policy_set(policy: c_int);
+
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
 
@@ -471,6 +474,13 @@ pub unsafe fn load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp {
 #[inline]
 pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_load_standard_ports(ctx, env) }
+}
+
+/// set the module import policy at C level.
+/// 0 = unrestricted (all modules), 1 = vfs-only.
+#[inline]
+pub unsafe fn module_policy_set(policy: i32) {
+    unsafe { tein_module_policy_set(policy as c_int) }
 }
 
 /// copy a named binding from src_env to dst_env, searching both direct
