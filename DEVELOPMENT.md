@@ -53,10 +53,13 @@
 
 ### known limitations
 
-1. **import finalization bug** — `(import ...)` in sandboxed standard-env contexts
-   triggers a port type assertion failure during module finalization (see handoff.md).
-   the module policy (VFS-only restriction) is fully implemented but the import-based
-   tests are blocked by this bug.
+1. **import finalization bug** — `(import ...)` triggers an "invalid type, expected
+   Input-Port" error during module finalization. the VFS loading works (all 48 files
+   load successfully during standard env init), but user-facing `(import (scheme write))`
+   fails because chibi's module finalization calls `read-sexps` which expects file-backed
+   ports, and VFS provides string ports. likely fixable by patching the finalization path
+   to accept string ports, or by using a different port type for VFS content. the module
+   policy (VFS-only restriction) is fully implemented but import-based tests are blocked.
 
 2. **limited type coverage**
    - no hash tables, ports, continuations, bytevectors as Value variants
@@ -79,7 +82,7 @@ tein/
     tein_shim.c  — exports chibi c macros as real functions, fuel control,
                    environment manipulation, module import policy
     vm.c         — 2-line patch: fuel budget consumption at timeslice boundary
-  build.rs       — compiles chibi + shim, generates install.h
+  build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 tein-macros/     — #[scheme_fn] proc macro crate
 tein-sexp/       — pure rust s-expression parser/printer
@@ -162,11 +165,19 @@ exposed by VFS modules remain subject to these controls.
 
 **type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and matches floats like 4.0, producing garbage.
 
+**VFS path prefix**: use `/vfs/lib` not `vfs://...` — chibi's `sexp_add_path` splits on `:`, so colons in paths break module resolution.
+
+**`sexp_load_standard_env` signature**: the version parameter is `sexp` (a tagged fixnum via `sexp_make_fixnum`), NOT `sexp_uint_t`. this is a chibi API quirk.
+
+**rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping.
+
+**`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. this is a scope chain issue specific to the null env sandbox approach.
+
 ## building & testing
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (100 lib + 12 scheme_fn + 8 doc)
+cargo test                         # all tests (112 lib + 12 scheme_fn + 8 doc)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint

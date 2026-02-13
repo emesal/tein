@@ -57,9 +57,11 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. fuel counters are thread-local.
 
-## critical gotcha
+## critical gotchas
 
 **type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0, producing garbage integer values.
+
+**chibi feature flags**: on linux, `SEXP_USE_GREEN_THREADS` defaults to 1, so the `threads` cond-expand feature is active (affects which VFS files are loaded, e.g. `srfi/39/syntax.scm` vs `syntax-no-threads.scm`). `full-unicode` is always enabled (affects `scheme/char.sld` path selection).
 
 ## adding a new scheme type
 
