@@ -58,9 +58,12 @@
   - [x] module import policy: VFS-only restriction in sandboxed standard-env contexts
     - C-level interception in sexp_find_module_file_raw via tein_module_allowed()
     - automatic: standard_env + any preset → VfsOnly, no explicit API needed
-  - [ ] import finalization port type bug (see handoff.md)
-    - blocks: test_module_policy_blocks_filesystem_import (import-based test)
-    - blocks: test_standard_env_sandbox_allows_vfs_import (VFS import test)
+  - [x] import during standard env: GC corruption workaround (128MB initial heap)
+    - chibi GC corrupts VM stack slots during nested module loading
+    - workaround: auto-bump initial heap to 128MB for standard_env contexts
+    - TODO: investigate chibi GC root cause, reduce heap requirement
+  - [ ] test_module_policy_blocks_filesystem_import (sandboxed import test)
+  - [ ] test_standard_env_sandbox_allows_vfs_import (VFS import in sandbox)
 
 - [ ] **additional value types**
   - bytevectors, hash tables, ports, continuations (as opaque values)

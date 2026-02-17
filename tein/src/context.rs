@@ -167,6 +167,12 @@ fn wrapper_fn_for(
 const DEFAULT_HEAP_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
 
+/// initial heap for standard env contexts. module loading triggers deep
+/// macro expansion that can provoke chibi's GC, which has a known issue
+/// relocating VM stack references during nested compilation. a larger
+/// initial heap avoids GC during the critical module import window.
+const STANDARD_ENV_HEAP_SIZE: usize = 128 * 1024 * 1024;
+
 /// builder for configuring a scheme context before creation
 ///
 /// provides a fluent api for setting heap sizes, step limits,
@@ -337,6 +343,16 @@ impl ContextBuilder {
 
     /// build the configured context
     pub fn build(mut self) -> Result<Context> {
+        // standard env needs a larger initial heap to avoid a chibi GC bug
+        // that corrupts VM stack slots during nested module loading (the GC
+        // runs during macro expansion of define-library, and scheme-level
+        // local variables like the port in `read` get overwritten with
+        // unrelated heap objects). 128MB prevents GC from firing during the
+        // critical import window. see DEVELOPMENT.md for details.
+        if self.standard_env && self.heap_size < STANDARD_ENV_HEAP_SIZE {
+            self.heap_size = STANDARD_ENV_HEAP_SIZE;
+        }
+
         unsafe {
             let ctx = ffi::sexp_make_eval_context(
                 std::ptr::null_mut(),
@@ -534,9 +550,11 @@ impl Context {
 
     /// create a new context with the r7rs standard environment
     ///
-    /// equivalent to `Context::builder().standard_env().build()`.
     /// provides `(scheme base)` and supporting modules — `map`, `for-each`,
     /// `import`, `define-record-type`, etc.
+    ///
+    /// automatically uses a larger initial heap (64mb) to work around a
+    /// chibi-scheme GC issue during module loading.
     pub fn new_standard() -> Result<Self> {
         Self::builder().standard_env().build()
     }
@@ -2698,8 +2716,38 @@ mod tests {
         drop(ctx);
     }
 
-    // TODO: add test_module_policy_blocks_filesystem_import once the import
-    // finalization port type bug is resolved (see handoff.md). this test
-    // should verify that (import (chibi process)) fails in a sandboxed
-    // standard-env context while (import (scheme write)) succeeds.
+    // TODO: add test_module_policy_blocks_filesystem_import once sandboxed
+    // import is tested. this test should verify that (import (chibi process))
+    // fails in a sandboxed standard-env context while (import (scheme write))
+    // succeeds.
+
+    #[test]
+    fn test_standard_env_import() {
+        // user-facing (import ...) in a standard env context.
+        // the larger initial heap (auto-set by the builder for standard_env)
+        // avoids chibi GC corruption during nested module loading.
+        let ctx = Context::new_standard().unwrap();
+
+        // import a module with inline begin (no include)
+        let r = ctx.evaluate("(import (srfi 11))");
+        assert!(r.is_ok(), "(import (srfi 11)) failed: {:?}", r.err());
+
+        // import a module with dependencies (chibi ast, srfi 69)
+        let r = ctx.evaluate("(import (srfi 38))");
+        assert!(r.is_ok(), "(import (srfi 38)) failed: {:?}", r.err());
+
+        // import scheme write (depends on srfi 38)
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(r.is_ok(), "(import (scheme write)) failed: {:?}", r.err());
+
+        // import scheme base (depends on chibi io, equiv, string, ast, srfi 9/11/39)
+        let r = ctx.evaluate("(import (scheme base))");
+        assert!(r.is_ok(), "(import (scheme base)) failed: {:?}", r.err());
+
+        // verify imported bindings work
+        let r = ctx
+            .evaluate("(let-values (((a b) (values 1 2))) (+ a b))")
+            .unwrap();
+        assert_eq!(r.as_integer(), Some(3));
+    }
 }

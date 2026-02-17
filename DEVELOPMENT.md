@@ -53,13 +53,16 @@
 
 ### known limitations
 
-1. **import finalization bug** — `(import ...)` triggers an "invalid type, expected
-   Input-Port" error during module finalization. the VFS loading works (all 48 files
-   load successfully during standard env init), but user-facing `(import (scheme write))`
-   fails because chibi's module finalization calls `read-sexps` which expects file-backed
-   ports, and VFS provides string ports. likely fixable by patching the finalization path
-   to accept string ports, or by using a different port type for VFS content. the module
-   policy (VFS-only restriction) is fully implemented but import-based tests are blocked.
+1. **chibi GC corruption during module import** — `(import ...)` triggers a GC cycle
+   during nested macro expansion of `define-library`, and chibi's mark-and-sweep GC
+   corrupts scheme VM stack slots. scheme-level local variables (e.g. the port argument
+   to `read` inside the `load` function) get overwritten with unrelated heap objects
+   (AST nodes, bytecode vectors, type objects). this is NOT a port type issue — VFS
+   string ports are valid `SEXP_IPORT`. the bug manifests as "invalid type, expected
+   Input-Port" because `read`'s port argument has been corrupted. **workaround**: the
+   builder auto-bumps initial heap to 128MB for `standard_env` contexts, preventing GC
+   from firing during the critical module import window. imports work reliably at this
+   size. future work: investigate chibi's GC stack scanning for the root cause.
 
 2. **limited type coverage**
    - no hash tables, ports, continuations, bytevectors as Value variants
