@@ -53,18 +53,7 @@
 
 ### known limitations
 
-1. **chibi GC corruption during module import** — `(import ...)` triggers a GC cycle
-   during nested macro expansion of `define-library`, and chibi's mark-and-sweep GC
-   corrupts scheme VM stack slots. scheme-level local variables (e.g. the port argument
-   to `read` inside the `load` function) get overwritten with unrelated heap objects
-   (AST nodes, bytecode vectors, type objects). this is NOT a port type issue — VFS
-   string ports are valid `SEXP_IPORT`. the bug manifests as "invalid type, expected
-   Input-Port" because `read`'s port argument has been corrupted. **workaround**: the
-   builder auto-bumps initial heap to 128MB for `standard_env` contexts, preventing GC
-   from firing during the critical module import window. imports work reliably at this
-   size. future work: investigate chibi's GC stack scanning for the root cause.
-
-2. **limited type coverage**
+1. **limited type coverage**
    - no hash tables, ports, continuations, bytevectors as Value variants
 
 ## architecture
@@ -159,6 +148,25 @@ exposed by VFS modules remain subject to these controls.
 - fuel counters are `__thread` (thread-local) so parallel tests don't interfere
 
 ### key design decisions
+
+**GC safety — `ffi::GcRoot`**: chibi's conservative stack scanning is disabled in our build. the GC does NOT see rust locals — only objects reachable from the context's heap roots survive collection. any `sexp` held as a rust local across an allocation point must be rooted via `ffi::GcRoot`, an RAII guard that calls `sexp_preserve_object` on creation and `sexp_release_object` on drop.
+
+allocating FFI calls (trigger GC, require rooting across):
+- `sexp_make_flonum`, `sexp_c_str`, `sexp_intern` — create heap objects
+- `sexp_cons`, `sexp_make_vector` — create containers
+- `sexp_symbol_to_string` — allocates a string from a symbol
+- `sexp_open_input_string`, `sexp_read`, `sexp_evaluate` — evaluation machinery
+- `sexp_load_standard_env`, `sexp_make_null_env` — env construction
+- `sexp_env_define`, `env_copy_named`, `sexp_define_foreign_proc` — env mutation
+- `sexp_preserve_object` itself — allocates a cons cell on the preservatives list
+
+non-allocating FFI calls (safe, no rooting needed):
+- type predicates: `sexp_integerp`, `sexp_flonump`, `sexp_pairp`, etc.
+- value extractors: `sexp_unbox_fixnum`, `sexp_flonum_value`, `sexp_string_data`, `sexp_car`, `sexp_cdr`, `sexp_vector_data`
+- immediate constructors: `sexp_make_fixnum`, `sexp_make_boolean`, `get_null`, `get_void`
+- `sexp_vector_set` — writes to an existing vector slot, no allocation
+
+C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (see eval.c patches).
 
 **vendoring chibi**: source bundled, compiled via build.rs, zero external deps.
 

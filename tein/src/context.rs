@@ -167,12 +167,6 @@ fn wrapper_fn_for(
 const DEFAULT_HEAP_SIZE: usize = 4 * 1024 * 1024;
 const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
 
-/// initial heap for standard env contexts. module loading triggers deep
-/// macro expansion that can provoke chibi's GC, which has a known issue
-/// relocating VM stack references during nested compilation. a larger
-/// initial heap avoids GC during the critical module import window.
-const STANDARD_ENV_HEAP_SIZE: usize = 128 * 1024 * 1024;
-
 /// builder for configuring a scheme context before creation
 ///
 /// provides a fluent api for setting heap sizes, step limits,
@@ -343,16 +337,6 @@ impl ContextBuilder {
 
     /// build the configured context
     pub fn build(mut self) -> Result<Context> {
-        // standard env needs a larger initial heap to avoid a chibi GC bug
-        // that corrupts VM stack slots during nested module loading (the GC
-        // runs during macro expansion of define-library, and scheme-level
-        // local variables like the port in `read` get overwritten with
-        // unrelated heap objects). 128MB prevents GC from firing during the
-        // critical import window. see DEVELOPMENT.md for details.
-        if self.standard_env && self.heap_size < STANDARD_ENV_HEAP_SIZE {
-            self.heap_size = STANDARD_ENV_HEAP_SIZE;
-        }
-
         unsafe {
             let ctx = ffi::sexp_make_eval_context(
                 std::ptr::null_mut(),
@@ -422,6 +406,11 @@ impl ContextBuilder {
                         "failed to create null environment".to_string(),
                     ));
                 }
+
+                // root null_env — intern, env_copy_named, and define_foreign_proc
+                // all allocate, and null_env is only a rust local until
+                // sexp_context_env_set makes it reachable from the context.
+                let _null_env = ffi::GcRoot::new(ctx, null_env);
 
                 // if IO wrappers needed, capture original procs from full env first
                 if has_io {
@@ -550,11 +539,9 @@ impl Context {
 
     /// create a new context with the r7rs standard environment
     ///
+    /// equivalent to `Context::builder().standard_env().build()`.
     /// provides `(scheme base)` and supporting modules — `map`, `for-each`,
     /// `import`, `define-record-type`, etc.
-    ///
-    /// automatically uses a larger initial heap (64mb) to work around a
-    /// chibi-scheme GC issue during module loading.
     pub fn new_standard() -> Result<Self> {
         Self::builder().standard_env().build()
     }
@@ -637,6 +624,14 @@ impl Context {
             if ffi::sexp_exceptionp(port) != 0 {
                 return Value::from_raw(self.ctx, port);
             }
+
+            // gc-root the port and its backing string. rust locals are
+            // invisible to chibi's GC (no conservative stack scanning), so
+            // evaluation (e.g. import triggering module loading) can collect
+            // these objects if they aren't rooted. GcRoot auto-releases on
+            // any exit path (early return, ?, or normal drop).
+            let _str_guard = ffi::GcRoot::new(self.ctx, scheme_str);
+            let _port_guard = ffi::GcRoot::new(self.ctx, port);
 
             // read and evaluate expressions until EOF
             let mut result = ffi::get_void();
@@ -808,10 +803,16 @@ impl Context {
         self.arm_fuel();
 
         unsafe {
+            // root raw_proc — to_raw + sexp_cons calls below allocate
+            let _proc = ffi::GcRoot::new(self.ctx, raw_proc);
+
             // build scheme list from args (reverse-iterate with cons, like to_raw does for lists)
             let mut arg_list = ffi::get_null();
             for arg in args.iter().rev() {
+                // root accumulator across to_raw + sexp_cons allocations
+                let _tail = ffi::GcRoot::new(self.ctx, arg_list);
                 let raw_arg = arg.to_raw(self.ctx)?;
+                let _head = ffi::GcRoot::new(self.ctx, raw_arg);
                 arg_list = ffi::sexp_cons(self.ctx, raw_arg, arg_list);
             }
 
@@ -2724,8 +2725,8 @@ mod tests {
     #[test]
     fn test_standard_env_import() {
         // user-facing (import ...) in a standard env context.
-        // the larger initial heap (auto-set by the builder for standard_env)
-        // avoids chibi GC corruption during nested module loading.
+        // works with default 4MB heap now that evaluate() gc-protects its
+        // port and sexp_load_op properly preserves VFS strings.
         let ctx = Context::new_standard().unwrap();
 
         // import a module with inline begin (no include)

@@ -134,6 +134,10 @@ unsafe extern "C" {
     pub fn tein_sexp_read(ctx: sexp, port: sexp) -> sexp;
     pub fn tein_sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp;
 
+    // gc preservation for rust-side references (via tein shim)
+    pub fn tein_sexp_preserve_object(ctx: sexp, x: sexp);
+    pub fn tein_sexp_release_object(ctx: sexp, x: sexp);
+
     // procedure/application support (via tein shim)
     pub fn tein_sexp_procedurep(x: sexp) -> c_int;
     pub fn tein_sexp_opcodep(x: sexp) -> c_int;
@@ -423,6 +427,20 @@ pub unsafe fn sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_evaluate(ctx, obj, env) }
 }
 
+/// add a sexp to the global preservatives list, preventing GC collection.
+/// must be paired with `sexp_release_object` when the reference is no longer needed.
+/// use this for rust-side references that survive across allocation points.
+#[inline]
+pub unsafe fn sexp_preserve_object(ctx: sexp, x: sexp) {
+    unsafe { tein_sexp_preserve_object(ctx, x) }
+}
+
+/// remove a sexp from the global preservatives list, allowing GC collection.
+#[inline]
+pub unsafe fn sexp_release_object(ctx: sexp, x: sexp) {
+    unsafe { tein_sexp_release_object(ctx, x) }
+}
+
 // fuel control
 #[inline]
 pub unsafe fn fuel_arm(ctx: sexp, total_fuel: sexp_sint_t) {
@@ -481,6 +499,47 @@ pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
 #[inline]
 pub unsafe fn module_policy_set(policy: i32) {
     unsafe { tein_module_policy_set(policy as c_int) }
+}
+
+/// RAII guard that roots a `sexp` on chibi's global preservatives list.
+///
+/// prevents GC from collecting the guarded object while the guard is alive.
+/// calls `sexp_preserve_object` on creation and `sexp_release_object` on drop,
+/// so early returns and panics are handled automatically.
+///
+/// # safety
+///
+/// `ctx` and `obj` must be valid chibi-scheme pointers.
+/// `obj` must be a heap-allocated sexp (not a fixnum or other immediate value).
+/// the guard must not outlive the context.
+pub struct GcRoot {
+    ctx: sexp,
+    obj: sexp,
+}
+
+impl GcRoot {
+    /// root `obj` in `ctx`'s global preservatives list.
+    ///
+    /// # safety
+    ///
+    /// `ctx` must be a live context. `obj` must be a valid heap-allocated sexp.
+    #[inline]
+    pub unsafe fn new(ctx: sexp, obj: sexp) -> Self {
+        unsafe { sexp_preserve_object(ctx, obj) };
+        Self { ctx, obj }
+    }
+
+    /// the rooted sexp pointer
+    #[inline]
+    pub fn get(&self) -> sexp {
+        self.obj
+    }
+}
+
+impl Drop for GcRoot {
+    fn drop(&mut self) {
+        unsafe { sexp_release_object(self.ctx, self.obj) };
+    }
 }
 
 /// copy a named binding from src_env to dst_env, searching both direct

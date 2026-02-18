@@ -40,6 +40,7 @@ pub use tein_macros::scheme_fn;
 /// generates code that references these symbols, so they must remain public.
 #[allow(missing_docs)]
 pub mod raw {
+    pub use crate::ffi::{GcRoot, sexp, sexp_sint_t};
     pub use crate::ffi::{
         get_false, get_null, get_true, get_void, sexp_booleanp, sexp_c_str, sexp_car, sexp_cdr,
         sexp_cons, sexp_exceptionp, sexp_flonum_value, sexp_flonump, sexp_integerp,
@@ -47,5 +48,4 @@ pub mod raw {
         sexp_string_data, sexp_string_size, sexp_stringp, sexp_symbolp, sexp_unbox_fixnum,
         sexp_vectorp,
     };
-    pub use crate::ffi::{sexp, sexp_sint_t};
 }

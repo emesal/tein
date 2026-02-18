@@ -10,20 +10,30 @@ use std::fmt;
 /// prevents stack overflow on deeply nested or (theoretically) circular structures.
 const MAX_DEPTH: usize = 10_000;
 
-// note on gc safety:
-// chibi-scheme uses a conservative garbage collector that scans the c stack
-// for potential pointers. all `sexp` values we work with here are either:
-// 1. passed as function parameters (on the stack)
-// 2. stored in local variables (on the stack)
-// 3. reachable from stack-rooted objects
+// gc safety:
 //
-// this means the gc will see them and won't collect them during iteration.
-// explicit pinning via `sexp_preserve_object` is unnecessary and causes
-// exponential memory allocation in deeply nested structures (each pin allocates
-// a cons cell on the global preservatives list).
+// chibi's conservative stack scanning is DISABLED in our build (no boehm,
+// SEXP_USE_CONSERVATIVE_SCAN=0). the GC does NOT see rust locals — only
+// objects reachable from the context's heap roots are safe from collection.
 //
-// if chibi is compiled with boehm gc (SEXP_USE_BOEHM=1), pinning is a no-op anyway.
-// for the native gc, the conservative scanning is sufficient for our use case.
+// any `sexp` held as a rust local across an allocation point (a call into
+// chibi that may trigger GC) must be rooted via `ffi::GcRoot`. GcRoot is
+// an RAII guard that calls sexp_preserve_object/sexp_release_object, so
+// early returns and panics are handled automatically.
+//
+// allocation points in this module:
+//   - to_raw_depth: sexp_make_flonum, sexp_c_str, sexp_intern,
+//     sexp_cons, sexp_make_vector, recursive to_raw_depth calls
+//   - from_raw_depth: sexp_symbol_to_string, recursive from_raw_depth
+//     calls (which may hit sexp_symbol_to_string)
+//
+// safe (non-allocating) calls:
+//   - type predicates (sexp_integerp, sexp_flonump, etc.)
+//   - value extractors (sexp_unbox_fixnum, sexp_flonum_value,
+//     sexp_string_data, sexp_car, sexp_cdr, sexp_vector_data)
+//   - immediate constructors (sexp_make_fixnum, sexp_make_boolean,
+//     get_null, get_void, get_true, get_false)
+//   - sexp_vector_set (writes to existing vector, no allocation)
 //
 // note on structural sharing:
 // scheme objects can form DAGs (e.g. (make-vector 2 x) shares x in both slots).
@@ -151,6 +161,9 @@ impl Value {
             if ffi::sexp_vectorp(raw) != 0 {
                 let len = ffi::sexp_vector_length(raw) as usize;
                 let data = ffi::sexp_vector_data(raw);
+                // root the vector — recursive conversion may allocate
+                // (e.g. sexp_symbol_to_string for symbol elements)
+                let _vec = ffi::GcRoot::new(ctx, raw);
                 let mut items = Vec::with_capacity(len);
                 for i in 0..len {
                     let elem = *data.add(i);
@@ -165,6 +178,8 @@ impl Value {
                     let mut current = raw;
 
                     while ffi::sexp_pairp(current) != 0 {
+                        // root current pair — recursive conversion may allocate
+                        let _pair = ffi::GcRoot::new(ctx, current);
                         let car = ffi::sexp_car(current);
                         items.push(Value::from_raw_depth(ctx, car, depth + 1)?);
                         current = ffi::sexp_cdr(current);
@@ -172,6 +187,8 @@ impl Value {
 
                     return Ok(Value::List(items));
                 } else {
+                    // root raw across recursive conversions of car and cdr
+                    let _pair = ffi::GcRoot::new(ctx, raw);
                     let car = ffi::sexp_car(raw);
                     let cdr = ffi::sexp_cdr(raw);
                     return Ok(Value::Pair(
@@ -291,19 +308,29 @@ impl Value {
                     // build list from back to front: (cons last (cons ... (cons first nil)))
                     let mut result = ffi::get_null();
                     for item in items.iter().rev() {
+                        // root accumulator across to_raw_depth + sexp_cons allocations
+                        let _tail = ffi::GcRoot::new(ctx, result);
                         let raw_item = item.to_raw_depth(ctx, depth + 1)?;
+                        // root raw_item across sexp_cons (which allocates a pair)
+                        let _head = ffi::GcRoot::new(ctx, raw_item);
                         result = ffi::sexp_cons(ctx, raw_item, result);
                     }
                     Ok(result)
                 }
                 Value::Pair(car, cdr) => {
                     let raw_car = car.to_raw_depth(ctx, depth + 1)?;
+                    // root raw_car across cdr conversion + sexp_cons
+                    let _car = ffi::GcRoot::new(ctx, raw_car);
                     let raw_cdr = cdr.to_raw_depth(ctx, depth + 1)?;
+                    // root raw_cdr across sexp_cons
+                    let _cdr = ffi::GcRoot::new(ctx, raw_cdr);
                     Ok(ffi::sexp_cons(ctx, raw_car, raw_cdr))
                 }
                 Value::Vector(items) => {
                     let len = items.len();
                     let vec = ffi::sexp_make_vector(ctx, len as ffi::sexp_uint_t, ffi::get_void());
+                    // root vec across element conversions (each may allocate)
+                    let _vec = ffi::GcRoot::new(ctx, vec);
                     for (i, item) in items.iter().enumerate() {
                         let raw_item = item.to_raw_depth(ctx, depth + 1)?;
                         ffi::sexp_vector_set(vec, i as ffi::sexp_uint_t, raw_item);
