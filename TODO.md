@@ -61,8 +61,12 @@
   - [x] import during standard env: GC rooting fix (default 4MB heap)
     - root cause: rust locals invisible to chibi GC (no conservative stack scanning)
     - fix: sexp_preserve_object in evaluate(), gc_preserve fix in sexp_load_op VFS patch
-  - [ ] test_module_policy_blocks_filesystem_import (sandboxed import test)
-  - [ ] test_standard_env_sandbox_allows_vfs_import (VFS import in sandbox)
+  - [x] sandboxed import: `.allow(&["import"])` enables idiomatic r7rs imports in sandbox
+    - GC fix: root source_env in sandbox build (survives across null env allocation)
+    - NULL safety: guard env parent chain walk in tein_env_copy_named
+    - VFS-only policy blocks filesystem modules, VFS modules work normally
+  - [x] test_module_policy_blocks_filesystem_import (sandboxed import test)
+  - [x] test_standard_env_sandbox_allows_vfs_import (VFS import in sandbox)
 
 - [ ] **additional value types**
   - bytevectors, hash tables, ports, continuations (as opaque values)

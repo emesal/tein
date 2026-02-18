@@ -256,9 +256,11 @@ int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
     }
 
     // second try: scan rename bindings for synclos whose underlying
-    // expression matches our bare symbol
+    // expression matches our bare symbol.
+    // note: sexp_envp(NULL) segfaults because sexp_pointerp(NULL) is true
+    // (SEXP_POINTER_TAG == 0), so we guard against NULL explicitly.
     sexp env = src_env;
-    while (sexp_envp(env)) {
+    while (env && sexp_envp(env)) {
 #if SEXP_USE_RENAME_BINDINGS
         sexp ls;
         for (ls = sexp_env_renames(env); sexp_pairp(ls); ls = sexp_env_next_cell(ls)) {

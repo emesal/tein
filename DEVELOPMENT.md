@@ -180,7 +180,9 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 **`sexp_load_standard_env` signature**: the version parameter is `sexp` (a tagged fixnum via `sexp_make_fixnum`), NOT `sexp_uint_t`. this is a chibi API quirk.
 
-**rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping.
+**rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping. note: the env parent chain terminates with NULL, and `sexp_envp(NULL)` segfaults because `sexp_pointerp(NULL)` returns true (`SEXP_POINTER_TAG == 0`). the env walk loop must guard against NULL explicitly.
+
+**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. it can be copied into the restricted null env via `.allow(&["import"])` like any other binding. the module policy (VFS-only) still applies, so only curated VFS modules are importable. both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
 
 **`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. this is a scope chain issue specific to the null env sandbox approach.
 

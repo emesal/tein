@@ -407,10 +407,12 @@ impl ContextBuilder {
                     ));
                 }
 
-                // root null_env — intern, env_copy_named, and define_foreign_proc
-                // all allocate, and null_env is only a rust local until
-                // sexp_context_env_set makes it reachable from the context.
-                let _null_env = ffi::GcRoot::new(ctx, null_env);
+                // root both envs — intern, env_copy_named, and define_foreign_proc
+                // all allocate and can trigger GC. source_env is replaced as the
+                // context's env by null_env, so it becomes unreachable; null_env
+                // is only a rust local until sexp_context_env_set.
+                let _source_env_guard = ffi::GcRoot::new(ctx, source_env);
+                let _null_env_guard = ffi::GcRoot::new(ctx, null_env);
 
                 // if IO wrappers needed, capture original procs from full env first
                 if has_io {
@@ -2717,10 +2719,63 @@ mod tests {
         drop(ctx);
     }
 
-    // TODO: add test_module_policy_blocks_filesystem_import once sandboxed
-    // import is tested. this test should verify that (import (chibi process))
-    // fails in a sandboxed standard-env context while (import (scheme write))
-    // succeeds.
+    #[test]
+    fn test_module_policy_blocks_filesystem_import() {
+        // sandboxed standard-env contexts with import allowed should block
+        // filesystem-based modules like (chibi process) via VfsOnly policy
+        // while still allowing VFS-based imports like (scheme write).
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .build()
+            .expect("standard + sandbox");
+
+        // VFS import should succeed
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(
+            r.is_ok(),
+            "(import (scheme write)) should succeed under VfsOnly: {:?}",
+            r.err()
+        );
+
+        // filesystem import should fail — (chibi process) is not in VFS
+        let r = ctx.evaluate("(import (chibi process))");
+        assert!(
+            r.is_err(),
+            "(import (chibi process)) should be blocked by VfsOnly policy"
+        );
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_standard_env_sandbox_allows_vfs_import() {
+        // sandboxed standard-env contexts with import allowed should be able
+        // to import VFS modules and use their bindings at runtime.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .build()
+            .expect("standard + sandbox");
+
+        // import scheme write — VFS module with dependencies (srfi 38, etc.)
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(r.is_ok(), "(import (scheme write)) failed: {:?}", r.err());
+
+        // verify imported binding works — display returns void, write returns void
+        let r = ctx.evaluate("(write 42)");
+        assert!(r.is_ok(), "write should be available after import: {:?}", r.err());
+
+        // import scheme base — large VFS module with many dependencies
+        let r = ctx.evaluate("(import (scheme base))");
+        assert!(r.is_ok(), "(import (scheme base)) failed: {:?}", r.err());
+
+        drop(ctx);
+    }
 
     #[test]
     fn test_standard_env_import() {

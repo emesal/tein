@@ -49,7 +49,7 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 
 **standard env flow**: ContextBuilder with `.standard_env()` → load_standard_env (init-7 + meta-7 via VFS) → load_standard_ports → ~200 bindings (map, for-each, values, dynamic-wind, etc.)
 
-**sandboxing flow**: ContextBuilder with presets → get source env (primitive or standard) → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames) → set as active env
+**sandboxing flow**: ContextBuilder with presets → get source env (primitive or standard) → GC-root both envs → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames, NULL-safe parent walk) → set as active env. `.allow(&["import"])` enables idiomatic r7rs imports (VFS-only via module policy)
 
 **IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
 
