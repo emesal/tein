@@ -92,6 +92,10 @@ sexp tein_sexp_open_input_string(sexp ctx, sexp str) {
 sexp tein_sexp_read(sexp ctx, sexp port) { return sexp_read(ctx, port); }
 sexp tein_sexp_evaluate(sexp ctx, sexp obj, sexp env) { return sexp_eval(ctx, obj, env); }
 
+// gc preservation for rust-side references
+void tein_sexp_preserve_object(sexp ctx, sexp x) { sexp_preserve_object(ctx, x); }
+void tein_sexp_release_object(sexp ctx, sexp x) { sexp_release_object(ctx, x); }
+
 // fuel control (step limiting)
 //
 // chibi's vm creates child contexts for each eval, so we can't set

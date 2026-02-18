@@ -1534,7 +1534,7 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
 #if SEXP_USE_DL || SEXP_USE_STATIC_LIBS
   const char *suffix;
 #endif
-  sexp_gc_var5(ctx2, x, in, res, out);
+  sexp_gc_var6(ctx2, x, in, res, out, vfs_str);
   if (!env) env = sexp_context_env(ctx);
   sexp_assert_type(ctx, sexp_envp, SEXP_ENV, env);
 #if SEXP_USE_DL || SEXP_USE_STATIC_LIBS
@@ -1544,7 +1544,12 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
     res = sexp_load_binary(ctx, source, env);
   } else {
 #endif
+  /* gc_preserve before any allocations — vfs_str + in must be roots
+   * before sexp_c_string / sexp_open_input_string can trigger GC.
+   * (chibi does not use conservative stack scanning.) */
+  sexp_gc_preserve6(ctx, ctx2, x, in, res, out, vfs_str);
   res = SEXP_VOID;
+  vfs_str = SEXP_VOID;
   if (sexp_iportp(source)) {
     in = source;
   } else {
@@ -1553,7 +1558,7 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
     { unsigned int vfs_len = 0;
       const char *vfs_content = tein_vfs_lookup(sexp_string_data(source), &vfs_len);
       if (vfs_content) {
-        sexp vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
+        vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
         in = sexp_open_input_string(ctx, vfs_str);
         if (sexp_portp(in))
           sexp_port_name(in) = source;
@@ -1562,7 +1567,6 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
       }
     }
   }
-  sexp_gc_preserve5(ctx, ctx2, x, in, res, out);
   if (sexp_exceptionp(in)) {
     out = sexp_current_error_port(ctx);
     if (sexp_not(out)) out = sexp_current_error_port(ctx);
@@ -1584,7 +1588,7 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
       res = SEXP_VOID;
     sexp_close_port(ctx, in);
   }
-  sexp_gc_release5(ctx);
+  sexp_gc_release6(ctx);
 #if SEXP_USE_DL || SEXP_USE_STATIC_LIBS
   }
 #endif

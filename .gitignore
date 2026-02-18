@@ -7,9 +7,9 @@
 # Cargo.lock is committed for reproducible builds (library with examples)
 
 # generated files (build.rs)
-vendor/chibi-scheme/include/chibi/install.h
-vendor/chibi-scheme/tein_vfs_data.h
-vendor/chibi-scheme/tein_clibs.c
+tein/vendor/chibi-scheme/include/chibi/install.h
+tein/vendor/chibi-scheme/tein_vfs_data.h
+tein/vendor/chibi-scheme/tein_clibs.c
 
 # ide
 .vscode/
