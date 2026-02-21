@@ -27,10 +27,28 @@ sexp tein_sexp_context_env(sexp ctx) { return sexp_context_env(ctx); }
 sexp tein_sexp_car(sexp x) { return sexp_car(x); }
 sexp tein_sexp_cdr(sexp x) { return sexp_cdr(x); }
 
+// character operations
+int tein_sexp_charp(sexp x) { return sexp_charp(x); }
+int tein_sexp_unbox_character(sexp x) { return sexp_unbox_character(x); }
+sexp tein_sexp_make_character(int n) { return sexp_make_character(n); }
+
+// bytevector operations
+int tein_sexp_bytesp(sexp x) { return sexp_bytesp(x); }
+char* tein_sexp_bytes_data(sexp x) { return sexp_bytes_data(x); }
+sexp_uint_t tein_sexp_bytes_length(sexp x) { return sexp_bytes_length(x); }
+sexp tein_sexp_make_bytes(sexp ctx, sexp_uint_t len, unsigned char init) {
+    return sexp_make_bytes(ctx, sexp_make_fixnum(len), sexp_make_fixnum(init));
+}
+
 // vector operations
 int tein_sexp_vectorp(sexp x) { return sexp_vectorp(x); }
 sexp_uint_t tein_sexp_vector_length(sexp x) { return sexp_vector_length(x); }
 sexp* tein_sexp_vector_data(sexp x) { return sexp_vector_data(x); }
+
+// port operations
+int tein_sexp_portp(sexp x) { return sexp_portp(x); }
+int tein_sexp_iportp(sexp x) { return sexp_iportp(x); }
+int tein_sexp_oportp(sexp x) { return sexp_oportp(x); }
 
 // exception details
 sexp tein_sexp_exception_message(sexp x) { return sexp_exception_message(x); }

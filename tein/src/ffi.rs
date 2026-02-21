@@ -18,7 +18,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
 
-use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uchar, c_ulong, c_void};
 
 // opaque types from chibi
 pub type sexp = *mut c_void;
@@ -55,6 +55,22 @@ unsafe extern "C" {
         name: *const c_char,
         name_len: sexp_sint_t,
     ) -> c_int;
+
+    // character operations (via tein shim)
+    pub fn tein_sexp_charp(x: sexp) -> c_int;
+    pub fn tein_sexp_unbox_character(x: sexp) -> c_int;
+    pub fn tein_sexp_make_character(n: c_int) -> sexp;
+
+    // bytevector operations (via tein shim)
+    pub fn tein_sexp_bytesp(x: sexp) -> c_int;
+    pub fn tein_sexp_bytes_data(x: sexp) -> *mut c_char;
+    pub fn tein_sexp_bytes_length(x: sexp) -> sexp_uint_t;
+    pub fn tein_sexp_make_bytes(ctx: sexp, len: sexp_uint_t, init: c_uchar) -> sexp;
+
+    // port operations (via tein shim)
+    pub fn tein_sexp_portp(x: sexp) -> c_int;
+    pub fn tein_sexp_iportp(x: sexp) -> c_int;
+    pub fn tein_sexp_oportp(x: sexp) -> c_int;
 
     // type checking (via tein shim)
     pub fn tein_sexp_integerp(x: sexp) -> c_int;
@@ -262,6 +278,59 @@ pub unsafe fn sexp_vector_length(x: sexp) -> sexp_uint_t {
 #[inline]
 pub unsafe fn sexp_vector_data(x: sexp) -> *mut sexp {
     unsafe { tein_sexp_vector_data(x) }
+}
+
+// character operations
+#[inline]
+pub unsafe fn sexp_charp(x: sexp) -> c_int {
+    unsafe { tein_sexp_charp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_unbox_character(x: sexp) -> c_int {
+    unsafe { tein_sexp_unbox_character(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_character(n: c_int) -> sexp {
+    unsafe { tein_sexp_make_character(n) }
+}
+
+// bytevector operations
+#[inline]
+pub unsafe fn sexp_bytesp(x: sexp) -> c_int {
+    unsafe { tein_sexp_bytesp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_bytes_data(x: sexp) -> *mut c_char {
+    unsafe { tein_sexp_bytes_data(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_bytes_length(x: sexp) -> sexp_uint_t {
+    unsafe { tein_sexp_bytes_length(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_bytes(ctx: sexp, len: sexp_uint_t, init: u8) -> sexp {
+    unsafe { tein_sexp_make_bytes(ctx, len, init as c_uchar) }
+}
+
+// port operations
+#[inline]
+pub unsafe fn sexp_portp(x: sexp) -> c_int {
+    unsafe { tein_sexp_portp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_iportp(x: sexp) -> c_int {
+    unsafe { tein_sexp_iportp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_oportp(x: sexp) -> c_int {
+    unsafe { tein_sexp_oportp(x) }
 }
 
 // exception details

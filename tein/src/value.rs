@@ -5,6 +5,7 @@ use crate::{
     ffi,
 };
 use std::fmt;
+use std::os::raw::c_int;
 
 /// maximum nesting depth for recursive value conversion.
 /// prevents stack overflow on deeply nested or (theoretically) circular structures.
@@ -23,7 +24,7 @@ const MAX_DEPTH: usize = 10_000;
 //
 // allocation points in this module:
 //   - to_raw_depth: sexp_make_flonum, sexp_c_str, sexp_intern,
-//     sexp_cons, sexp_make_vector, recursive to_raw_depth calls
+//     sexp_cons, sexp_make_vector, sexp_make_bytes, recursive to_raw_depth calls
 //   - from_raw_depth: sexp_symbol_to_string, recursive from_raw_depth
 //     calls (which may hit sexp_symbol_to_string)
 //
@@ -73,6 +74,22 @@ pub enum Value {
 
     /// vector (scheme `#(...)`)
     Vector(Vec<Value>),
+
+    /// character value (unicode scalar value)
+    Char(char),
+
+    /// bytevector (scheme `#u8(...)`)
+    Bytevector(Vec<u8>),
+
+    /// an opaque input or output port
+    ///
+    /// holds a raw sexp pointer — only valid within the originating Context.
+    Port(ffi::sexp),
+
+    /// an opaque hash table (srfi-69)
+    ///
+    /// holds a raw sexp pointer — only valid within the originating Context.
+    HashTable(ffi::sexp),
 
     /// nil/empty list
     Nil,
@@ -128,6 +145,14 @@ impl Value {
                 return Ok(Value::Boolean(raw == true_val));
             }
 
+            if ffi::sexp_charp(raw) != 0 {
+                let code = ffi::sexp_unbox_character(raw) as u32;
+                let c = char::from_u32(code).ok_or_else(|| {
+                    Error::TypeError(format!("invalid unicode codepoint: {:#x}", code))
+                })?;
+                return Ok(Value::Char(c));
+            }
+
             if ffi::sexp_nullp(raw) != 0 {
                 return Ok(Value::Nil);
             }
@@ -142,6 +167,13 @@ impl Value {
                 let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
                 let s = String::from_utf8(bytes.to_vec())?;
                 return Ok(Value::String(s));
+            }
+
+            if ffi::sexp_bytesp(raw) != 0 {
+                let data = ffi::sexp_bytes_data(raw);
+                let len = ffi::sexp_bytes_length(raw) as usize;
+                let bytes = std::slice::from_raw_parts(data as *const u8, len).to_vec();
+                return Ok(Value::Bytevector(bytes));
             }
 
             if ffi::sexp_symbolp(raw) != 0 {
@@ -170,6 +202,10 @@ impl Value {
                     items.push(Value::from_raw_depth(ctx, elem, depth + 1)?);
                 }
                 return Ok(Value::Vector(items));
+            }
+
+            if ffi::sexp_portp(raw) != 0 {
+                return Ok(Value::Port(raw));
             }
 
             if ffi::sexp_pairp(raw) != 0 {
@@ -337,6 +373,18 @@ impl Value {
                     }
                     Ok(vec)
                 }
+                Value::Char(c) => Ok(ffi::sexp_make_character(*c as c_int)),
+                Value::Bytevector(bytes) => {
+                    let bv = ffi::sexp_make_bytes(ctx, bytes.len() as ffi::sexp_uint_t, 0);
+                    // root bv across the memcpy (defensive — no allocation happens here,
+                    // but GcRoot ensures safety if chibi's impl changes)
+                    let _bv = ffi::GcRoot::new(ctx, bv);
+                    let dst = ffi::sexp_bytes_data(bv) as *mut u8;
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
+                    Ok(bv)
+                }
+                Value::Port(raw) => Ok(*raw),
+                Value::HashTable(raw) => Ok(*raw),
                 Value::Procedure(raw) => Ok(*raw),
                 Value::Other(desc) => Err(Error::TypeError(format!(
                     "cannot convert Other({}) to raw sexp",
@@ -424,6 +472,42 @@ impl Value {
         }
     }
 
+    /// extract as char, if this value is a `Char`
+    pub fn as_char(&self) -> Option<char> {
+        match self {
+            Value::Char(c) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// extract as byte slice, if this value is a `Bytevector`
+    pub fn as_bytevector(&self) -> Option<&[u8]> {
+        match self {
+            Value::Bytevector(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// extract the raw sexp pointer, if this value is a `Port`
+    ///
+    /// the returned pointer is opaque — pass it back to scheme via [`Context::call`].
+    pub fn as_port(&self) -> Option<ffi::sexp> {
+        match self {
+            Value::Port(raw) => Some(*raw),
+            _ => None,
+        }
+    }
+
+    /// extract the raw sexp pointer, if this value is a `HashTable`
+    ///
+    /// the returned pointer is opaque — pass it back to scheme via [`Context::call`].
+    pub fn as_hash_table(&self) -> Option<ffi::sexp> {
+        match self {
+            Value::HashTable(raw) => Some(*raw),
+            _ => None,
+        }
+    }
+
     /// returns true if this value is a `Procedure`
     pub fn is_procedure(&self) -> bool {
         matches!(self, Value::Procedure(_))
@@ -437,6 +521,26 @@ impl Value {
     /// returns true if this value is `Unspecified`
     pub fn is_unspecified(&self) -> bool {
         matches!(self, Value::Unspecified)
+    }
+
+    /// returns true if this value is a `Char`
+    pub fn is_char(&self) -> bool {
+        matches!(self, Value::Char(_))
+    }
+
+    /// returns true if this value is a `Bytevector`
+    pub fn is_bytevector(&self) -> bool {
+        matches!(self, Value::Bytevector(_))
+    }
+
+    /// returns true if this value is a `Port`
+    pub fn is_port(&self) -> bool {
+        matches!(self, Value::Port(_))
+    }
+
+    /// returns true if this value is a `HashTable`
+    pub fn is_hash_table(&self) -> bool {
+        matches!(self, Value::HashTable(_))
     }
 }
 
@@ -453,6 +557,10 @@ impl PartialEq for Value {
             (Value::Vector(a), Value::Vector(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             (Value::Unspecified, Value::Unspecified) => true,
+            (Value::Char(a), Value::Char(b)) => a == b,
+            (Value::Bytevector(a), Value::Bytevector(b)) => a == b,
+            (Value::Port(a), Value::Port(b)) => std::ptr::eq(*a, *b),
+            (Value::HashTable(a), Value::HashTable(b)) => std::ptr::eq(*a, *b),
             // procedure equality is raw pointer identity (same scheme object)
             (Value::Procedure(a), Value::Procedure(b)) => std::ptr::eq(*a, *b),
             (Value::Other(a), Value::Other(b)) => a == b,
@@ -505,6 +613,27 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::Char(c) => match c {
+                ' ' => write!(f, "#\\space"),
+                '\n' => write!(f, "#\\newline"),
+                '\t' => write!(f, "#\\tab"),
+                '\r' => write!(f, "#\\return"),
+                '\0' => write!(f, "#\\null"),
+                _ if c.is_control() => write!(f, "#\\x{:x}", *c as u32),
+                _ => write!(f, "#\\{}", c),
+            },
+            Value::Bytevector(bytes) => {
+                write!(f, "#u8(")?;
+                for (i, b) in bytes.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", b)?;
+                }
+                write!(f, ")")
+            }
+            Value::Port(_) => write!(f, "#<port>"),
+            Value::HashTable(_) => write!(f, "#<hash-table>"),
             Value::Nil => write!(f, "()"),
             Value::Unspecified => write!(f, "#<unspecified>"),
             Value::Procedure(_) => write!(f, "#<procedure>"),

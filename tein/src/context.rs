@@ -2768,7 +2768,11 @@ mod tests {
 
         // verify imported binding works — display returns void, write returns void
         let r = ctx.evaluate("(write 42)");
-        assert!(r.is_ok(), "write should be available after import: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "write should be available after import: {:?}",
+            r.err()
+        );
 
         // import scheme base — large VFS module with many dependencies
         let r = ctx.evaluate("(import (scheme base))");
@@ -2805,5 +2809,157 @@ mod tests {
             .evaluate("(let-values (((a b) (values 1 2))) (+ a b))")
             .unwrap();
         assert_eq!(r.as_integer(), Some(3));
+    }
+
+    // --- characters ---
+
+    #[test]
+    fn test_char_value() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate(r"#\a").expect("failed to evaluate");
+        assert_eq!(result, Value::Char('a'));
+        assert_eq!(result.as_char(), Some('a'));
+    }
+
+    #[test]
+    fn test_char_special() {
+        let ctx = Context::new().expect("failed to create context");
+        assert_eq!(ctx.evaluate(r"#\space").expect("space"), Value::Char(' '));
+        assert_eq!(
+            ctx.evaluate(r"#\newline").expect("newline"),
+            Value::Char('\n')
+        );
+        assert_eq!(ctx.evaluate(r"#\tab").expect("tab"), Value::Char('\t'));
+    }
+
+    #[test]
+    fn test_char_unicode() {
+        let ctx = Context::new().expect("failed to create context");
+        // lambda character
+        let result = ctx.evaluate(r"#\λ").expect("unicode char");
+        assert_eq!(result, Value::Char('λ'));
+    }
+
+    #[test]
+    fn test_char_display() {
+        assert_eq!(format!("{}", Value::Char('a')), r"#\a");
+        assert_eq!(format!("{}", Value::Char(' ')), r"#\space");
+        assert_eq!(format!("{}", Value::Char('\n')), r"#\newline");
+        assert_eq!(format!("{}", Value::Char('\t')), r"#\tab");
+    }
+
+    #[test]
+    fn test_char_round_trip() {
+        unsafe extern "C" fn return_char(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                Value::Char('λ')
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("context");
+        ctx.define_fn_variadic("get-char", return_char)
+            .expect("define");
+        let result = ctx.evaluate("(get-char)").expect("call");
+        assert_eq!(result, Value::Char('λ'));
+    }
+
+    // --- ports ---
+
+    #[test]
+    fn test_port_opaque() {
+        let ctx = Context::new_standard().expect("standard context");
+        let result = ctx.evaluate("(current-input-port)").expect("port");
+        assert!(result.is_port(), "expected Port, got {:?}", result);
+    }
+
+    #[test]
+    fn test_port_display() {
+        // can't easily construct a Port without a context, just test Display for coverage
+        assert_eq!(format!("{}", Value::Port(std::ptr::null_mut())), "#<port>");
+    }
+
+    // --- bytevectors ---
+
+    #[test]
+    fn test_bytevector_value() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("#u8(1 2 3)").expect("failed to evaluate");
+        assert_eq!(result, Value::Bytevector(vec![1, 2, 3]));
+        assert_eq!(result.as_bytevector(), Some([1u8, 2, 3].as_slice()));
+    }
+
+    #[test]
+    fn test_bytevector_empty() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("#u8()").expect("failed to evaluate");
+        assert_eq!(result, Value::Bytevector(vec![]));
+    }
+
+    #[test]
+    fn test_bytevector_display() {
+        let bv = Value::Bytevector(vec![0, 127, 255]);
+        assert_eq!(format!("{}", bv), "#u8(0 127 255)");
+        assert_eq!(format!("{}", Value::Bytevector(vec![])), "#u8()");
+    }
+
+    #[test]
+    fn test_bytevector_round_trip() {
+        unsafe extern "C" fn return_bv(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                Value::Bytevector(vec![10, 20, 30])
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("context");
+        ctx.define_fn_variadic("get-bv", return_bv).expect("define");
+        let result = ctx.evaluate("(get-bv)").expect("call");
+        assert_eq!(result, Value::Bytevector(vec![10, 20, 30]));
+    }
+
+    // --- hash tables ---
+
+    #[test]
+    fn test_hash_table_falls_through_to_other() {
+        // hash tables use a runtime-registered type tag from srfi-69's define-record-type
+        // and cannot be reliably detected without module introspection at runtime.
+        // they fall through to Other and can still be passed back to scheme code.
+        //
+        // TODO: detection could be added by looking up the hash-table type object via
+        // sexp_env_ref at context init time and comparing sexp_object_type at detection.
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.evaluate("(import (srfi 69))").expect("import srfi-69");
+        let result = ctx.evaluate("(make-hash-table)").expect("hash table");
+        assert!(matches!(result, Value::Other(_)), "got {:?}", result);
+    }
+
+    // --- continuations ---
+
+    #[test]
+    fn test_continuation_is_procedure() {
+        // continuations in chibi are SEXP_PROCEDURE at the type level.
+        // they're fully callable via Context::call, just like regular procedures.
+        let ctx = Context::new_standard().expect("standard context");
+        let result = ctx
+            .evaluate("(call-with-current-continuation (lambda (k) k))")
+            .expect("call/cc");
+        assert!(
+            result.is_procedure(),
+            "expected Procedure, got {:?}",
+            result
+        );
     }
 }

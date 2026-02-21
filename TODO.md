@@ -68,8 +68,9 @@
   - [x] test_module_policy_blocks_filesystem_import (sandboxed import test)
   - [x] test_standard_env_sandbox_allows_vfs_import (VFS import in sandbox)
 
-- [ ] **additional value types**
-  - bytevectors, hash tables, ports, continuations (as opaque values)
+- [x] **additional value types**
+  - char, bytevector, port (opaque), hash table (opaque or Other fallback)
+  - continuations already handled as Procedure (chibi uses same type tag)
 
 ### milestone 5 — reach
 

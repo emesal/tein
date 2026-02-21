@@ -30,6 +30,10 @@ src/
   lib.rs       — public api re-exports (Context, ContextBuilder, TimeoutContext, Value, Error)
   context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests
   value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
+                 variants: Integer, Float, String, Symbol, Boolean, List, Pair,
+                 Vector, Char, Bytevector, Port (opaque), HashTable (opaque,
+                 falls to Other until runtime type detection added), Nil,
+                 Unspecified, Procedure, Other
   error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
                  StepLimitExceeded, Timeout)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
