@@ -9,7 +9,7 @@
 //! [`ContextBuilder::file_read()`](crate::ContextBuilder::file_read) and
 //! [`ContextBuilder::file_write()`](crate::ContextBuilder::file_write).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 
 /// filesystem access policy for sandboxed IO
@@ -66,6 +66,33 @@ impl FsPolicy {
 thread_local! {
     /// active filesystem policy for the current context (set during build, cleared on drop)
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
+}
+
+/// module import policy for sandboxed standard-env contexts
+///
+/// controls which modules can be loaded via `(import ...)`.
+/// when a sandboxed context uses the standard environment, this is
+/// automatically set to `VfsOnly` to prevent loading filesystem-based
+/// modules (e.g. `(chibi process)`, `(chibi filesystem)`).
+///
+/// ## VFS safety contract
+///
+/// VFS modules are safe by construction: tein curates the embedded virtual
+/// filesystem to ensure no module can bypass the existing safety layers
+/// (preset allowlists, FsPolicy, fuel/timeout). capabilities exposed by
+/// VFS modules remain subject to these controls — e.g. IO operations are
+/// gated by preset availability and filesystem path policies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ModulePolicy {
+    /// all modules allowed (unsandboxed or non-standard-env context)
+    Unrestricted = 0,
+    /// only VFS modules allowed (sandboxed standard-env context)
+    VfsOnly = 1,
+}
+
+thread_local! {
+    /// active module import policy (set during build, cleared on drop)
+    pub(crate) static MODULE_POLICY: Cell<ModulePolicy> = const { Cell::new(ModulePolicy::Unrestricted) };
 }
 
 /// a named set of scheme primitives for environment restriction

@@ -8,6 +8,11 @@
 #include "opt/opcode_names.h"
 #endif
 
+/* tein VFS: forward declaration for embedded filesystem (tein_shim.c) */
+extern const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length);
+/* tein module policy: forward declaration for import restriction (tein_shim.c) */
+extern int tein_module_allowed(const char *path);
+
 /************************************************************************/
 
 static int scheme_initialized_p = 0;
@@ -1301,6 +1306,23 @@ sexp sexp_open_input_file_op (sexp ctx, sexp self, sexp_sint_t n, sexp path) {
   FILE *in;
   int count = 0;
   sexp_assert_type(ctx, sexp_stringp, SEXP_STRING, path);
+  /* tein VFS: return a string input port for embedded files (patch C).
+   * the module system (meta-7.scm) calls open-input-file to read .sld
+   * files, so this must intercept VFS paths before trying fopen().
+   * the port name is set to the VFS path so relative includes resolve. */
+  { unsigned int vfs_len = 0;
+    const char *vfs_content = tein_vfs_lookup(sexp_string_data(path), &vfs_len);
+    if (vfs_content) {
+      sexp_gc_var2(vfs_str, port);
+      sexp_gc_preserve2(ctx, vfs_str, port);
+      vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
+      port = sexp_open_input_string(ctx, vfs_str);
+      if (sexp_portp(port))
+        sexp_port_name(port) = path;
+      sexp_gc_release2(ctx);
+      return port;
+    }
+  }
   do {
     if (count != 0) sexp_gc(ctx, NULL);
     in = fopen(sexp_string_data(path), "r");
@@ -1512,7 +1534,7 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
 #if SEXP_USE_DL || SEXP_USE_STATIC_LIBS
   const char *suffix;
 #endif
-  sexp_gc_var5(ctx2, x, in, res, out);
+  sexp_gc_var6(ctx2, x, in, res, out, vfs_str);
   if (!env) env = sexp_context_env(ctx);
   sexp_assert_type(ctx, sexp_envp, SEXP_ENV, env);
 #if SEXP_USE_DL || SEXP_USE_STATIC_LIBS
@@ -1522,14 +1544,29 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
     res = sexp_load_binary(ctx, source, env);
   } else {
 #endif
+  /* gc_preserve before any allocations — vfs_str + in must be roots
+   * before sexp_c_string / sexp_open_input_string can trigger GC.
+   * (chibi does not use conservative stack scanning.) */
+  sexp_gc_preserve6(ctx, ctx2, x, in, res, out, vfs_str);
   res = SEXP_VOID;
+  vfs_str = SEXP_VOID;
   if (sexp_iportp(source)) {
     in = source;
   } else {
     sexp_assert_type(ctx, sexp_stringp, SEXP_STRING, source);
-    in = sexp_open_input_file(ctx, source);
+    /* tein VFS: load from embedded content instead of filesystem (patch B) */
+    { unsigned int vfs_len = 0;
+      const char *vfs_content = tein_vfs_lookup(sexp_string_data(source), &vfs_len);
+      if (vfs_content) {
+        vfs_str = sexp_c_string(ctx, vfs_content, (sexp_sint_t)vfs_len);
+        in = sexp_open_input_string(ctx, vfs_str);
+        if (sexp_portp(in))
+          sexp_port_name(in) = source;
+      } else {
+        in = sexp_open_input_file(ctx, source);
+      }
+    }
   }
-  sexp_gc_preserve5(ctx, ctx2, x, in, res, out);
   if (sexp_exceptionp(in)) {
     out = sexp_current_error_port(ctx);
     if (sexp_not(out)) out = sexp_current_error_port(ctx);
@@ -1551,7 +1588,7 @@ sexp sexp_load_op (sexp ctx, sexp self, sexp_sint_t n, sexp source, sexp env) {
       res = SEXP_VOID;
     sexp_close_port(ctx, in);
   }
-  sexp_gc_release5(ctx);
+  sexp_gc_release6(ctx);
 #if SEXP_USE_DL || SEXP_USE_STATIC_LIBS
   }
 #endif
@@ -2352,6 +2389,7 @@ char* sexp_find_module_file_raw (sexp ctx, const char *file) {
   sexp ls;
   char *dir, *path;
   sexp_uint_t slash, dirlen, filelen, len;
+  unsigned int tein_vfs_dummy; /* tein VFS: scratch var for lookup check */
 #ifdef PLAN9
 #define file_exists_p(path, buf) (stat(path, buf, 128) >= 0)
   unsigned char buf[128];
@@ -2375,9 +2413,15 @@ char* sexp_find_module_file_raw (sexp ctx, const char *file) {
     if (! slash) path[dirlen] = '/';
     memcpy(path+len-filelen-1, file, filelen);
     path[len-1] = '\0';
-    if (sexp_find_static_library(path) || file_exists_p(path, buf))
-      return path;
-    free(path);
+    /* tein VFS: check embedded files alongside static libs and filesystem (patch A) */
+    if (tein_vfs_lookup(path, &tein_vfs_dummy) || sexp_find_static_library(path) || file_exists_p(path, buf)) {
+      /* tein module policy: reject paths not allowed by current policy */
+      if (tein_module_allowed(path))
+        return path;
+      free(path);
+    } else {
+      free(path);
+    }
   }
 
   return NULL;

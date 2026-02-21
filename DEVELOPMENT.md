@@ -44,14 +44,16 @@
 - support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
 - path traversal and symlink protection via `canonicalize()`
 
+**r7rs standard environment**
+- VFS + static libs + eval.c patches for embedded module loading
+- `Context::new_standard()` / `ContextBuilder::standard_env()` API
+- ~200 bindings (map, for-each, values, dynamic-wind, etc.)
+- `ModulePolicy`: VFS-only import restriction in sandboxed standard-env contexts
+- C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
+
 ### known limitations
 
-1. **no r7rs standard environment**
-   - running with chibi primitives only (arithmetic, cons/car/cdr, define, if, lambda, etc.)
-   - missing: most r7rs standard library functions
-   - requires static library embedding or dynamic module loading
-
-2. **limited type coverage**
+1. **limited type coverage**
    - no hash tables, ports, continuations, bytevectors as Value variants
 
 ## architecture
@@ -66,13 +68,13 @@ tein/
     error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
                    IoError, StepLimitExceeded, Timeout)
     ffi.rs       — unsafe c bindings + safe wrappers, `raw` module
-    sandbox.rs   — Preset type, FsPolicy, 16 const preset definitions
+    sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
     timeout.rs   — TimeoutContext: wall-clock timeout via thread wrapper
   vendor/chibi-scheme/
     tein_shim.c  — exports chibi c macros as real functions, fuel control,
-                   environment manipulation
+                   environment manipulation, module import policy
     vm.c         — 2-line patch: fuel budget consumption at timeslice boundary
-  build.rs       — compiles chibi + shim, generates install.h
+  build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 tein-macros/     — #[scheme_fn] proc macro crate
 tein-sexp/       — pure rust s-expression parser/printer
@@ -112,6 +114,33 @@ ContextBuilder with file_read/file_write:
   6. on Context::drop(): clear FsPolicy and ORIGINAL_PROCS thread-locals
 ```
 
+### module import policy
+
+```
+ContextBuilder with standard_env + presets:
+  1. set MODULE_POLICY thread-local = VfsOnly
+  2. set C-level tein_module_policy = 1 (vfs-only)
+  3. load standard env (init-7, meta-7 via VFS — allowed under VfsOnly)
+  4. apply sandbox restrictions (presets, IO wrappers)
+  5. on (import ...): sexp_find_module_file_raw calls tein_module_allowed()
+     → VFS paths (/vfs/lib/...) pass, filesystem paths blocked
+  6. on Context::drop(): reset both thread-local and C-level to Unrestricted
+```
+
+**VFS safety contract**: VFS modules are safe by construction — tein curates
+the embedded virtual filesystem to ensure no module can bypass the existing
+safety layers (preset allowlists, FsPolicy, fuel/timeout). capabilities
+exposed by VFS modules remain subject to these controls.
+
+**security layers** (independent, composable):
+
+| layer              | gates                                    |
+|--------------------|------------------------------------------|
+| module allowlist   | which libraries can be `import`ed        |
+| preset allowlist   | which primitives/bindings are in scope   |
+| FsPolicy           | which filesystem paths can be opened     |
+| fuel/timeout       | resource exhaustion                      |
+
 ### thread safety
 
 - `Context` is intentionally !Send + !Sync (chibi is not thread-safe)
@@ -119,6 +148,25 @@ ContextBuilder with file_read/file_write:
 - fuel counters are `__thread` (thread-local) so parallel tests don't interfere
 
 ### key design decisions
+
+**GC safety — `ffi::GcRoot`**: chibi's conservative stack scanning is disabled in our build. the GC does NOT see rust locals — only objects reachable from the context's heap roots survive collection. any `sexp` held as a rust local across an allocation point must be rooted via `ffi::GcRoot`, an RAII guard that calls `sexp_preserve_object` on creation and `sexp_release_object` on drop.
+
+allocating FFI calls (trigger GC, require rooting across):
+- `sexp_make_flonum`, `sexp_c_str`, `sexp_intern` — create heap objects
+- `sexp_cons`, `sexp_make_vector` — create containers
+- `sexp_symbol_to_string` — allocates a string from a symbol
+- `sexp_open_input_string`, `sexp_read`, `sexp_evaluate` — evaluation machinery
+- `sexp_load_standard_env`, `sexp_make_null_env` — env construction
+- `sexp_env_define`, `env_copy_named`, `sexp_define_foreign_proc` — env mutation
+- `sexp_preserve_object` itself — allocates a cons cell on the preservatives list
+
+non-allocating FFI calls (safe, no rooting needed):
+- type predicates: `sexp_integerp`, `sexp_flonump`, `sexp_pairp`, etc.
+- value extractors: `sexp_unbox_fixnum`, `sexp_flonum_value`, `sexp_string_data`, `sexp_car`, `sexp_cdr`, `sexp_vector_data`
+- immediate constructors: `sexp_make_fixnum`, `sexp_make_boolean`, `get_null`, `get_void`
+- `sexp_vector_set` — writes to an existing vector slot, no allocation
+
+C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (see eval.c patches).
 
 **vendoring chibi**: source bundled, compiled via build.rs, zero external deps.
 
@@ -128,11 +176,21 @@ ContextBuilder with file_read/file_write:
 
 **type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and matches floats like 4.0, producing garbage.
 
+**VFS path prefix**: use `/vfs/lib` not `vfs://...` — chibi's `sexp_add_path` splits on `:`, so colons in paths break module resolution.
+
+**`sexp_load_standard_env` signature**: the version parameter is `sexp` (a tagged fixnum via `sexp_make_fixnum`), NOT `sexp_uint_t`. this is a chibi API quirk.
+
+**rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping. note: the env parent chain terminates with NULL, and `sexp_envp(NULL)` segfaults because `sexp_pointerp(NULL)` returns true (`SEXP_POINTER_TAG == 0`). the env walk loop must guard against NULL explicitly.
+
+**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. it can be copied into the restricted null env via `.allow(&["import"])` like any other binding. the module policy (VFS-only) still applies, so only curated VFS modules are importable. both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
+
+**`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. this is a scope chain issue specific to the null env sandbox approach.
+
 ## building & testing
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (100 lib + 12 scheme_fn + 8 doc)
+cargo test                         # all tests (112 lib + 12 scheme_fn + 8 doc)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint

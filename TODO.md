@@ -52,21 +52,25 @@
   - support presets for port read/write operations
   - path traversal and symlink protection via canonicalisation
 
-- [ ] **r7rs standard environment**
-  - figure out static library setup (or accept dynamic loading)
-  - alternative: manually expose needed functions incrementally
-  - **security: module loading must be sandboxed** — two approaches to evaluate:
-    - *option 1 — module allowlist*: whitelist-based, consistent with primitive allowlist.
-      `ContextBuilder::allow_modules(&["(scheme base)", "(scheme write)"])`.
-      modules not on the list simply can't load. blocks `(chibi process)`,
-      `(chibi filesystem)`, `(scheme load)` etc. by omission.
-    - *option 3 — patched module loader*: intercept `%import` at C level to check
-      against an allowlist before loading. more invasive but airtight against any
-      scheme-level workaround. may be needed if `eval`/`compile` become available
-      and could construct import forms dynamically.
+- [x] **r7rs standard environment**
+  - [x] VFS + static libs + eval.c patches for module loading
+  - [x] rust API + sandbox integration (Context::new_standard, ContextBuilder::standard_env)
+  - [x] module import policy: VFS-only restriction in sandboxed standard-env contexts
+    - C-level interception in sexp_find_module_file_raw via tein_module_allowed()
+    - automatic: standard_env + any preset → VfsOnly, no explicit API needed
+  - [x] import during standard env: GC rooting fix (default 4MB heap)
+    - root cause: rust locals invisible to chibi GC (no conservative stack scanning)
+    - fix: sexp_preserve_object in evaluate(), gc_preserve fix in sexp_load_op VFS patch
+  - [x] sandboxed import: `.allow(&["import"])` enables idiomatic r7rs imports in sandbox
+    - GC fix: root source_env in sandbox build (survives across null env allocation)
+    - NULL safety: guard env parent chain walk in tein_env_copy_named
+    - VFS-only policy blocks filesystem modules, VFS modules work normally
+  - [x] test_module_policy_blocks_filesystem_import (sandboxed import test)
+  - [x] test_standard_env_sandbox_allows_vfs_import (VFS import in sandbox)
 
-- [ ] **additional value types**
-  - bytevectors, hash tables, ports, continuations (as opaque values)
+- [x] **additional value types**
+  - char, bytevector, port (opaque), hash table (opaque or Other fallback)
+  - continuations already handled as Procedure (chibi uses same type tag)
 
 ### milestone 5 — reach
 

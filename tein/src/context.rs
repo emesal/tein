@@ -4,7 +4,7 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
-    sandbox::{FS_POLICY, FsPolicy, Preset},
+    sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
 };
 use std::cell::Cell;
 use std::ffi::CString;
@@ -193,6 +193,7 @@ pub struct ContextBuilder {
     heap_size: usize,
     heap_max: usize,
     step_limit: Option<u64>,
+    standard_env: bool,
     allowed_primitives: Option<Vec<&'static str>>,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
@@ -217,6 +218,20 @@ impl ContextBuilder {
     /// fuel resets before each `evaluate()` or `call()` invocation.
     pub fn step_limit(mut self, limit: u64) -> Self {
         self.step_limit = Some(limit);
+        self
+    }
+
+    /// enable the r7rs standard environment
+    ///
+    /// loads `(scheme base)` and supporting modules via the embedded VFS,
+    /// providing `define-record-type`, `import`, `map`, `for-each`, etc.
+    /// standard ports (stdin/stdout/stderr) are also initialised.
+    ///
+    /// when combined with presets, the standard env is loaded first, then
+    /// the sandbox restricts it — so sandboxed code can use allowed r7rs
+    /// procedures that aren't bare primitives.
+    pub fn standard_env(mut self) -> Self {
+        self.standard_env = true;
         self
     }
 
@@ -335,14 +350,53 @@ impl ContextBuilder {
                 return Err(Error::InitError("failed to create context".to_string()));
             }
 
+            // load r7rs standard environment if requested.
+            // this enriches the context env with (scheme base) etc. via the
+            // embedded VFS, and must happen before sandbox restriction so the
+            // restricted env can copy from the full standard env.
+            if self.standard_env {
+                let env = ffi::sexp_context_env(ctx);
+                let version = ffi::sexp_make_fixnum(7);
+
+                let result = ffi::load_standard_env(ctx, env, version);
+                if ffi::sexp_exceptionp(result) != 0 {
+                    ffi::sexp_destroy_context(ctx);
+                    return Err(Error::InitError(
+                        "failed to load standard environment".to_string(),
+                    ));
+                }
+
+                let result = ffi::load_standard_ports(ctx, env);
+                if ffi::sexp_exceptionp(result) != 0 {
+                    ffi::sexp_destroy_context(ctx);
+                    return Err(Error::InitError(
+                        "failed to load standard ports".to_string(),
+                    ));
+                }
+            }
+
+            // activate VFS-only module policy if both standard_env and
+            // sandbox (presets) are configured. this restricts (import ...)
+            // to only load modules from the embedded VFS, blocking
+            // filesystem-based modules like (chibi process).
+            // set early so it's active during sandbox setup (which may
+            // trigger transitive module loads).
+            let has_module_policy = self.standard_env && self.allowed_primitives.is_some();
+            if has_module_policy {
+                MODULE_POLICY.with(|cell| cell.set(ModulePolicy::VfsOnly));
+                ffi::module_policy_set(ModulePolicy::VfsOnly as i32);
+            }
+
             // extract IO prefixes before borrowing self for allowed_primitives
             let file_read_prefixes = self.file_read_prefixes.take();
             let file_write_prefixes = self.file_write_prefixes.take();
             let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
 
-            // apply environment restrictions if presets are active
+            // apply environment restrictions if presets are active.
+            // source_env is the context's current env — either the bare primitive
+            // env or the enriched standard env if standard_env was loaded above.
             if let Some(ref allowed) = self.allowed_primitives {
-                let primitive_env = ffi::sexp_context_env(ctx);
+                let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
                 let null_env = ffi::sexp_make_null_env(ctx, version);
 
@@ -353,6 +407,13 @@ impl ContextBuilder {
                     ));
                 }
 
+                // root both envs — intern, env_copy_named, and define_foreign_proc
+                // all allocate and can trigger GC. source_env is replaced as the
+                // context's env by null_env, so it becomes unreachable; null_env
+                // is only a rust local until sexp_context_env_set.
+                let _source_env_guard = ffi::GcRoot::new(ctx, source_env);
+                let _null_env_guard = ffi::GcRoot::new(ctx, null_env);
+
                 // if IO wrappers needed, capture original procs from full env first
                 if has_io {
                     let undefined = ffi::get_void();
@@ -361,26 +422,29 @@ impl ContextBuilder {
                         let c_name = CString::new(name).unwrap();
                         let sym =
                             ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                        let val = ffi::sexp_env_ref(ctx, primitive_env, sym, undefined);
+                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
                         if val != undefined {
                             ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
                         }
                     }
                 }
 
-                // copy allowed primitives from the full env into the restricted env
-                let undefined = ffi::get_void();
+                // copy allowed primitives from the source env into the restricted env.
+                // uses env_copy_named which searches both direct bindings and
+                // rename bindings (needed when standard_env is active, since the
+                // module system stores most bindings as renames).
                 for name in allowed {
                     let c_name = CString::new(*name).map_err(|_| {
                         ffi::sexp_destroy_context(ctx);
                         Error::InitError(format!("primitive name contains null bytes: {}", name))
                     })?;
-                    let sym =
-                        ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                    let val = ffi::sexp_env_ref(ctx, primitive_env, sym, undefined);
-                    if val != undefined {
-                        ffi::sexp_env_define(ctx, null_env, sym, val);
-                    }
+                    ffi::env_copy_named(
+                        ctx,
+                        source_env,
+                        null_env,
+                        c_name.as_ptr(),
+                        name.len() as ffi::sexp_sint_t,
+                    );
                 }
 
                 ffi::sexp_context_env_set(ctx, null_env);
@@ -433,6 +497,7 @@ impl ContextBuilder {
                 ctx,
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
+                has_module_policy,
             })
         }
     }
@@ -459,6 +524,7 @@ pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
     has_io_wrappers: bool,
+    has_module_policy: bool,
 }
 
 impl Context {
@@ -473,12 +539,22 @@ impl Context {
         Self::builder().build()
     }
 
+    /// create a new context with the r7rs standard environment
+    ///
+    /// equivalent to `Context::builder().standard_env().build()`.
+    /// provides `(scheme base)` and supporting modules — `map`, `for-each`,
+    /// `import`, `define-record-type`, etc.
+    pub fn new_standard() -> Result<Self> {
+        Self::builder().standard_env().build()
+    }
+
     /// create a builder for configuring a context
     pub fn builder() -> ContextBuilder {
         ContextBuilder {
             heap_size: DEFAULT_HEAP_SIZE,
             heap_max: DEFAULT_HEAP_MAX,
             step_limit: None,
+            standard_env: false,
             allowed_primitives: None,
             file_read_prefixes: None,
             file_write_prefixes: None,
@@ -550,6 +626,14 @@ impl Context {
             if ffi::sexp_exceptionp(port) != 0 {
                 return Value::from_raw(self.ctx, port);
             }
+
+            // gc-root the port and its backing string. rust locals are
+            // invisible to chibi's GC (no conservative stack scanning), so
+            // evaluation (e.g. import triggering module loading) can collect
+            // these objects if they aren't rooted. GcRoot auto-releases on
+            // any exit path (early return, ?, or normal drop).
+            let _str_guard = ffi::GcRoot::new(self.ctx, scheme_str);
+            let _port_guard = ffi::GcRoot::new(self.ctx, port);
 
             // read and evaluate expressions until EOF
             let mut result = ffi::get_void();
@@ -721,10 +805,16 @@ impl Context {
         self.arm_fuel();
 
         unsafe {
+            // root raw_proc — to_raw + sexp_cons calls below allocate
+            let _proc = ffi::GcRoot::new(self.ctx, raw_proc);
+
             // build scheme list from args (reverse-iterate with cons, like to_raw does for lists)
             let mut arg_list = ffi::get_null();
             for arg in args.iter().rev() {
+                // root accumulator across to_raw + sexp_cons allocations
+                let _tail = ffi::GcRoot::new(self.ctx, arg_list);
                 let raw_arg = arg.to_raw(self.ctx)?;
+                let _head = ffi::GcRoot::new(self.ctx, raw_arg);
                 arg_list = ffi::sexp_cons(self.ctx, raw_arg, arg_list);
             }
 
@@ -753,6 +843,12 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // clean up module policy if active
+        if self.has_module_policy {
+            MODULE_POLICY.with(|cell| cell.set(ModulePolicy::Unrestricted));
+            unsafe { ffi::module_policy_set(ModulePolicy::Unrestricted as i32) };
+        }
+
         // clean up IO wrapper state if active
         if self.has_io_wrappers {
             FS_POLICY.with(|cell| {
@@ -2379,5 +2475,491 @@ mod tests {
         assert!(err.is_err(), "fd primitives should be blocked");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- standard environment ---
+
+    #[test]
+    fn test_standard_env_loads() {
+        // low-level: verify sexp_load_standard_env succeeds with VFS
+        unsafe {
+            let ctx = ffi::sexp_make_eval_context(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                (4 * 1024 * 1024) as ffi::sexp_uint_t,
+                (128 * 1024 * 1024) as ffi::sexp_uint_t,
+            );
+            assert!(!ctx.is_null(), "context creation failed");
+
+            let env = ffi::sexp_context_env(ctx);
+            let version = ffi::sexp_make_fixnum(7);
+            let result = ffi::load_standard_env(ctx, env, version);
+            assert!(
+                ffi::sexp_exceptionp(result) == 0,
+                "sexp_load_standard_env returned an exception"
+            );
+
+            ffi::sexp_destroy_context(ctx);
+        }
+    }
+
+    #[test]
+    fn test_new_standard_convenience() {
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx.evaluate("(+ 1 2)").expect("basic arithmetic");
+        assert_eq!(r, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_standard_env_map() {
+        // map is defined in (scheme base), not available in bare primitive env
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx.evaluate("(map + '(1 2 3) '(10 20 30))").expect("map");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Integer(11),
+                Value::Integer(22),
+                Value::Integer(33),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_standard_env_for_each() {
+        let ctx = Context::new_standard().expect("new_standard");
+        // for-each returns void but shouldn't error
+        let r = ctx
+            .evaluate("(let ((sum 0)) (for-each (lambda (x) (set! sum (+ sum x))) '(1 2 3)) sum)")
+            .expect("for-each");
+        assert_eq!(r, Value::Integer(6));
+    }
+
+    #[test]
+    fn test_standard_env_with_sandbox() {
+        // standard_env + presets: sandbox copies from the enriched standard env,
+        // but only bindings explicitly in the allowlist are available.
+        // "map" and "for-each" come from (scheme base), not from C primitives,
+        // so they must be explicitly allowed.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .preset(&LISTS)
+            .allow(&["map", "for-each"])
+            .build()
+            .expect("standard + sandbox");
+
+        // map is allowed and comes from the standard env
+        let r = ctx
+            .evaluate("(map + '(1 2 3) '(10 20 30))")
+            .expect("map in sandbox");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Integer(11),
+                Value::Integer(22),
+                Value::Integer(33),
+            ])
+        );
+
+        // for-each works too (side-effect only, returns void)
+        // use define instead of let since for-each's closure sees the
+        // restricted env, and define creates top-level bindings.
+        ctx.evaluate("(define sandbox-sum 0)").expect("define");
+        ctx.evaluate("(for-each (lambda (x) (set! sandbox-sum (+ sandbox-sum x))) '(1 2 3))")
+            .expect("for-each in sandbox");
+        let r = ctx.evaluate("sandbox-sum").expect("read sum");
+        assert_eq!(r, Value::Integer(6));
+
+        // display is NOT in the allowlist — should be blocked
+        let err = ctx.evaluate("(display 42)");
+        assert!(err.is_err(), "display should be blocked by sandbox");
+    }
+
+    #[test]
+    fn test_standard_env_values() {
+        // values and call-with-values are r7rs features from (scheme base)
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx
+            .evaluate("(call-with-values (lambda () (values 1 2)) +)")
+            .expect("values + call-with-values");
+        assert_eq!(r, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_standard_env_dynamic_wind() {
+        // dynamic-wind is a key r7rs feature from the standard env
+        let ctx = Context::new_standard().expect("new_standard");
+        let r = ctx
+            .evaluate(
+                "(let ((log '())) \
+                   (dynamic-wind \
+                     (lambda () (set! log (cons 'in log))) \
+                     (lambda () (set! log (cons 'body log)) 42) \
+                     (lambda () (set! log (cons 'out log)))) \
+                   (reverse log))",
+            )
+            .expect("dynamic-wind");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Symbol("in".to_string()),
+                Value::Symbol("body".to_string()),
+                Value::Symbol("out".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_standard_env_with_step_limit() {
+        // standard_env + step limit should work together
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(1_000_000)
+            .build()
+            .expect("standard + step limit");
+
+        let r = ctx
+            .evaluate("(map car '((1 2) (3 4) (5 6)))")
+            .expect("map + step limit");
+        assert_eq!(
+            r,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(3),
+                Value::Integer(5),
+            ])
+        );
+    }
+
+    // --- module policy ---
+
+    #[test]
+    fn test_module_policy_blocks_non_vfs() {
+        // a sandboxed standard-env context should activate VfsOnly policy,
+        // blocking attempts to import filesystem-based modules.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .build()
+            .expect("standard + sandbox");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::VfsOnly,
+                "sandboxed standard env should activate VfsOnly policy"
+            );
+        });
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_unrestricted_without_sandbox() {
+        // standard env without sandbox should leave module policy unrestricted
+        let ctx = Context::new_standard().expect("new_standard");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::Unrestricted,
+                "unsandboxed standard env should be unrestricted"
+            );
+        });
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_cleared_on_drop() {
+        use crate::sandbox::*;
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .preset(&ARITHMETIC)
+                .build()
+                .expect("standard + sandbox");
+
+            MODULE_POLICY.with(|cell| {
+                assert_eq!(cell.get(), ModulePolicy::VfsOnly);
+            });
+        }
+        // after drop, policy should reset
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::Unrestricted,
+                "module policy should reset to unrestricted after context drop"
+            );
+        });
+    }
+
+    #[test]
+    fn test_module_policy_not_set_without_standard_env() {
+        // sandbox without standard_env should NOT activate module policy
+        // (there's no module system to restrict)
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .preset(&ARITHMETIC)
+            .build()
+            .expect("sandbox without standard env");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                ModulePolicy::Unrestricted,
+                "non-standard-env sandbox should not set module policy"
+            );
+        });
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_blocks_filesystem_import() {
+        // sandboxed standard-env contexts with import allowed should block
+        // filesystem-based modules like (chibi process) via VfsOnly policy
+        // while still allowing VFS-based imports like (scheme write).
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .build()
+            .expect("standard + sandbox");
+
+        // VFS import should succeed
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(
+            r.is_ok(),
+            "(import (scheme write)) should succeed under VfsOnly: {:?}",
+            r.err()
+        );
+
+        // filesystem import should fail — (chibi process) is not in VFS
+        let r = ctx.evaluate("(import (chibi process))");
+        assert!(
+            r.is_err(),
+            "(import (chibi process)) should be blocked by VfsOnly policy"
+        );
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_standard_env_sandbox_allows_vfs_import() {
+        // sandboxed standard-env contexts with import allowed should be able
+        // to import VFS modules and use their bindings at runtime.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .build()
+            .expect("standard + sandbox");
+
+        // import scheme write — VFS module with dependencies (srfi 38, etc.)
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(r.is_ok(), "(import (scheme write)) failed: {:?}", r.err());
+
+        // verify imported binding works — display returns void, write returns void
+        let r = ctx.evaluate("(write 42)");
+        assert!(
+            r.is_ok(),
+            "write should be available after import: {:?}",
+            r.err()
+        );
+
+        // import scheme base — large VFS module with many dependencies
+        let r = ctx.evaluate("(import (scheme base))");
+        assert!(r.is_ok(), "(import (scheme base)) failed: {:?}", r.err());
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_standard_env_import() {
+        // user-facing (import ...) in a standard env context.
+        // works with default 4MB heap now that evaluate() gc-protects its
+        // port and sexp_load_op properly preserves VFS strings.
+        let ctx = Context::new_standard().unwrap();
+
+        // import a module with inline begin (no include)
+        let r = ctx.evaluate("(import (srfi 11))");
+        assert!(r.is_ok(), "(import (srfi 11)) failed: {:?}", r.err());
+
+        // import a module with dependencies (chibi ast, srfi 69)
+        let r = ctx.evaluate("(import (srfi 38))");
+        assert!(r.is_ok(), "(import (srfi 38)) failed: {:?}", r.err());
+
+        // import scheme write (depends on srfi 38)
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(r.is_ok(), "(import (scheme write)) failed: {:?}", r.err());
+
+        // import scheme base (depends on chibi io, equiv, string, ast, srfi 9/11/39)
+        let r = ctx.evaluate("(import (scheme base))");
+        assert!(r.is_ok(), "(import (scheme base)) failed: {:?}", r.err());
+
+        // verify imported bindings work
+        let r = ctx
+            .evaluate("(let-values (((a b) (values 1 2))) (+ a b))")
+            .unwrap();
+        assert_eq!(r.as_integer(), Some(3));
+    }
+
+    // --- characters ---
+
+    #[test]
+    fn test_char_value() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate(r"#\a").expect("failed to evaluate");
+        assert_eq!(result, Value::Char('a'));
+        assert_eq!(result.as_char(), Some('a'));
+    }
+
+    #[test]
+    fn test_char_special() {
+        let ctx = Context::new().expect("failed to create context");
+        assert_eq!(ctx.evaluate(r"#\space").expect("space"), Value::Char(' '));
+        assert_eq!(
+            ctx.evaluate(r"#\newline").expect("newline"),
+            Value::Char('\n')
+        );
+        assert_eq!(ctx.evaluate(r"#\tab").expect("tab"), Value::Char('\t'));
+    }
+
+    #[test]
+    fn test_char_unicode() {
+        let ctx = Context::new().expect("failed to create context");
+        // lambda character
+        let result = ctx.evaluate(r"#\λ").expect("unicode char");
+        assert_eq!(result, Value::Char('λ'));
+    }
+
+    #[test]
+    fn test_char_display() {
+        assert_eq!(format!("{}", Value::Char('a')), r"#\a");
+        assert_eq!(format!("{}", Value::Char(' ')), r"#\space");
+        assert_eq!(format!("{}", Value::Char('\n')), r"#\newline");
+        assert_eq!(format!("{}", Value::Char('\t')), r"#\tab");
+    }
+
+    #[test]
+    fn test_char_round_trip() {
+        unsafe extern "C" fn return_char(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                Value::Char('λ')
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("context");
+        ctx.define_fn_variadic("get-char", return_char)
+            .expect("define");
+        let result = ctx.evaluate("(get-char)").expect("call");
+        assert_eq!(result, Value::Char('λ'));
+    }
+
+    // --- ports ---
+
+    #[test]
+    fn test_port_opaque() {
+        let ctx = Context::new_standard().expect("standard context");
+        let result = ctx.evaluate("(current-input-port)").expect("port");
+        assert!(result.is_port(), "expected Port, got {:?}", result);
+    }
+
+    #[test]
+    fn test_port_display() {
+        // can't easily construct a Port without a context, just test Display for coverage
+        assert_eq!(format!("{}", Value::Port(std::ptr::null_mut())), "#<port>");
+    }
+
+    // --- bytevectors ---
+
+    #[test]
+    fn test_bytevector_value() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("#u8(1 2 3)").expect("failed to evaluate");
+        assert_eq!(result, Value::Bytevector(vec![1, 2, 3]));
+        assert_eq!(result.as_bytevector(), Some([1u8, 2, 3].as_slice()));
+    }
+
+    #[test]
+    fn test_bytevector_empty() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("#u8()").expect("failed to evaluate");
+        assert_eq!(result, Value::Bytevector(vec![]));
+    }
+
+    #[test]
+    fn test_bytevector_display() {
+        let bv = Value::Bytevector(vec![0, 127, 255]);
+        assert_eq!(format!("{}", bv), "#u8(0 127 255)");
+        assert_eq!(format!("{}", Value::Bytevector(vec![])), "#u8()");
+    }
+
+    #[test]
+    fn test_bytevector_round_trip() {
+        unsafe extern "C" fn return_bv(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                Value::Bytevector(vec![10, 20, 30])
+                    .to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("context");
+        ctx.define_fn_variadic("get-bv", return_bv).expect("define");
+        let result = ctx.evaluate("(get-bv)").expect("call");
+        assert_eq!(result, Value::Bytevector(vec![10, 20, 30]));
+    }
+
+    // --- hash tables ---
+
+    #[test]
+    fn test_hash_table_falls_through_to_other() {
+        // hash tables use a runtime-registered type tag from srfi-69's define-record-type
+        // and cannot be reliably detected without module introspection at runtime.
+        // they fall through to Other and can still be passed back to scheme code.
+        //
+        // TODO: detection could be added by looking up the hash-table type object via
+        // sexp_env_ref at context init time and comparing sexp_object_type at detection.
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.evaluate("(import (srfi 69))").expect("import srfi-69");
+        let result = ctx.evaluate("(make-hash-table)").expect("hash table");
+        assert!(matches!(result, Value::Other(_)), "got {:?}", result);
+    }
+
+    // --- continuations ---
+
+    #[test]
+    fn test_continuation_is_procedure() {
+        // continuations in chibi are SEXP_PROCEDURE at the type level.
+        // they're fully callable via Context::call, just like regular procedures.
+        let ctx = Context::new_standard().expect("standard context");
+        let result = ctx
+            .evaluate("(call-with-current-continuation (lambda (k) k))")
+            .expect("call/cc");
+        assert!(
+            result.is_procedure(),
+            "expected Procedure, got {:?}",
+            result
+        );
     }
 }

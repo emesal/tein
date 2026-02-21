@@ -18,7 +18,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
 
-use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uchar, c_ulong, c_void};
 
 // opaque types from chibi
 pub type sexp = *mut c_void;
@@ -40,7 +40,37 @@ unsafe extern "C" {
     // evaluation
     pub fn sexp_eval_string(ctx: sexp, str: *const c_char, len: sexp_sint_t, env: sexp) -> sexp;
 
-    pub fn sexp_load_standard_env(ctx: sexp, env: sexp, version: sexp_uint_t) -> sexp;
+    // version param is a tagged fixnum (sexp), not sexp_uint_t
+    pub fn sexp_load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp;
+
+    // standard ports (via tein shim — wraps sexp_load_standard_ports with stdin/stdout/stderr)
+    pub fn tein_sexp_load_standard_ports(ctx: sexp, env: sexp) -> sexp;
+
+    // copy a named binding from one env to another (searches direct + rename bindings).
+    // returns 1 if found and copied, 0 if not found.
+    pub fn tein_env_copy_named(
+        ctx: sexp,
+        src_env: sexp,
+        dst_env: sexp,
+        name: *const c_char,
+        name_len: sexp_sint_t,
+    ) -> c_int;
+
+    // character operations (via tein shim)
+    pub fn tein_sexp_charp(x: sexp) -> c_int;
+    pub fn tein_sexp_unbox_character(x: sexp) -> c_int;
+    pub fn tein_sexp_make_character(n: c_int) -> sexp;
+
+    // bytevector operations (via tein shim)
+    pub fn tein_sexp_bytesp(x: sexp) -> c_int;
+    pub fn tein_sexp_bytes_data(x: sexp) -> *mut c_char;
+    pub fn tein_sexp_bytes_length(x: sexp) -> sexp_uint_t;
+    pub fn tein_sexp_make_bytes(ctx: sexp, len: sexp_uint_t, init: c_uchar) -> sexp;
+
+    // port operations (via tein shim)
+    pub fn tein_sexp_portp(x: sexp) -> c_int;
+    pub fn tein_sexp_iportp(x: sexp) -> c_int;
+    pub fn tein_sexp_oportp(x: sexp) -> c_int;
 
     // type checking (via tein shim)
     pub fn tein_sexp_integerp(x: sexp) -> c_int;
@@ -120,6 +150,10 @@ unsafe extern "C" {
     pub fn tein_sexp_read(ctx: sexp, port: sexp) -> sexp;
     pub fn tein_sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp;
 
+    // gc preservation for rust-side references (via tein shim)
+    pub fn tein_sexp_preserve_object(ctx: sexp, x: sexp);
+    pub fn tein_sexp_release_object(ctx: sexp, x: sexp);
+
     // procedure/application support (via tein shim)
     pub fn tein_sexp_procedurep(x: sexp) -> c_int;
     pub fn tein_sexp_opcodep(x: sexp) -> c_int;
@@ -142,6 +176,9 @@ unsafe extern "C" {
 
     // error construction (for policy violation exceptions)
     pub fn tein_make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp;
+
+    // module import policy (for sandboxed standard env)
+    pub fn tein_module_policy_set(policy: c_int);
 
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
@@ -241,6 +278,59 @@ pub unsafe fn sexp_vector_length(x: sexp) -> sexp_uint_t {
 #[inline]
 pub unsafe fn sexp_vector_data(x: sexp) -> *mut sexp {
     unsafe { tein_sexp_vector_data(x) }
+}
+
+// character operations
+#[inline]
+pub unsafe fn sexp_charp(x: sexp) -> c_int {
+    unsafe { tein_sexp_charp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_unbox_character(x: sexp) -> c_int {
+    unsafe { tein_sexp_unbox_character(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_character(n: c_int) -> sexp {
+    unsafe { tein_sexp_make_character(n) }
+}
+
+// bytevector operations
+#[inline]
+pub unsafe fn sexp_bytesp(x: sexp) -> c_int {
+    unsafe { tein_sexp_bytesp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_bytes_data(x: sexp) -> *mut c_char {
+    unsafe { tein_sexp_bytes_data(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_bytes_length(x: sexp) -> sexp_uint_t {
+    unsafe { tein_sexp_bytes_length(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_bytes(ctx: sexp, len: sexp_uint_t, init: u8) -> sexp {
+    unsafe { tein_sexp_make_bytes(ctx, len, init as c_uchar) }
+}
+
+// port operations
+#[inline]
+pub unsafe fn sexp_portp(x: sexp) -> c_int {
+    unsafe { tein_sexp_portp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_iportp(x: sexp) -> c_int {
+    unsafe { tein_sexp_iportp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_oportp(x: sexp) -> c_int {
+    unsafe { tein_sexp_oportp(x) }
 }
 
 // exception details
@@ -406,6 +496,20 @@ pub unsafe fn sexp_evaluate(ctx: sexp, obj: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_evaluate(ctx, obj, env) }
 }
 
+/// add a sexp to the global preservatives list, preventing GC collection.
+/// must be paired with `sexp_release_object` when the reference is no longer needed.
+/// use this for rust-side references that survive across allocation points.
+#[inline]
+pub unsafe fn sexp_preserve_object(ctx: sexp, x: sexp) {
+    unsafe { tein_sexp_preserve_object(ctx, x) }
+}
+
+/// remove a sexp from the global preservatives list, allowing GC collection.
+#[inline]
+pub unsafe fn sexp_release_object(ctx: sexp, x: sexp) {
+    unsafe { tein_sexp_release_object(ctx, x) }
+}
+
 // fuel control
 #[inline]
 pub unsafe fn fuel_arm(ctx: sexp, total_fuel: sexp_sint_t) {
@@ -446,4 +550,76 @@ pub unsafe fn sexp_env_ref(ctx: sexp, env: sexp, sym: sexp, dflt: sexp) -> sexp 
 #[inline]
 pub unsafe fn sexp_context_env_set(ctx: sexp, env: sexp) {
     unsafe { tein_sexp_context_env_set(ctx, env) }
+}
+
+// standard environment + ports
+#[inline]
+pub unsafe fn load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp {
+    unsafe { sexp_load_standard_env(ctx, env, version) }
+}
+
+#[inline]
+pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
+    unsafe { tein_sexp_load_standard_ports(ctx, env) }
+}
+
+/// set the module import policy at C level.
+/// 0 = unrestricted (all modules), 1 = vfs-only.
+#[inline]
+pub unsafe fn module_policy_set(policy: i32) {
+    unsafe { tein_module_policy_set(policy as c_int) }
+}
+
+/// RAII guard that roots a `sexp` on chibi's global preservatives list.
+///
+/// prevents GC from collecting the guarded object while the guard is alive.
+/// calls `sexp_preserve_object` on creation and `sexp_release_object` on drop,
+/// so early returns and panics are handled automatically.
+///
+/// # safety
+///
+/// `ctx` and `obj` must be valid chibi-scheme pointers.
+/// `obj` must be a heap-allocated sexp (not a fixnum or other immediate value).
+/// the guard must not outlive the context.
+pub struct GcRoot {
+    ctx: sexp,
+    obj: sexp,
+}
+
+impl GcRoot {
+    /// root `obj` in `ctx`'s global preservatives list.
+    ///
+    /// # safety
+    ///
+    /// `ctx` must be a live context. `obj` must be a valid heap-allocated sexp.
+    #[inline]
+    pub unsafe fn new(ctx: sexp, obj: sexp) -> Self {
+        unsafe { sexp_preserve_object(ctx, obj) };
+        Self { ctx, obj }
+    }
+
+    /// the rooted sexp pointer
+    #[inline]
+    pub fn get(&self) -> sexp {
+        self.obj
+    }
+}
+
+impl Drop for GcRoot {
+    fn drop(&mut self) {
+        unsafe { sexp_release_object(self.ctx, self.obj) };
+    }
+}
+
+/// copy a named binding from src_env to dst_env, searching both direct
+/// bindings and rename bindings (module system). returns true if found.
+#[inline]
+pub unsafe fn env_copy_named(
+    ctx: sexp,
+    src_env: sexp,
+    dst_env: sexp,
+    name: *const std::os::raw::c_char,
+    name_len: sexp_sint_t,
+) -> bool {
+    unsafe { tein_env_copy_named(ctx, src_env, dst_env, name, name_len) != 0 }
 }
