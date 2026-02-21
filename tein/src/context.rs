@@ -65,6 +65,41 @@ impl IoOp {
     ];
 }
 
+/// sandbox stub for disallowed bindings
+///
+/// registered under the name of each known preset primitive that wasn't
+/// included in the context's allowlist. when called, raises a scheme exception
+/// with a `[sandbox:binding]` sentinel that `extract_exception_error` converts
+/// to `Error::SandboxViolation`.
+///
+/// the stub extracts its own name from the opcode's name slot (set by
+/// `sexp_define_foreign_proc` at registration time), so one function serves
+/// all stubbed bindings.
+unsafe extern "C" fn sandbox_stub(
+    ctx: ffi::sexp,
+    self_: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let name_sexp = ffi::sexp_opcode_name(self_);
+        let name = if ffi::sexp_stringp(name_sexp) != 0 {
+            let ptr = ffi::sexp_string_data(name_sexp);
+            let len = ffi::sexp_string_size(name_sexp) as usize;
+            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                .unwrap_or("unknown")
+        } else {
+            "unknown"
+        };
+        let msg = format!(
+            "[sandbox:binding] '{}' is not available in this sandbox",
+            name
+        );
+        let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+        ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+    }
+}
+
 /// shared policy check + delegation for all file-open wrappers
 ///
 /// extracts the filename from the first arg, checks against FsPolicy,
@@ -100,7 +135,8 @@ unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::
         });
 
         if !allowed {
-            let msg = format!("access denied: {}", path);
+            let op_kind = if op.is_read() { "read" } else { "write" };
+            let msg = format!("[sandbox:file] {} ({} not permitted)", path, op_kind);
             let c_msg = CString::new(msg.as_str()).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
@@ -490,6 +526,34 @@ impl ContextBuilder {
                             write_prefixes: file_write_prefixes.unwrap_or_default(),
                         });
                     });
+                }
+
+                // register sandbox stubs for known primitives that weren't allowed.
+                // this gives callers a clear SandboxViolation instead of "undefined variable".
+                {
+                    use crate::sandbox::ALL_PRESETS;
+                    let stub_fn: Option<
+                        unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
+                    > = std::mem::transmute::<*const std::ffi::c_void, _>(
+                        sandbox_stub as *const std::ffi::c_void,
+                    );
+
+                    for preset in ALL_PRESETS {
+                        for name in preset.primitives {
+                            if !allowed.contains(name) {
+                                let c_name = CString::new(*name).unwrap();
+                                ffi::sexp_define_foreign_proc(
+                                    ctx,
+                                    null_env,
+                                    c_name.as_ptr(),
+                                    0,
+                                    ffi::SEXP_PROC_VARIADIC,
+                                    c_name.as_ptr(),
+                                    stub_fn,
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
@@ -2002,10 +2066,11 @@ mod tests {
             .expect("builder");
         let result = ctx.evaluate("(+ 1 2)").expect("should work");
         assert_eq!(result, Value::Integer(3));
-        let err = ctx.evaluate("(cons 1 2)");
+        let err = ctx.evaluate("(cons 1 2)").unwrap_err();
         assert!(
-            err.is_err(),
-            "cons should be undefined in arithmetic-only env"
+            matches!(err, Error::SandboxViolation(_)),
+            "cons should produce SandboxViolation in arithmetic-only env, got: {:?}",
+            err
         );
     }
 
@@ -2248,12 +2313,18 @@ mod tests {
             .build()
             .expect("builder");
 
-        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
-        assert!(err.is_err(), "read from /etc/passwd should be denied");
-        let msg = format!("{}", err.unwrap_err());
+        let err = ctx
+            .evaluate("(open-input-file \"/etc/passwd\")")
+            .unwrap_err();
         assert!(
-            msg.contains("access denied"),
-            "expected 'access denied', got: {}",
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("file access denied"),
+            "expected 'file access denied', got: {}",
             msg
         );
     }
@@ -2741,10 +2812,11 @@ mod tests {
         );
 
         // filesystem import should fail — (chibi process) is not in VFS
-        let r = ctx.evaluate("(import (chibi process))");
+        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
         assert!(
-            r.is_err(),
-            "(import (chibi process)) should be blocked by VfsOnly policy"
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation for blocked import, got: {:?}",
+            err
         );
 
         drop(ctx);
@@ -2960,6 +3032,119 @@ mod tests {
             result.is_procedure(),
             "expected Procedure, got {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn test_sandbox_violation_error_variant() {
+        // SandboxViolation should be a distinct variant with its own Display
+        let err = Error::SandboxViolation("test message".to_string());
+        assert!(matches!(err, Error::SandboxViolation(_)));
+        assert_eq!(format!("{}", err), "sandbox violation: test message");
+
+        // should not match EvalError
+        assert!(!matches!(err, Error::EvalError(_)));
+    }
+
+    #[test]
+    fn test_file_io_sandbox_violation_type() {
+        use crate::sandbox::*;
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .file_read(&["/allowed/"])
+            .build()
+            .expect("builder");
+
+        let err = ctx
+            .evaluate("(open-input-file \"/etc/passwd\")")
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("file access denied"),
+            "expected 'file access denied', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_module_import_sandbox_violation_type() {
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .build()
+            .expect("standard + sandbox");
+
+        // VFS import should still succeed
+        let r = ctx.evaluate("(import (scheme write))");
+        assert!(r.is_ok(), "(scheme write) should work: {:?}", r.err());
+
+        // filesystem import should fail as SandboxViolation
+        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("module import blocked"),
+            "expected 'module import blocked', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_sandbox_stub_binding_violation() {
+        // arithmetic-only context should have stubs for known non-allowed primitives
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .preset(&ARITHMETIC)
+            .build()
+            .expect("builder");
+
+        // cons is in LISTS preset, not allowed — should produce SandboxViolation
+        let err = ctx.evaluate("(cons 1 2)").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation for stubbed binding, got: {:?}",
+            err
+        );
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("not available in this sandbox"),
+            "expected 'not available in this sandbox', got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("cons"),
+            "expected stub message to name 'cons', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_sandbox_stub_does_not_shadow_allowed() {
+        // allowed primitives should work normally, not be replaced by stubs
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .preset(&ARITHMETIC)
+            .preset(&LISTS)
+            .build()
+            .expect("builder");
+
+        let result = ctx.evaluate("(cons 1 2)").expect("cons should work");
+        assert_eq!(
+            result,
+            Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)))
         );
     }
 }

@@ -320,3 +320,26 @@ pub const FILE_WRITE_SUPPORT: Preset = Preset {
         "current-error-port",
     ],
 };
+
+/// all presets known to tein, for stub registration during sandbox build.
+///
+/// used internally to determine which primitives should get sandbox stubs
+/// when they aren't included in a context's allowlist.
+pub(crate) const ALL_PRESETS: &[&Preset] = &[
+    &ARITHMETIC,
+    &MATH,
+    &LISTS,
+    &VECTORS,
+    &STRINGS,
+    &CHARACTERS,
+    &TYPE_PREDICATES,
+    &MUTATION,
+    &STRING_PORTS,
+    &STDOUT_ONLY,
+    &EXCEPTIONS,
+    &BYTEVECTORS,
+    &IO_READ,
+    &CONTROL,
+    &FILE_READ_SUPPORT,
+    &FILE_WRITE_SUPPORT,
+];

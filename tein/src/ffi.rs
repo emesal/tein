@@ -157,6 +157,7 @@ unsafe extern "C" {
     // procedure/application support (via tein shim)
     pub fn tein_sexp_procedurep(x: sexp) -> c_int;
     pub fn tein_sexp_opcodep(x: sexp) -> c_int;
+    pub fn tein_sexp_opcode_name(op: sexp) -> sexp;
     pub fn tein_sexp_applicablep(x: sexp) -> c_int;
 
     // procedure application (chibi SEXP_API — not a macro)
@@ -457,6 +458,12 @@ pub unsafe fn sexp_procedurep(x: sexp) -> c_int {
 #[inline]
 pub unsafe fn sexp_opcodep(x: sexp) -> c_int {
     unsafe { tein_sexp_opcodep(x) }
+}
+
+/// extract the name (scheme string) from an opcode/foreign-fn object
+#[inline]
+pub unsafe fn sexp_opcode_name(op: sexp) -> sexp {
+    unsafe { tein_sexp_opcode_name(op) }
 }
 
 #[inline]
