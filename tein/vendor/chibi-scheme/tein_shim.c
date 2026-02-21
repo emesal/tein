@@ -101,6 +101,9 @@ int tein_sexp_procedurep(sexp x) { return sexp_procedurep(x); }
 int tein_sexp_opcodep(sexp x) { return sexp_opcodep(x); }
 int tein_sexp_applicablep(sexp x) { return sexp_applicablep(x); }
 
+/* extract the name (scheme string) from an opcode/foreign-fn object */
+sexp tein_sexp_opcode_name(sexp op) { return sexp_opcode_name(op); }
+
 // multi-expression evaluation support
 sexp tein_get_eof() { return SEXP_EOF; }
 int tein_sexp_eofp(sexp x) { return x == SEXP_EOF; }
@@ -177,7 +180,7 @@ sexp_sint_t tein_fuel_consume_slice(sexp_sint_t slice_used) {
 // error construction (for policy violation exceptions)
 sexp tein_make_error(sexp ctx, const char* msg, sexp_sint_t len) {
     sexp s = sexp_c_string(ctx, msg, len);
-    return sexp_user_exception(ctx, SEXP_FALSE, "policy violation", s);
+    return sexp_user_exception(ctx, SEXP_FALSE, msg, SEXP_NULL);
 }
 
 // --- module import policy ---

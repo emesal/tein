@@ -35,7 +35,7 @@ src/
                  falls to Other until runtime type detection added), Nil,
                  Unspecified, Procedure, Other
   error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
-                 StepLimitExceeded, Timeout)
+                 StepLimitExceeded, Timeout, SandboxViolation)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
   sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions for env restriction
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread

@@ -28,6 +28,13 @@ pub enum Error {
 
     /// evaluation exceeded the configured wall-clock timeout
     Timeout,
+
+    /// evaluation was blocked by sandbox policy (not a code bug)
+    ///
+    /// indicates the scheme code attempted something explicitly restricted
+    /// by the context's configuration: a blocked module import, denied
+    /// file access, or use of a primitive not included in the active presets.
+    SandboxViolation(String),
 }
 
 impl fmt::Display for Error {
@@ -40,6 +47,7 @@ impl fmt::Display for Error {
             Error::IoError(msg) => write!(f, "io error: {}", msg),
             Error::StepLimitExceeded => write!(f, "step limit exceeded"),
             Error::Timeout => write!(f, "evaluation timed out"),
+            Error::SandboxViolation(msg) => write!(f, "sandbox violation: {}", msg),
         }
     }
 }

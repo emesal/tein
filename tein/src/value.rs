@@ -126,7 +126,7 @@ impl Value {
 
         unsafe {
             if ffi::sexp_exceptionp(raw) != 0 {
-                return Err(Error::EvalError(Self::extract_exception_message(ctx, raw)));
+                return Err(Self::extract_exception_error(ctx, raw));
             }
 
             // check floats before integers because sexp_integerp matches some floats
@@ -268,8 +268,12 @@ impl Value {
         }
     }
 
-    /// extract a human-readable message from a chibi exception
-    unsafe fn extract_exception_message(ctx: ffi::sexp, exn: ffi::sexp) -> String {
+    /// extract a structured error from a chibi exception
+    ///
+    /// detects sandbox sentinel prefixes (`[sandbox:file]`, `[sandbox:binding]`)
+    /// and module policy violations, returning `SandboxViolation` for those cases
+    /// and `EvalError` for everything else.
+    unsafe fn extract_exception_error(ctx: ffi::sexp, exn: ffi::sexp) -> Error {
         unsafe {
             let msg_sexp = ffi::sexp_exception_message(exn);
             let message = if ffi::sexp_stringp(msg_sexp) != 0 {
@@ -281,15 +285,50 @@ impl Value {
                 "unknown error".to_owned()
             };
 
-            // append irritants if present (the values that caused the error)
-            let irritants = ffi::sexp_exception_irritants(exn);
-            if ffi::sexp_pairp(irritants) != 0
-                && let Ok(val) = Value::from_raw(ctx, irritants)
-            {
-                return format!("{}: {}", message, val);
+            // extract irritants for appending to messages
+            let irritant_str = {
+                let irritants = ffi::sexp_exception_irritants(exn);
+                if ffi::sexp_pairp(irritants) != 0 {
+                    Value::from_raw(ctx, irritants)
+                        .ok()
+                        .map(|v| format!("{}", v))
+                } else {
+                    None
+                }
+            };
+
+            // sentinel: file IO policy denial
+            if let Some(path) = message.strip_prefix("[sandbox:file] ") {
+                return Error::SandboxViolation(format!("file access denied: {}", path));
             }
 
-            message
+            // sentinel: binding stub
+            if let Some(rest) = message.strip_prefix("[sandbox:binding] ") {
+                return Error::SandboxViolation(rest.to_string());
+            }
+
+            // module policy: detect import failures when VfsOnly is active.
+            // chibi emits "couldn't find import" from meta-7.scm (scheme level)
+            // or "couldn't find file in module path" from eval.c (C level).
+            if message == "couldn't find import" || message == "couldn't find file in module path" {
+                use crate::sandbox::MODULE_POLICY;
+                use crate::sandbox::ModulePolicy;
+                let is_vfs_only = MODULE_POLICY.with(|cell| cell.get() == ModulePolicy::VfsOnly);
+                if is_vfs_only {
+                    let module = irritant_str.as_deref().unwrap_or("unknown");
+                    return Error::SandboxViolation(format!(
+                        "module import blocked: {} (not available in this sandbox)",
+                        module
+                    ));
+                }
+            }
+
+            // default: ordinary eval error with irritants appended
+            if let Some(irr) = irritant_str {
+                Error::EvalError(format!("{}: {}", message, irr))
+            } else {
+                Error::EvalError(message)
+            }
         }
     }
 
