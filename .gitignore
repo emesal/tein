@@ -12,6 +12,9 @@ tein/vendor/chibi-scheme/include/chibi/install.h
 tein/vendor/chibi-scheme/tein_vfs_data.h
 tein/vendor/chibi-scheme/tein_clibs.c
 
+# stray artefacts at repo root (install.h sometimes lands here)
+/vendor/
+
 # ide
 .vscode/
 .idea/
