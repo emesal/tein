@@ -54,7 +54,8 @@
 ### known limitations
 
 1. **limited type coverage**
-   - no hash tables, ports, continuations, bytevectors as Value variants
+   - hash tables and ports are opaque (`Value::HashTable`, `Value::Port`) — no rich rust api
+   - continuations surface as `Value::Procedure` (chibi uses the same type tag)
 
 ## architecture
 
