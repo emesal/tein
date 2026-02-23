@@ -390,6 +390,7 @@ const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct ContextBuilder {
     heap_size: usize,
     heap_max: usize,
@@ -731,6 +732,28 @@ impl ContextBuilder {
                 has_foreign_protocol: Cell::new(false),
             })
         }
+    }
+
+    /// build a managed context on a dedicated thread (persistent mode)
+    ///
+    /// the init closure runs once after context creation. state accumulates
+    /// across evaluations. use `reset()` to tear down and rebuild.
+    pub fn build_managed(
+        self,
+        init: impl Fn(&Context) -> Result<()> + Send + 'static,
+    ) -> Result<crate::managed::ThreadLocalContext> {
+        crate::managed::ThreadLocalContext::new(self, crate::managed::Mode::Persistent, init)
+    }
+
+    /// build a managed context on a dedicated thread (fresh mode)
+    ///
+    /// the init closure runs before every evaluation — context is rebuilt
+    /// each time. no state persists between calls. `reset()` is a no-op.
+    pub fn build_managed_fresh(
+        self,
+        init: impl Fn(&Context) -> Result<()> + Send + 'static,
+    ) -> Result<crate::managed::ThreadLocalContext> {
+        crate::managed::ThreadLocalContext::new(self, crate::managed::Mode::Fresh, init)
     }
 }
 
@@ -3821,5 +3844,219 @@ mod tests {
             dropped.load(Ordering::SeqCst),
             "canary should be dropped when Context drops"
         );
+    }
+
+    // --- managed context (persistent mode) ---
+
+    #[test]
+    fn test_managed_persistent_evaluate() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        let result = ctx.evaluate("(+ 1 2 3)").unwrap();
+        assert_eq!(result, Value::Integer(6));
+    }
+
+    #[test]
+    fn test_managed_persistent_state_accumulates() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        ctx.evaluate("(define x 42)").unwrap();
+        let result = ctx.evaluate("x").unwrap();
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_managed_persistent_init_closure() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(1_000_000)
+            .build_managed(|ctx| {
+                ctx.evaluate("(define greeting \"hello from init\")")?;
+                Ok(())
+            })
+            .unwrap();
+        let result = ctx.evaluate("greeting").unwrap();
+        assert_eq!(result, Value::String("hello from init".to_string()));
+    }
+
+    #[test]
+    fn test_managed_persistent_call() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        let proc = ctx.evaluate("+").unwrap();
+        let result = ctx
+            .call(&proc, &[Value::Integer(10), Value::Integer(20)])
+            .unwrap();
+        assert_eq!(result, Value::Integer(30));
+    }
+
+    #[test]
+    fn test_managed_persistent_define_fn_variadic() {
+        use crate::raw;
+
+        unsafe extern "C" fn always_42(
+            _ctx: raw::sexp,
+            _self: raw::sexp,
+            _n: raw::sexp_sint_t,
+            _args: raw::sexp,
+        ) -> raw::sexp {
+            unsafe { raw::sexp_make_fixnum(42) }
+        }
+
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        ctx.define_fn_variadic("always-42", always_42).unwrap();
+        let result = ctx.evaluate("(always-42)").unwrap();
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    // --- managed context (fresh mode) ---
+
+    #[test]
+    fn test_managed_fresh_evaluate() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed_fresh(|_ctx| Ok(()))
+            .unwrap();
+        let result = ctx.evaluate("(+ 10 20)").unwrap();
+        assert_eq!(result, Value::Integer(30));
+    }
+
+    #[test]
+    fn test_managed_fresh_state_does_not_persist() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed_fresh(|_ctx| Ok(()))
+            .unwrap();
+        ctx.evaluate("(define x 42)").unwrap();
+        // fresh mode rebuilds context, so x should not exist
+        let result = ctx.evaluate("x");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_managed_fresh_init_closure_runs_each_time() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_clone = counter.clone();
+
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed_fresh(move |_ctx| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+
+        ctx.evaluate("(+ 1 1)").unwrap();
+        ctx.evaluate("(+ 2 2)").unwrap();
+        ctx.evaluate("(+ 3 3)").unwrap();
+
+        // init ran once during build + once per evaluate = 4
+        assert_eq!(counter.load(Ordering::SeqCst), 4);
+    }
+
+    // --- managed context (reset) ---
+
+    #[test]
+    fn test_managed_persistent_reset_clears_state() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        ctx.evaluate("(define x 99)").unwrap();
+        assert_eq!(ctx.evaluate("x").unwrap(), Value::Integer(99));
+
+        ctx.reset().unwrap();
+
+        // after reset, x should not exist
+        let result = ctx.evaluate("x");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_managed_persistent_reset_reruns_init() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let counter_clone = counter.clone();
+
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(move |_ctx| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+
+        // init ran once during build
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        ctx.reset().unwrap();
+
+        // init ran again during reset
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_managed_fresh_reset_is_noop() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed_fresh(|_ctx| Ok(()))
+            .unwrap();
+        // should not error
+        ctx.reset().unwrap();
+    }
+
+    // --- managed context (error handling) ---
+
+    #[test]
+    fn test_managed_init_failure_returns_error() {
+        let result = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Err(Error::InitError("intentional init failure".to_string())));
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            Error::InitError(msg) => assert!(msg.contains("intentional init failure")),
+            other => panic!("expected InitError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_managed_mode() {
+        use crate::managed::Mode;
+
+        let persistent = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        assert_eq!(persistent.mode(), Mode::Persistent);
+
+        let fresh = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed_fresh(|_ctx| Ok(()))
+            .unwrap();
+        assert_eq!(fresh.mode(), Mode::Fresh);
+    }
+
+    #[test]
+    fn test_managed_drop_cleans_up() {
+        let ctx = Context::builder()
+            .step_limit(1_000_000)
+            .build_managed(|_ctx| Ok(()))
+            .unwrap();
+        drop(ctx);
+        // no panic, no leaked thread — success
     }
 }
