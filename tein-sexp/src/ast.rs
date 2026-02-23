@@ -461,6 +461,132 @@ fn write_dotted_list(f: &mut fmt::Formatter<'_>, items: &[Sexp], tail: &Sexp) ->
     write!(f, " . {tail})")
 }
 
+// --- serde impls ---
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Sexp {
+    /// serializes through the serde data model.
+    ///
+    /// note: symbols are serialized as strings — the serde data model has no symbol concept.
+    /// for lossless `Sexp`↔`Sexp` conversion, use [`crate::serde::to_sexp`] /
+    /// [`crate::serde::from_sexp`] directly.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        match &self.kind {
+            SexpKind::Integer(n) => serializer.serialize_i64(*n),
+            SexpKind::Float(f) => serializer.serialize_f64(*f),
+            SexpKind::String(s) => serializer.serialize_str(s),
+            // symbols have no serde equivalent; serialize as str
+            SexpKind::Symbol(s) => serializer.serialize_str(s),
+            SexpKind::Boolean(b) => serializer.serialize_bool(*b),
+            SexpKind::Char(c) => serializer.serialize_char(*c),
+            SexpKind::Nil => serializer.serialize_unit(),
+            SexpKind::List(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            SexpKind::DottedList(items, tail) => {
+                // flatten into a sequence: (a b . c) → [a, b, c]
+                let mut seq = serializer.serialize_seq(Some(items.len() + 1))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.serialize_element(tail.as_ref())?;
+                seq.end()
+            }
+            SexpKind::Vector(items) => {
+                let mut seq = serializer.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Sexp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(SexpVisitor)
+    }
+}
+
+#[cfg(feature = "serde")]
+struct SexpVisitor;
+
+#[cfg(feature = "serde")]
+impl<'de> serde::de::Visitor<'de> for SexpVisitor {
+    type Value = Sexp;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "any s-expression value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Sexp, E> {
+        Ok(Sexp::boolean(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Sexp, E> {
+        Ok(Sexp::integer(v))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Sexp, E> {
+        if v <= i64::MAX as u64 {
+            Ok(Sexp::integer(v as i64))
+        } else {
+            Err(E::custom(format!("u64 value {v} exceeds i64::MAX")))
+        }
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Sexp, E> {
+        Ok(Sexp::float(v))
+    }
+
+    fn visit_char<E: serde::de::Error>(self, v: char) -> Result<Sexp, E> {
+        Ok(Sexp::char(v))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Sexp, E> {
+        Ok(Sexp::string(v))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Sexp, E> {
+        Ok(Sexp::string(v))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Sexp, E> {
+        Ok(Sexp::nil())
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Sexp, E> {
+        Ok(Sexp::nil())
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Sexp, D::Error> {
+        <Sexp as serde::Deserialize>::deserialize(deserializer)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Sexp, A::Error> {
+        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(item) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Sexp::list(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Sexp, A::Error> {
+        let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        while let Some((key, val)) = map.next_entry::<Sexp, Sexp>()? {
+            entries.push(Sexp::dotted_list(vec![key], val));
+        }
+        Ok(Sexp::list(entries))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

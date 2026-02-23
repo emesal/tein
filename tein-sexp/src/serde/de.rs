@@ -794,6 +794,62 @@ mod tests {
         assert_eq!(from_str::<f64>("42").unwrap(), 42.0);
     }
 
+    // --- Sexp as serde value type ---
+
+    #[test]
+    fn sexp_as_deserialize_target() {
+        let sexp: Sexp = from_str("(1 2 3)").unwrap();
+        assert_eq!(sexp, Sexp::list(vec![Sexp::integer(1), Sexp::integer(2), Sexp::integer(3)]));
+    }
+
+    #[test]
+    fn sexp_as_serialize_source() {
+        let sexp = Sexp::list(vec![Sexp::symbol("hello"), Sexp::integer(42)]);
+        let text = crate::serde::to_string(&sexp).unwrap();
+        // symbols serialize as strings through the serde data model
+        assert_eq!(text, "(\"hello\" 42)");
+    }
+
+    #[test]
+    fn sexp_round_trip_nested() {
+        // dotted lists flatten to sequences through the serde data model, and
+        // symbols become strings — structural fidelity is intentionally limited.
+        // use to_sexp/from_sexp directly for lossless Sexp↔Sexp conversion.
+        //
+        // dotted list (name . test) → serialises as ("name" "test") → deserialises as List
+        let original = Sexp::list(vec![
+            Sexp::string("config"),
+            Sexp::dotted_list(vec![Sexp::string("name")], Sexp::string("test")),
+            Sexp::boolean(true),
+        ]);
+        let text = crate::serde::to_string(&original).unwrap();
+        let restored: Sexp = from_str(&text).unwrap();
+        // dotted list becomes a flat list after the round-trip
+        let expected = Sexp::list(vec![
+            Sexp::string("config"),
+            Sexp::list(vec![Sexp::string("name"), Sexp::string("test")]),
+            Sexp::boolean(true),
+        ]);
+        assert_eq!(restored, expected);
+    }
+
+    #[test]
+    fn sexp_in_struct_field() {
+        use serde::{Deserialize, Serialize};
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Wrapper {
+            tag: String,
+            data: Sexp,
+        }
+        let w = Wrapper {
+            tag: "test".to_string(),
+            data: Sexp::list(vec![Sexp::integer(1), Sexp::integer(2)]),
+        };
+        let text = crate::serde::to_string(&w).unwrap();
+        let restored: Wrapper = from_str(&text).unwrap();
+        assert_eq!(w, restored);
+    }
+
     // --- i128/u128 errors ---
 
     #[test]
