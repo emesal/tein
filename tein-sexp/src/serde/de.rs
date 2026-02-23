@@ -11,12 +11,31 @@ use serde::de;
 use std::fmt;
 
 /// deserialize a value from s-expression text
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::from_str;
+///
+/// let v: Vec<i32> = from_str("(1 2 3)").unwrap();
+/// assert_eq!(v, vec![1, 2, 3]);
+/// ```
 pub fn from_str<'de, T: de::Deserialize<'de>>(input: &str) -> Result<T, ParseError> {
     let sexp = parser::parse(input)?;
     from_sexp(&sexp)
 }
 
 /// deserialize a value from an [`Sexp`] node
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::{Sexp, serde::from_sexp};
+///
+/// let sexp = Sexp::integer(42);
+/// let n: i32 = from_sexp(&sexp).unwrap();
+/// assert_eq!(n, 42);
+/// ```
 pub fn from_sexp<'de, T: de::Deserialize<'de>>(sexp: &Sexp) -> Result<T, ParseError> {
     T::deserialize(SexpDeserializer { sexp })
 }

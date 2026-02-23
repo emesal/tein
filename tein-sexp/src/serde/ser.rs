@@ -11,6 +11,15 @@ use crate::error::ParseError;
 use serde::ser;
 
 /// serialize a value to an s-expression AST node
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::to_sexp;
+///
+/// let sexp = to_sexp(&true).unwrap();
+/// assert_eq!(sexp.to_string(), "#t");
+/// ```
 pub fn to_sexp<T: ser::Serialize>(value: &T) -> Result<Sexp, ParseError> {
     value.serialize(Serializer)
 }
