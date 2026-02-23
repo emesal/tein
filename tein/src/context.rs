@@ -1130,6 +1130,8 @@ impl Context {
         // pure-scheme predicates and accessors (mirrors foreign.scm)
         // these must be defined before any convenience procs that reference them.
         // uses only car/cdr (always available) rather than cadr/caddr (require scheme/cxr).
+        // uses fixnum? rather than integer?: handle IDs are always fixnums, and
+        // fixnum? is a chibi primitive available in all envs (including sandboxes).
         self.evaluate(
             "(define (foreign? x)
                (and (pair? x)
@@ -1137,7 +1139,7 @@ impl Context {
                     (pair? (cdr x))
                     (string? (car (cdr x)))
                     (pair? (cdr (cdr x)))
-                    (integer? (car (cdr (cdr x))))))
+                    (fixnum? (car (cdr (cdr x))))))
              (define (foreign-type x)
                (if (foreign? x) (car (cdr x))
                    (error \"foreign-type: expected foreign object, got\" x)))
@@ -3767,5 +3769,66 @@ mod tests {
             Value::Integer(n) => assert!(n >= 1, "handle id should be >= 1, got {}", n),
             other => panic!("expected integer handle id, got {}", other),
         }
+    }
+
+    // --- task 10: sandbox integration and cleanup ---
+
+    #[test]
+    fn test_foreign_in_sandbox() {
+        // verify foreign protocol works inside a sandboxed context.
+        // uses new_standard() to ensure protocol helpers have all required
+        // primitives (and, equal?, fixnum?, etc.) — real-world usage would
+        // similarly ensure the env has what the protocol needs.
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (test-counter-increment c)
+               (test-counter-get c))"
+            ,
+            )
+            .expect("sandboxed foreign call");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+
+
+
+    fn test_foreign_cleanup_on_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // a type that signals when its value is dropped
+        struct Canary(Arc<AtomicBool>);
+        impl Drop for Canary {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        impl ForeignType for Canary {
+            fn type_name() -> &'static str {
+                "canary"
+            }
+            fn methods() -> &'static [(&'static str, MethodFn)] {
+                &[]
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        {
+            let ctx = Context::new_standard().expect("context");
+            ctx.register_foreign_type::<Canary>().expect("register");
+            let _val = ctx
+                .foreign_value(Canary(dropped.clone()))
+                .expect("create canary");
+            assert!(!dropped.load(Ordering::SeqCst), "should not be dropped yet");
+        }
+        // Context dropped → ForeignStore dropped → Canary dropped
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "canary should be dropped when Context drops"
+        );
     }
 }

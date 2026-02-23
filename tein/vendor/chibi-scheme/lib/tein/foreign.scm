@@ -8,8 +8,9 @@
 ;;; the .sld exports them — rust injects them into the context env during
 ;;; register_foreign_protocol().
 ;;;
-;;; uses only car/cdr (scheme base) rather than cadr/caddr (require scheme/cxr)
-;;; so the module loads in minimal environments.
+;;; uses only car/cdr and fixnum? (always available) rather than cadr/caddr
+;;; (require scheme/cxr) or integer? (not a chibi primitive), so the module
+;;; loads correctly in minimal environments including sandboxes.
 
 ;; predicates and accessors for the tagged list representation
 ;; (__tein-foreign "type-name" handle-id)
@@ -20,7 +21,7 @@
        (pair? (cdr x))
        (string? (car (cdr x)))
        (pair? (cdr (cdr x)))
-       (integer? (car (cdr (cdr x))))))
+       (fixnum? (car (cdr (cdr x))))))
 
 (define (foreign-type x)
   (if (foreign? x)
