@@ -387,17 +387,19 @@ fn alist_value(entry: &Sexp) -> Result<&Sexp, ParseError> {
     }
 }
 
-/// heuristic: check if a list looks like an alist (all dotted pairs with symbol keys)
+/// heuristic: check if a list looks like an alist (all dotted pairs with symbol or string keys)
+///
+/// accepts both symbol keys (e.g. from struct serialisation) and string keys (e.g. from
+/// `BTreeMap<String, V>`), so `deserialize_any` can detect both as maps rather than sequences.
 fn is_alist(items: &[Sexp]) -> bool {
     if items.is_empty() {
         return false;
     }
-    items.iter().all(|item| {
-        matches!(
-            &item.kind,
-            SexpKind::DottedList(keys, _) if keys.len() == 1
-                && matches!(&keys[0].kind, SexpKind::Symbol(_))
-        )
+    items.iter().all(|item| match &item.kind {
+        SexpKind::DottedList(keys, _) if keys.len() == 1 => {
+            matches!(&keys[0].kind, SexpKind::Symbol(_) | SexpKind::String(_))
+        }
+        _ => false,
     })
 }
 
@@ -782,5 +784,46 @@ mod tests {
     fn integer_to_float_coercion() {
         // when deserialize_f64 is called, integers should coerce
         assert_eq!(from_str::<f64>("42").unwrap(), 42.0);
+    }
+
+    // --- alist with string keys ---
+
+    #[test]
+    fn round_trip_btreemap_string_keys() {
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert("name".to_string(), "alice".to_string());
+        m.insert("role".to_string(), "admin".to_string());
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: BTreeMap<String, String> = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    #[test]
+    fn deserialize_any_string_key_alist_as_map() {
+        // string-keyed alists must be detected by deserialize_any, not just typed deserialize_map.
+        // this catches the regression where is_alist only recognised symbol keys.
+        use serde::Deserialize;
+        use std::collections::HashMap;
+
+        // the outer map uses deserialize_map (typed), but the value uses deserialize_any
+        // because the field type is dynamic. wrap in an untagged enum to force deserialize_any path.
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(untagged)]
+        enum Dynamic {
+            Map(HashMap<String, String>),
+            Other(String),
+        }
+
+        // a string-keyed alist — serialised by BTreeMap<String, String>
+        let text = r#"(("name" . "alice") ("role" . "admin"))"#;
+        let result: Dynamic = from_str(text).unwrap();
+        match result {
+            Dynamic::Map(m) => {
+                assert_eq!(m.get("name").unwrap(), "alice");
+                assert_eq!(m.get("role").unwrap(), "admin");
+            }
+            other => panic!("expected Map variant, got {other:?}"),
+        }
     }
 }
