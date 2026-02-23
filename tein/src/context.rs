@@ -1014,6 +1014,7 @@ impl Context {
     }
 
     /// raw context pointer for internal use (tests, examples, proc macros)
+    #[cfg(test)]
     pub(crate) fn ctx_ptr(&self) -> ffi::sexp {
         self.ctx
     }
@@ -3785,6 +3786,7 @@ mod tests {
         assert_eq!(result, Value::Integer(1));
     }
 
+    #[test]
     fn test_foreign_cleanup_on_drop() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};

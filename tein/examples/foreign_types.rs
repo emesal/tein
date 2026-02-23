@@ -81,14 +81,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // directly call dispatch from rust using ctx.call:
     let get_fn = ctx.evaluate("counter-get")?;
-    let result = ctx.call(&get_fn, &[c.clone()])?;
+    let result = ctx.call(&get_fn, std::slice::from_ref(&c))?;
     println!("(counter-get c) via ctx.call => {}", result);
 
     let inc_fn = ctx.evaluate("counter-increment")?;
-    let _ = ctx.call(&inc_fn, &[c.clone()])?;
-    let _ = ctx.call(&inc_fn, &[c.clone()])?;
-    let _ = ctx.call(&inc_fn, &[c.clone()])?;
-    let result = ctx.call(&get_fn, &[c.clone()])?;
+    let _ = ctx.call(&inc_fn, std::slice::from_ref(&c))?;
+    let _ = ctx.call(&inc_fn, std::slice::from_ref(&c))?;
+    let _ = ctx.call(&inc_fn, std::slice::from_ref(&c))?;
+    let result = ctx.call(&get_fn, std::slice::from_ref(&c))?;
     println!("after 3 increments => {}", result);
 
     // universal foreign-call works too
@@ -112,11 +112,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("(foreign-type-methods counter) => {}", methods);
 
     let foreign_methods_fn = ctx.evaluate("foreign-methods")?;
-    let obj_methods = ctx.call(&foreign_methods_fn, &[c.clone()])?;
+    let obj_methods = ctx.call(&foreign_methods_fn, std::slice::from_ref(&c))?;
     println!("(foreign-methods c)            => {}", obj_methods);
 
     let foreign_type_fn = ctx.evaluate("foreign-type")?;
-    let type_name = ctx.call(&foreign_type_fn, &[c.clone()])?;
+    let type_name = ctx.call(&foreign_type_fn, std::slice::from_ref(&c))?;
     println!("(foreign-type c)               => {}", type_name);
 
     println!("\n--- error messages ---\n");

@@ -487,11 +487,7 @@ impl Value {
                         ffi::sexp_c_str(ctx, name_c.as_ptr(), type_name.len() as ffi::sexp_sint_t);
                     let _name_root = ffi::GcRoot::new(ctx, name_sexp);
                     let id_sexp = ffi::sexp_make_fixnum(*handle_id as ffi::sexp_sint_t);
-                    let tag = ffi::sexp_intern(
-                        ctx,
-                        b"__tein-foreign\0".as_ptr() as *const std::os::raw::c_char,
-                        14,
-                    );
+                    let tag = ffi::sexp_intern(ctx, c"__tein-foreign".as_ptr(), 14);
                     let _tag_root = ffi::GcRoot::new(ctx, tag);
                     // cons from right to left: tag . (name . (id . ()))
                     let tail = ffi::sexp_cons(ctx, id_sexp, ffi::get_null());

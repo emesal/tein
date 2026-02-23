@@ -28,8 +28,8 @@
 //! }
 //! ```
 
-use crate::error::{Error, Result};
 use crate::Value;
+use crate::error::{Error, Result};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -57,6 +57,7 @@ pub type MethodFn = fn(&mut dyn Any, &MethodContext, &[Value]) -> Result<Value>;
 /// internals directly (which would cause borrow conflicts).
 pub struct MethodContext {
     /// raw chibi context pointer — for Value::to_raw/from_raw
+    #[allow(dead_code)]
     pub(crate) ctx: crate::ffi::sexp,
 }
 
@@ -176,13 +177,9 @@ impl ForeignStore {
 
     /// list method names for a type
     pub(crate) fn method_names(&self, type_name: &str) -> Option<Vec<&'static str>> {
-        self.types.get(type_name).map(|entry| {
-            entry
-                .methods
-                .iter()
-                .map(|(name, _)| *name)
-                .collect()
-        })
+        self.types
+            .get(type_name)
+            .map(|entry| entry.methods.iter().map(|(name, _)| *name).collect())
     }
 
     /// list all registered type names
@@ -191,6 +188,7 @@ impl ForeignStore {
     }
 
     /// check if a type is registered
+    #[allow(dead_code)]
     pub(crate) fn has_type(&self, name: &str) -> bool {
         self.types.contains_key(name)
     }
@@ -215,12 +213,12 @@ pub(crate) unsafe fn dispatch_foreign_call(
         let rest = ffi::sexp_cdr(args);
 
         // convert obj to Value to extract Foreign fields
-        let obj_value = Value::from_raw(ctx, obj_sexp)
-            .map_err(|e| format!("foreign-call: {}", e))?;
+        let obj_value =
+            Value::from_raw(ctx, obj_sexp).map_err(|e| format!("foreign-call: {}", e))?;
 
-        let (handle_id, type_name) = obj_value.as_foreign().ok_or_else(|| {
-            format!("foreign-call: expected foreign object, got {}", obj_value)
-        })?;
+        let (handle_id, type_name) = obj_value
+            .as_foreign()
+            .ok_or_else(|| format!("foreign-call: expected foreign object, got {}", obj_value))?;
 
         // extract method name (second arg — must be a symbol)
         if ffi::sexp_nullp(rest) != 0 {
@@ -259,24 +257,25 @@ pub(crate) unsafe fn dispatch_foreign_call(
         // look up method (drop store_ref before borrow_mut below)
         let method_fn = {
             let store_ref = store.borrow();
-            let method_fn = store_ref.find_method(type_name, method_name).ok_or_else(|| {
-                let available = store_ref
-                    .method_names(type_name)
-                    .map(|names| names.join(", "))
-                    .unwrap_or_else(|| "none".to_string());
-                format!(
-                    "foreign-call: {} has no method '{}' \u{2014} available: {}",
-                    type_name, method_name, available
-                )
-            })?;
-            method_fn
+            store_ref
+                .find_method(type_name, method_name)
+                .ok_or_else(|| {
+                    let available = store_ref
+                        .method_names(type_name)
+                        .map(|names| names.join(", "))
+                        .unwrap_or_else(|| "none".to_string());
+                    format!(
+                        "foreign-call: {} has no method '{}' \u{2014} available: {}",
+                        type_name, method_name, available
+                    )
+                })?
         };
 
         // call method with mutable access to the object
         let mut store_mut = store.borrow_mut();
-        let (data, _) = store_mut.get_mut(handle_id).ok_or_else(|| {
-            format!("foreign-call: stale handle {} ({})", handle_id, type_name)
-        })?;
+        let (data, _) = store_mut
+            .get_mut(handle_id)
+            .ok_or_else(|| format!("foreign-call: stale handle {} ({})", handle_id, type_name))?;
 
         let method_ctx = MethodContext { ctx };
         method_fn(data, &method_ctx, &call_args)
