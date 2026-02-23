@@ -4,9 +4,10 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
+    foreign::{ForeignStore, ForeignType, MethodContext},
     sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
@@ -562,6 +563,8 @@ impl ContextBuilder {
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
                 has_module_policy,
+                foreign_store: RefCell::new(ForeignStore::new()),
+                has_foreign_protocol: Cell::new(false),
             })
         }
     }
@@ -589,6 +592,10 @@ pub struct Context {
     step_limit: Option<u64>,
     has_io_wrappers: bool,
     has_module_policy: bool,
+    /// per-context store for foreign type registrations and live instances
+    foreign_store: RefCell<ForeignStore>,
+    /// whether foreign protocol dispatch functions are registered
+    has_foreign_protocol: Cell<bool>,
 }
 
 impl Context {
@@ -835,6 +842,91 @@ impl Context {
             }
         }
 
+        Ok(())
+    }
+
+    /// raw context pointer for internal use (tests, examples, proc macros)
+    pub(crate) fn ctx_ptr(&self) -> ffi::sexp {
+        self.ctx
+    }
+
+    /// register a rust type with the foreign object protocol.
+    ///
+    /// makes the type's methods callable from scheme. auto-registers:
+    /// - `foreign-call`, `foreign-methods`, `foreign-types`, `foreign-type-methods`
+    ///   (on first call, via `register_foreign_protocol`)
+    /// - `type-name?` — predicate proc
+    /// - `type-name-method` — for each method in the type's method table
+    ///
+    /// # example
+    ///
+    /// ```ignore
+    /// ctx.register_foreign_type::<Counter>()?;
+    /// // scheme now has: counter?, counter-increment, counter-get
+    /// ```
+    pub fn register_foreign_type<T: ForeignType>(&self) -> Result<()> {
+        if !self.has_foreign_protocol.get() {
+            self.register_foreign_protocol()?;
+            self.has_foreign_protocol.set(true);
+        }
+        self.foreign_store.borrow_mut().register_type::<T>()?;
+
+        // auto-register convenience procs (deferred to task 6 — placeholder for now)
+        Ok(())
+    }
+
+    /// wrap a rust value as a scheme foreign object.
+    ///
+    /// stores it in the ForeignStore and returns a `Value::Foreign`
+    /// that scheme code can pass around, inspect, and use with `foreign-call`.
+    ///
+    /// the value lives until the Context is dropped.
+    pub fn foreign_value<T: ForeignType>(&self, value: T) -> Result<Value> {
+        let id = self.foreign_store.borrow_mut().insert(value);
+        Ok(Value::Foreign {
+            handle_id: id,
+            type_name: T::type_name().to_string(),
+        })
+    }
+
+    /// borrow a foreign object immutably.
+    ///
+    /// returns an error if the value isn't `Foreign`, the handle is stale,
+    /// or the type doesn't match `T`.
+    pub fn foreign_ref<T: ForeignType + 'static>(
+        &self,
+        value: &Value,
+    ) -> Result<std::cell::Ref<'_, T>> {
+        let (id, actual_type) = value.as_foreign().ok_or_else(|| {
+            Error::TypeError(format!("expected foreign object, got {}", value))
+        })?;
+        if actual_type != T::type_name() {
+            return Err(Error::TypeError(format!(
+                "expected {}, got {}",
+                T::type_name(),
+                actual_type
+            )));
+        }
+        let store = self.foreign_store.borrow();
+        if store.get(id).is_none() {
+            return Err(Error::EvalError(format!(
+                "stale foreign handle: {} ({})",
+                id,
+                actual_type
+            )));
+        }
+        Ok(std::cell::Ref::map(store, |s| {
+            let (data, _) = s.get(id).unwrap();
+            data.downcast_ref::<T>().unwrap()
+        }))
+    }
+
+    /// stub: register foreign protocol dispatch functions.
+    ///
+    /// wires up `foreign-call`, `foreign-methods`, `foreign-types`,
+    /// `foreign-type-methods` as native variadic functions. implemented in task 5.
+    fn register_foreign_protocol(&self) -> Result<()> {
+        // task 5 fills this in
         Ok(())
     }
 
