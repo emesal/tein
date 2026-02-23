@@ -4,13 +4,24 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
-    foreign::{ForeignStore, ForeignType, MethodContext},
+    foreign::{ForeignStore, ForeignType},
     sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
+
+/// RAII guard that clears the FOREIGN_STORE_PTR thread-local on drop.
+///
+/// ensures the pointer is nulled on all exit paths (early returns, `?`, panic).
+struct ForeignStoreGuard;
+
+impl Drop for ForeignStoreGuard {
+    fn drop(&mut self) {
+        FOREIGN_STORE_PTR.with(|c| c.set(std::ptr::null()));
+    }
+}
 
 // --- original proc thread-locals for IO wrappers ---
 //
@@ -29,6 +40,159 @@ thread_local! {
             Cell::new(std::ptr::null_mut()),
         ]
     };
+}
+
+// --- foreign store thread-local for dispatch wrappers ---
+//
+// set to &self.foreign_store before every evaluate()/call() invocation,
+// cleared afterwards. the extern "C" dispatch wrappers read it to access
+// the store without needing a Context reference. safe because Context is
+// !Send + !Sync and the pointer is only live during evaluation.
+thread_local! {
+    static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
+}
+
+// --- implementations of the 4 foreign protocol dispatch functions ---
+
+/// dispatch a method call: (foreign-call obj 'method arg ...)
+unsafe extern "C" fn foreign_call_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            let msg = "foreign-call: no foreign store (internal error)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let store = &*store_ptr;
+        match crate::foreign::dispatch_foreign_call(store, ctx, args) {
+            Ok(value) => value.to_raw(ctx).unwrap_or_else(|_| ffi::get_void()),
+            Err(msg) => {
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// list methods of the foreign object in the first arg: (foreign-methods obj)
+unsafe extern "C" fn foreign_methods_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() || ffi::sexp_nullp(args) != 0 {
+            return ffi::get_null();
+        }
+        let store = &*store_ptr;
+        let obj_sexp = ffi::sexp_car(args);
+        let obj = match Value::from_raw(ctx, obj_sexp) {
+            Ok(v) => v,
+            Err(_) => return ffi::get_null(),
+        };
+        let type_name = match obj.foreign_type_name() {
+            Some(n) => n,
+            None => return ffi::get_null(),
+        };
+        let names = match store.borrow().method_names(type_name) {
+            Some(n) => n,
+            None => return ffi::get_null(),
+        };
+        // build scheme list of symbol names
+        let mut result = ffi::get_null();
+        for name in names.iter().rev() {
+            let c_name = match CString::new(*name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let sym = ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let _sym_root = ffi::GcRoot::new(ctx, sym);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, sym, result);
+        }
+        result
+    }
+}
+
+/// list all registered type names: (foreign-types)
+unsafe extern "C" fn foreign_types_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            return ffi::get_null();
+        }
+        let store = &*store_ptr;
+        let names = store.borrow().type_names();
+        let mut result = ffi::get_null();
+        for name in names.iter().rev() {
+            let c_name = match CString::new(*name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let s = ffi::sexp_c_str(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let _s_root = ffi::GcRoot::new(ctx, s);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, s, result);
+        }
+        result
+    }
+}
+
+/// list method names for a named type: (foreign-type-methods "type-name")
+unsafe extern "C" fn foreign_type_methods_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() || ffi::sexp_nullp(args) != 0 {
+            return ffi::get_null();
+        }
+        let store = &*store_ptr;
+        let name_sexp = ffi::sexp_car(args);
+        if ffi::sexp_stringp(name_sexp) == 0 {
+            let msg = "foreign-type-methods: expected string type name";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let ptr = ffi::sexp_string_data(name_sexp);
+        let len = ffi::sexp_string_size(name_sexp) as usize;
+        let type_name =
+            match std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len)) {
+                Ok(s) => s,
+                Err(_) => return ffi::get_null(),
+            };
+        let names = match store.borrow().method_names(type_name) {
+            Some(n) => n,
+            None => return ffi::get_null(),
+        };
+        let mut result = ffi::get_null();
+        for name in names.iter().rev() {
+            let c_name = match CString::new(*name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let sym = ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let _sym_root = ffi::GcRoot::new(ctx, sym);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, sym, result);
+        }
+        result
+    }
 }
 
 /// the 4 file-opening primitives we wrap with policy checks
@@ -683,6 +847,10 @@ impl Context {
         let c_str = CString::new(code)
             .map_err(|_| Error::EvalError("code contains null bytes".to_string()))?;
 
+        // set foreign store pointer so dispatch wrappers can access it.
+        // the guard clears it on all exit paths (early returns, `?`, panic).
+        FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+        let _foreign_guard = ForeignStoreGuard;
         self.arm_fuel();
 
         unsafe {
@@ -921,12 +1089,17 @@ impl Context {
         }))
     }
 
-    /// stub: register foreign protocol dispatch functions.
+    /// register the foreign object protocol dispatch functions.
     ///
+    /// called automatically by `register_foreign_type` on first use.
     /// wires up `foreign-call`, `foreign-methods`, `foreign-types`,
-    /// `foreign-type-methods` as native variadic functions. implemented in task 5.
+    /// `foreign-type-methods` as native variadic functions in the current env.
+    /// these are the rust-side implementations that back the `(tein foreign)` exports.
     fn register_foreign_protocol(&self) -> Result<()> {
-        // task 5 fills this in
+        self.define_fn_variadic("foreign-call", foreign_call_wrapper)?;
+        self.define_fn_variadic("foreign-methods", foreign_methods_wrapper)?;
+        self.define_fn_variadic("foreign-types", foreign_types_wrapper)?;
+        self.define_fn_variadic("foreign-type-methods", foreign_type_methods_wrapper)?;
         Ok(())
     }
 
@@ -958,6 +1131,8 @@ impl Context {
             .as_procedure()
             .ok_or_else(|| Error::TypeError(format!("expected procedure, got {}", proc)))?;
 
+        FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+        let _foreign_guard = ForeignStoreGuard;
         self.arm_fuel();
 
         unsafe {
