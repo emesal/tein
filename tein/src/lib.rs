@@ -24,6 +24,7 @@ mod error;
 mod ffi;
 pub mod foreign;
 pub mod managed;
+mod port;
 pub mod sandbox;
 mod thread;
 mod timeout;

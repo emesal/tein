@@ -311,3 +311,62 @@ RAII, ensuring the pointer is always valid during scheme execution and cleared o
 - `foreign-handle-id` — returns the handle ID fixnum
 
 uses `car`/`cdr` chains instead of `cadr`/`caddr` (those require `scheme/cxr`).
+
+## custom port protocol
+
+bridges rust `Read`/`Write` objects to chibi's custom port mechanism via thread-local trampoline — same pattern as ForeignStore.
+
+### architecture
+
+- **PortStore** (`port.rs`): per-context map from port ID → `Box<dyn Read>` or `Box<dyn Write>`
+- **PORT_STORE_PTR** (`context.rs`): thread-local raw pointer, set before evaluate/call via `PortStoreGuard` RAII
+- **port_read_trampoline** / **port_write_trampoline**: extern "C" fns called by chibi's `sexp_cookie_reader`/`writer` via `fopencookie`
+
+### creating ports
+
+```rust
+let port = ctx.open_input_port(std::io::Cursor::new(b"(+ 1 2)"))?;
+let val = ctx.read(&port)?;           // read one s-expression
+let result = ctx.evaluate_port(&port)?; // read+eval loop
+```
+
+output ports work similarly via `open_output_port`. pass the port value to scheme's `display`/`write`/`write-char`.
+
+### chibi protocol details
+
+- read callback receives `(buf start end)` where `buf[0..start)` has valid data from prior partial fills
+- return value must be `start + new_bytes_read` (chibi copies from position 0)
+- `flush-output` is the primitive name; `flush-output-port` requires `(scheme extras)`
+
+## reader dispatch protocol
+
+extends chibi's `#` reader syntax with user-defined handlers via a C-level dispatch table.
+
+### architecture
+
+- **tein_reader_dispatch[128]** (`tein_shim.c`): thread-local table mapping ASCII chars → scheme procs
+- **sexp.c patch**: reader checks dispatch table before hardcoded `#` switch — `tein_reader_dispatch_get(c1)` → `sexp_apply1` if handler found
+- **register_reader_protocol** (`context.rs`): registers `set-reader!`/`unset-reader!`/`reader-dispatch-chars` as native fns, always called in `build()` for standard env contexts
+- **(tein reader)** VFS module: re-exports native fns for idiomatic `(import (tein reader))` usage
+
+### usage
+
+```rust
+// from rust
+let handler = ctx.evaluate("(lambda (port) 42)")?;
+ctx.register_reader('j', &handler)?;
+assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
+```
+
+```scheme
+;; from scheme (fns available directly in standard env)
+(set-reader! #\j (lambda (port) (list 'json (read port))))
+;; #j(1 2 3) → (json (1 2 3))
+```
+
+### design notes
+
+- reserved r7rs chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden
+- dispatch table is thread-local, matching chibi's !Send context model
+- table cleared on `Context::drop()` so next context on the thread starts clean
+- handler return value becomes the reader result — gets evaluated by `evaluate()`, so return self-evaluating datums (numbers, strings, lists) or use `read()` for raw datum access

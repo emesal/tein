@@ -68,6 +68,9 @@ const VFS_FILES: &[&str] = &[
     // tein foreign type protocol
     "lib/tein/foreign.sld",
     "lib/tein/foreign.scm",
+    // tein reader dispatch protocol
+    "lib/tein/reader.sld",
+    "lib/tein/reader.scm",
 ];
 
 /// C-backed modules that need static linking.

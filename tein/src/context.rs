@@ -5,6 +5,7 @@ use crate::{
     error::{Error, Result},
     ffi,
     foreign::{ForeignStore, ForeignType},
+    port::PortStore,
     sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
 };
 use std::cell::{Cell, RefCell};
@@ -40,6 +41,25 @@ thread_local! {
             Cell::new(std::ptr::null_mut()),
         ]
     };
+}
+
+// --- port store thread-local for custom port trampolines ---
+//
+// set to &self.port_store before every evaluate()/call() invocation,
+// cleared afterwards. the extern "C" port trampolines read it to access
+// the backing Read/Write objects. safe because Context is !Send + !Sync
+// and the pointer is only live during evaluation.
+thread_local! {
+    static PORT_STORE_PTR: Cell<*const RefCell<PortStore>> = const { Cell::new(std::ptr::null()) };
+}
+
+/// RAII guard that clears the PORT_STORE_PTR thread-local on drop.
+struct PortStoreGuard;
+
+impl Drop for PortStoreGuard {
+    fn drop(&mut self) {
+        PORT_STORE_PTR.with(|c| c.set(std::ptr::null()));
+    }
 }
 
 // --- foreign store thread-local for dispatch wrappers ---
@@ -193,6 +213,192 @@ unsafe extern "C" fn foreign_type_methods_wrapper(
         }
         result
     }
+}
+
+// --- custom port trampolines ---
+
+/// extern "C" trampoline for custom input port reads.
+///
+/// called by chibi via sexp_apply when the custom port's buffer needs refilling.
+/// args from scheme: (port-id buffer start end).
+/// reads from the rust Read object in PortStore, copies bytes into the scheme
+/// string buffer, returns fixnum byte count.
+unsafe extern "C" fn port_read_trampoline(
+    _ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let id_sexp = ffi::sexp_car(args);
+        let rest = ffi::sexp_cdr(args);
+        let buf_sexp = ffi::sexp_car(rest);
+        let rest2 = ffi::sexp_cdr(rest);
+        let start_sexp = ffi::sexp_car(rest2);
+        let rest3 = ffi::sexp_cdr(rest2);
+        let end_sexp = ffi::sexp_car(rest3);
+
+        let port_id = ffi::sexp_unbox_fixnum(id_sexp) as u64;
+        let start = ffi::sexp_unbox_fixnum(start_sexp) as usize;
+        let end = ffi::sexp_unbox_fixnum(end_sexp) as usize;
+        let len = end - start;
+
+        let store_ptr = PORT_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            return ffi::sexp_make_fixnum(0);
+        }
+        let store = &*store_ptr;
+        let mut store_ref = store.borrow_mut();
+        let reader = match store_ref.get_reader(port_id) {
+            Some(r) => r,
+            None => return ffi::sexp_make_fixnum(0),
+        };
+
+        let mut tmp = vec![0u8; len];
+        let bytes_read = match reader.read(&mut tmp) {
+            Ok(n) => n,
+            Err(_) => return ffi::sexp_make_fixnum(0),
+        };
+
+        let buf_data = ffi::sexp_string_data(buf_sexp) as *mut u8;
+        std::ptr::copy_nonoverlapping(tmp.as_ptr(), buf_data.add(start), bytes_read);
+
+        // return start + bytes_read: chibi copies [0..result) from the buffer,
+        // where [0..start) was already valid from a previous partial fill.
+        ffi::sexp_make_fixnum((start + bytes_read) as ffi::sexp_sint_t)
+    }
+}
+
+/// extern "C" trampoline for custom output port writes.
+///
+/// called by chibi via sexp_apply when data needs flushing to the port.
+/// args from scheme: (port-id buffer start end).
+/// writes bytes from the scheme string buffer to the rust Write object
+/// in PortStore, returns fixnum byte count.
+unsafe extern "C" fn port_write_trampoline(
+    _ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let id_sexp = ffi::sexp_car(args);
+        let rest = ffi::sexp_cdr(args);
+        let buf_sexp = ffi::sexp_car(rest);
+        let rest2 = ffi::sexp_cdr(rest);
+        let start_sexp = ffi::sexp_car(rest2);
+        let rest3 = ffi::sexp_cdr(rest2);
+        let end_sexp = ffi::sexp_car(rest3);
+
+        let port_id = ffi::sexp_unbox_fixnum(id_sexp) as u64;
+        let start = ffi::sexp_unbox_fixnum(start_sexp) as usize;
+        let end = ffi::sexp_unbox_fixnum(end_sexp) as usize;
+        let len = end - start;
+
+        let store_ptr = PORT_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            return ffi::sexp_make_fixnum(0);
+        }
+        let store = &*store_ptr;
+        let mut store_ref = store.borrow_mut();
+        let writer = match store_ref.get_writer(port_id) {
+            Some(w) => w,
+            None => return ffi::sexp_make_fixnum(0),
+        };
+
+        let buf_data = ffi::sexp_string_data(buf_sexp) as *const u8;
+        let slice = std::slice::from_raw_parts(buf_data.add(start), len);
+        match writer.write(slice) {
+            Ok(n) => ffi::sexp_make_fixnum(n as ffi::sexp_sint_t),
+            Err(_) => ffi::sexp_make_fixnum(0),
+        }
+    }
+}
+
+/// extern "C" wrapper for `(tein-reader-set! char proc)`.
+///
+/// registers a reader dispatch handler for `#char` syntax. rejects reserved
+/// r7rs characters with a descriptive error.
+unsafe extern "C" fn reader_set_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // args is a list: (char proc)
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "set-reader!: expected (set-reader! char proc)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let ch_sexp = ffi::sexp_car(args);
+        let rest = ffi::sexp_cdr(args);
+        if ffi::sexp_nullp(rest) != 0 {
+            let msg = "set-reader!: expected (set-reader! char proc)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let proc_sexp = ffi::sexp_car(rest);
+
+        if ffi::sexp_charp(ch_sexp) == 0 {
+            let msg = "set-reader!: first argument must be a character";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        let c = ffi::sexp_unbox_character(ch_sexp);
+        let result = ffi::reader_dispatch_set(c, proc_sexp);
+        match result {
+            0 => ffi::get_void(),
+            -1 => {
+                let ch = char::from(c as u8);
+                let msg = format!(
+                    "reader dispatch #{} is reserved by r7rs and cannot be overridden",
+                    ch
+                );
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+            _ => {
+                let msg = "set-reader!: character out of ASCII range";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// extern "C" wrapper for `(tein-reader-unset! char)`.
+///
+/// removes a reader dispatch handler for `#char` syntax.
+unsafe extern "C" fn reader_unset_wrapper(
+    _ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let ch_sexp = ffi::sexp_car(args);
+        if ffi::sexp_charp(ch_sexp) == 0 {
+            return ffi::get_void();
+        }
+        let c = ffi::sexp_unbox_character(ch_sexp);
+        ffi::reader_dispatch_unset(c);
+        ffi::get_void()
+    }
+}
+
+/// extern "C" wrapper for `(tein-reader-dispatch-chars)`.
+///
+/// returns a list of characters with active dispatch handlers.
+unsafe extern "C" fn reader_chars_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe { ffi::reader_dispatch_chars(ctx) }
 }
 
 /// the 4 file-opening primitives we wrap with policy checks
@@ -723,14 +929,25 @@ impl ContextBuilder {
                 }
             }
 
-            Ok(Context {
+            let context = Context {
                 ctx,
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
                 has_module_policy,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
-            })
+                port_store: RefCell::new(PortStore::new()),
+                has_port_protocol: Cell::new(false),
+            };
+
+            // reader dispatch native fns are always registered for standard env
+            // contexts — cheap (3 fn registrations) and needed before any
+            // (import (tein reader)) can work.
+            if self.standard_env {
+                context.register_reader_protocol()?;
+            }
+
+            Ok(context)
         }
     }
 
@@ -783,6 +1000,10 @@ pub struct Context {
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
     has_foreign_protocol: Cell<bool>,
+    /// per-context store for custom port backing objects (Read/Write impls)
+    port_store: RefCell<PortStore>,
+    /// whether port protocol dispatch functions are registered
+    has_port_protocol: Cell<bool>,
 }
 
 impl Context {
@@ -870,10 +1091,12 @@ impl Context {
         let c_str = CString::new(code)
             .map_err(|_| Error::EvalError("code contains null bytes".to_string()))?;
 
-        // set foreign store pointer so dispatch wrappers can access it.
-        // the guard clears it on all exit paths (early returns, `?`, panic).
+        // set store pointers so dispatch wrappers and port trampolines can
+        // access them. guards clear on all exit paths (early returns, `?`, panic).
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
+        let _port_guard = PortStoreGuard;
         self.arm_fuel();
 
         unsafe {
@@ -1137,6 +1360,270 @@ impl Context {
         }))
     }
 
+    /// register the custom port protocol dispatch functions.
+    ///
+    /// called automatically by `open_input_port`/`open_output_port` on first use.
+    fn register_port_protocol(&self) -> Result<()> {
+        self.define_fn_variadic("tein-port-read", port_read_trampoline)?;
+        self.define_fn_variadic("tein-port-write", port_write_trampoline)?;
+        Ok(())
+    }
+
+    /// register native fns for reader dispatch protocol.
+    ///
+    /// called automatically by `build()` for standard env contexts. the native
+    /// fns (`tein-reader-set!` etc.) are used by the `(tein reader)` VFS module
+    /// to provide the public API (`set-reader!`, `unset-reader!`, etc.).
+    fn register_reader_protocol(&self) -> Result<()> {
+        self.define_fn_variadic("set-reader!", reader_set_wrapper)?;
+        self.define_fn_variadic("unset-reader!", reader_unset_wrapper)?;
+        self.define_fn_variadic("reader-dispatch-chars", reader_chars_wrapper)?;
+        Ok(())
+    }
+
+    /// register a reader dispatch handler for `#ch` syntax.
+    ///
+    /// the handler must be a scheme procedure taking one argument (the input
+    /// port) and returning a datum. reserved r7rs characters (`#t`, `#f`,
+    /// `#\\`, `#(`, numeric prefixes, etc.) cannot be overridden.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let handler = ctx.evaluate("(lambda (port) 42)")?;
+    /// ctx.register_reader('j', &handler)?;
+    /// assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_reader(&self, ch: char, handler: &Value) -> Result<()> {
+        let raw_proc = handler
+            .as_procedure()
+            .ok_or_else(|| Error::TypeError("handler must be a procedure".into()))?;
+        let c = ch as std::ffi::c_int;
+        unsafe {
+            let result = ffi::reader_dispatch_set(c, raw_proc);
+            match result {
+                0 => Ok(()),
+                -1 => Err(Error::EvalError(format!(
+                    "reader dispatch #{} is reserved by r7rs and cannot be overridden",
+                    ch
+                ))),
+                _ => Err(Error::EvalError("character out of ASCII range".into())),
+            }
+        }
+    }
+
+    /// wrap a rust `Read` as a scheme input port.
+    ///
+    /// returns a `Value::Port` that scheme code can pass to `read`,
+    /// `read-char`, `read-line`, etc. the backing `Read` lives in the
+    /// per-context `PortStore` until the context is dropped.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_input_port(std::io::Cursor::new(b"42"))?;
+    /// assert!(port.is_port());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn open_input_port(&self, reader: impl std::io::Read + 'static) -> Result<Value> {
+        if !self.has_port_protocol.get() {
+            self.register_port_protocol()?;
+            self.has_port_protocol.set(true);
+        }
+
+        let port_id = self.port_store.borrow_mut().insert_reader(Box::new(reader));
+
+        // create scheme closure capturing port ID
+        let closure_code = format!(
+            "(lambda (buf start end) (tein-port-read {} buf start end))",
+            port_id
+        );
+
+        // need PORT_STORE_PTR set for the evaluate call
+        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
+        let _guard = PortStoreGuard;
+
+        let read_proc_val = self.evaluate(&closure_code)?;
+        let raw_proc = read_proc_val
+            .as_procedure()
+            .ok_or_else(|| Error::EvalError("failed to create port read closure".into()))?;
+
+        unsafe {
+            let port = ffi::make_custom_input_port(self.ctx, raw_proc);
+            if ffi::sexp_exceptionp(port) != 0 {
+                return Err(Error::EvalError(
+                    "failed to create custom input port".into(),
+                ));
+            }
+            Value::from_raw(self.ctx, port)
+        }
+    }
+
+    /// wrap a rust `Write` as a scheme output port.
+    ///
+    /// returns a `Value::Port` that scheme code can pass to `write`,
+    /// `display`, `write-char`, etc. the backing `Write` lives in the
+    /// per-context `PortStore` until the context is dropped.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    /// impl std::io::Write for SharedWriter {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.lock().unwrap().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_output_port(SharedWriter(buf.clone()))?;
+    /// assert!(port.is_port());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn open_output_port(&self, writer: impl std::io::Write + 'static) -> Result<Value> {
+        if !self.has_port_protocol.get() {
+            self.register_port_protocol()?;
+            self.has_port_protocol.set(true);
+        }
+
+        let port_id = self.port_store.borrow_mut().insert_writer(Box::new(writer));
+
+        let closure_code = format!(
+            "(lambda (buf start end) (tein-port-write {} buf start end))",
+            port_id
+        );
+
+        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
+        let _guard = PortStoreGuard;
+
+        let write_proc_val = self.evaluate(&closure_code)?;
+        let raw_proc = write_proc_val
+            .as_procedure()
+            .ok_or_else(|| Error::EvalError("failed to create port write closure".into()))?;
+
+        unsafe {
+            let port = ffi::make_custom_output_port(self.ctx, raw_proc);
+            if ffi::sexp_exceptionp(port) != 0 {
+                return Err(Error::EvalError(
+                    "failed to create custom output port".into(),
+                ));
+            }
+            Value::from_raw(self.ctx, port)
+        }
+    }
+
+    /// read one s-expression from a port.
+    ///
+    /// returns the parsed but unevaluated expression.
+    /// returns `Value::Unspecified` at end-of-input (EOF).
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_input_port(std::io::Cursor::new(b"42"))?;
+    /// let val = ctx.read(&port)?;
+    /// assert_eq!(val, Value::Integer(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn read(&self, port: &Value) -> Result<Value> {
+        let raw_port = port
+            .as_port()
+            .ok_or_else(|| Error::TypeError(format!("expected port, got {}", port)))?;
+
+        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
+        let _port_guard = PortStoreGuard;
+        FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+        let _foreign_guard = ForeignStoreGuard;
+
+        unsafe {
+            let result = ffi::sexp_read(self.ctx, raw_port);
+            if ffi::sexp_eofp(result) != 0 {
+                return Ok(Value::Unspecified);
+            }
+            if ffi::sexp_exceptionp(result) != 0 {
+                return Value::from_raw(self.ctx, result);
+            }
+            Value::from_raw(self.ctx, result)
+        }
+    }
+
+    /// read and evaluate all expressions from a port.
+    ///
+    /// reads s-expressions one at a time, evaluating each in sequence.
+    /// returns the result of the last expression evaluated, or
+    /// `Value::Unspecified` if the port was empty.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_input_port(std::io::Cursor::new(b"(define x 10) (+ x 5)"))?;
+    /// let result = ctx.evaluate_port(&port)?;
+    /// assert_eq!(result, Value::Integer(15));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn evaluate_port(&self, port: &Value) -> Result<Value> {
+        let raw_port = port
+            .as_port()
+            .ok_or_else(|| Error::TypeError(format!("expected port, got {}", port)))?;
+
+        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
+        let _port_guard = PortStoreGuard;
+        FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+        let _foreign_guard = ForeignStoreGuard;
+        self.arm_fuel();
+
+        unsafe {
+            let env = ffi::sexp_context_env(self.ctx);
+            let mut last = Value::Unspecified;
+
+            loop {
+                let expr = ffi::sexp_read(self.ctx, raw_port);
+                if ffi::sexp_eofp(expr) != 0 {
+                    break;
+                }
+                if ffi::sexp_exceptionp(expr) != 0 {
+                    return Value::from_raw(self.ctx, expr);
+                }
+                let result = ffi::sexp_evaluate(self.ctx, expr, env);
+                self.check_fuel()?;
+                if ffi::sexp_exceptionp(result) != 0 {
+                    return Value::from_raw(self.ctx, result);
+                }
+                last = Value::from_raw(self.ctx, result)?;
+            }
+            Ok(last)
+        }
+    }
+
     /// register the foreign object protocol dispatch functions.
     ///
     /// called automatically by `register_foreign_type` on first use.
@@ -1204,6 +1691,8 @@ impl Context {
 
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
+        let _port_guard = PortStoreGuard;
         self.arm_fuel();
 
         unsafe {
@@ -1262,6 +1751,10 @@ impl Drop for Context {
                 }
             });
         }
+
+        // clear reader dispatch table so the next context on this thread
+        // starts with a clean slate (dispatch state is thread-local in C)
+        unsafe { ffi::reader_dispatch_clear() };
 
         unsafe {
             if !self.ctx.is_null() {
@@ -4058,5 +4551,258 @@ mod tests {
             .unwrap();
         drop(ctx);
         // no panic, no leaked thread — success
+    }
+
+    // --- custom ports ---
+
+    #[test]
+    fn test_open_input_port_basic() {
+        let ctx = Context::new_standard().expect("context");
+        let reader = std::io::Cursor::new(b"(+ 1 2)");
+        let port = ctx.open_input_port(reader);
+        assert!(port.is_ok(), "open_input_port should succeed");
+        assert!(port.unwrap().is_port(), "should return a Port value");
+    }
+
+    #[test]
+    fn test_read_from_custom_port() {
+        let ctx = Context::new_standard().expect("context");
+        let reader = std::io::Cursor::new(b"42");
+        let port = ctx.open_input_port(reader).expect("open port");
+        let val = ctx.read(&port).expect("read");
+        assert_eq!(val, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_evaluate_port_single() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"(+ 1 2)"))
+            .expect("port");
+        let result = ctx.evaluate_port(&port).expect("eval");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_evaluate_port_multiple() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"(define x 10) (+ x 5)"))
+            .expect("port");
+        let result = ctx.evaluate_port(&port).expect("eval");
+        assert_eq!(result, Value::Integer(15));
+    }
+
+    #[test]
+    fn test_evaluate_port_empty() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b""))
+            .expect("port");
+        let result = ctx.evaluate_port(&port).expect("eval");
+        assert_eq!(result, Value::Unspecified);
+    }
+
+    #[test]
+    fn test_output_port_write() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("port");
+
+        ctx.call(
+            &ctx.evaluate("display").expect("display"),
+            &[Value::String("hello".into()), port.clone()],
+        )
+        .expect("display call");
+
+        // flush to ensure buffered output is written to the custom port.
+        // chibi's primitive is flush-output; flush-output-port is in (scheme extras).
+        ctx.call(&ctx.evaluate("flush-output").expect("flush"), &[port])
+            .expect("flush");
+
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"hello");
+    }
+
+    #[test]
+    fn test_port_read_multiple_sexps() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"1 2 3"))
+            .expect("port");
+        assert_eq!(ctx.read(&port).unwrap(), Value::Integer(1));
+        assert_eq!(ctx.read(&port).unwrap(), Value::Integer(2));
+        assert_eq!(ctx.read(&port).unwrap(), Value::Integer(3));
+        assert_eq!(ctx.read(&port).unwrap(), Value::Unspecified); // EOF
+    }
+
+    #[test]
+    fn test_port_recognized_by_scheme() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"42"))
+            .expect("port");
+        let is_port = ctx
+            .call(&ctx.evaluate("input-port?").expect("fn"), &[port])
+            .expect("call");
+        assert_eq!(is_port, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_port_scheme_read() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"(list 1 2 3)"))
+            .expect("port");
+        let read_fn = ctx.evaluate("read").expect("read fn");
+        let expr = ctx
+            .call(&read_fn, std::slice::from_ref(&port))
+            .expect("read");
+        // expr is unevaluated: (list 1 2 3)
+        let result = ctx
+            .call(&ctx.evaluate("eval").expect("eval"), &[expr])
+            .expect("eval");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3)
+            ])
+        );
+    }
+
+    // --- reader dispatch tests ---
+
+    #[test]
+    fn test_reader_dispatch_basic() {
+        let ctx = Context::new_standard().expect("context");
+        // reader dispatch fns are registered in standard env by build(),
+        // available directly or via (import (tein reader)).
+        // handler returns a self-evaluating value (number).
+        ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
+            .expect("set-reader");
+        let result = ctx.evaluate("#j").expect("eval #j");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_reader_dispatch_reserved_char() {
+        let ctx = Context::new_standard().expect("context");
+        let result = ctx.evaluate("(set-reader! #\\t (lambda (port) 42))");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("reserved"), "expected 'reserved' in: {}", msg);
+    }
+
+    #[test]
+    fn test_reader_dispatch_handler_reads_port() {
+        // handler reads further from the input port (the #j syntax consumes
+        // more input). use read() to inspect the raw datum — the handler
+        // returns a list, which evaluate() would try to call as a procedure.
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(set-reader! #\\j (lambda (port) (list 'json (read port))))")
+            .expect("set");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"#j(1 2 3)"))
+            .expect("port");
+        let result = ctx.read(&port).expect("read");
+        let list = result.as_list().expect("list");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], Value::Symbol("json".into()));
+    }
+
+    #[test]
+    fn test_reader_dispatch_unset() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
+            .expect("set");
+        assert_eq!(ctx.evaluate("#j").unwrap(), Value::Integer(42));
+        ctx.evaluate("(unset-reader! #\\j)").expect("unset");
+        assert!(ctx.evaluate("#j").is_err());
+    }
+
+    #[test]
+    fn test_reader_dispatch_chars_introspection() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
+            .expect("set j");
+        ctx.evaluate("(set-reader! #\\p (lambda (port) 42))")
+            .expect("set p");
+        let chars = ctx.evaluate("(reader-dispatch-chars)").expect("chars");
+        let list = chars.as_list().expect("list");
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_reader_dispatch_multiple_chars() {
+        // handler reads further to distinguish sub-syntax.
+        // use read() to inspect raw datums.
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate(
+            "(set-reader! #\\j
+               (lambda (port)
+                 (let ((next (read-char port)))
+                   (cond
+                     ((char=? next #\\s) (list 'json (read port)))
+                     ((char=? next #\\w) (list 'jwt (read port)))
+                     (else (error \"unknown #j sub-dispatch\" next))))))",
+        )
+        .expect("set");
+
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"#js(1 2 3)"))
+            .expect("port");
+        let json = ctx.read(&port).expect("json");
+        assert_eq!(json.as_list().unwrap()[0], Value::Symbol("json".into()));
+
+        let port2 = ctx
+            .open_input_port(std::io::Cursor::new(b"#jw\"token\""))
+            .expect("port2");
+        let jwt = ctx.read(&port2).expect("jwt");
+        assert_eq!(jwt.as_list().unwrap()[0], Value::Symbol("jwt".into()));
+    }
+
+    #[test]
+    fn test_reader_dispatch_via_import() {
+        // verify (import (tein reader)) works for sandboxed contexts
+        // that need explicit import
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
+        ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
+            .expect("set-reader");
+        assert_eq!(ctx.evaluate("#j").unwrap(), Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_reader_from_rust() {
+        let ctx = Context::new_standard().expect("context");
+        let handler = ctx.evaluate("(lambda (port) 42)").expect("handler");
+        ctx.register_reader('j', &handler).expect("register");
+        let result = ctx.evaluate("#j").expect("eval");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_reader_reserved_from_rust() {
+        let ctx = Context::new_standard().expect("context");
+        let handler = ctx.evaluate("(lambda (port) 42)").expect("handler");
+        let err = ctx.register_reader('t', &handler).unwrap_err();
+        assert!(format!("{}", err).contains("reserved"));
     }
 }

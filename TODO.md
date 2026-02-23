@@ -78,7 +78,16 @@
 - [ ] **WASM target** — chibi compiles via emscripten
 - [x] **serde data format** — s-expression ↔ rust structs via tein-sexp (hardened: alist fix, Sexp value type, IO API, attribute compat)
 - [ ] **macro expansion hooks**
-- [ ] **custom reader extensions**
+- [x] **custom ports** — rust `Read`/`Write` as scheme input/output ports
+  - `open_input_port`/`open_output_port` → `PortStore` + thread-local trampoline
+  - `read()` for single s-expression, `evaluate_port()` for read+eval loop
+  - chibi's `fopencookie` + `sexp_cookie_reader`/`writer` callback protocol
+- [x] **custom reader extensions**
+  - `#x` hash dispatch via C-level thread-local table + patched sexp.c reader
+  - `set-reader!`/`unset-reader!`/`reader-dispatch-chars` in standard env
+  - `(tein reader)` VFS module for idiomatic imports
+  - `Context::register_reader(char, &Value)` rust convenience API
+  - reserved r7rs char protection, dispatch table cleared on context drop
 
 ### milestone 6 — foreign type protocol
 
