@@ -74,7 +74,7 @@
 
 ### milestone 5 — reach
 
-- [ ] **REPL example** — interactive scheme session with rustyline
+- [x] **REPL example** — interactive scheme session with rustyline
 - [ ] **WASM target** — chibi compiles via emscripten
 - [ ] **serde data format** — s-expression ↔ rust structs via tein-sexp
 - [ ] **macro expansion hooks**
