@@ -171,11 +171,11 @@ unsafe extern "C" fn foreign_type_methods_wrapper(
         }
         let ptr = ffi::sexp_string_data(name_sexp);
         let len = ffi::sexp_string_size(name_sexp) as usize;
-        let type_name =
-            match std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len)) {
-                Ok(s) => s,
-                Err(_) => return ffi::get_null(),
-            };
+        let type_name = match std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+        {
+            Ok(s) => s,
+            Err(_) => return ffi::get_null(),
+        };
         let names = match store.borrow().method_names(type_name) {
             Some(n) => n,
             None => return ffi::get_null(),
@@ -1090,9 +1090,9 @@ impl Context {
         &self,
         value: &Value,
     ) -> Result<std::cell::Ref<'_, T>> {
-        let (id, actual_type) = value.as_foreign().ok_or_else(|| {
-            Error::TypeError(format!("expected foreign object, got {}", value))
-        })?;
+        let (id, actual_type) = value
+            .as_foreign()
+            .ok_or_else(|| Error::TypeError(format!("expected foreign object, got {}", value)))?;
         if actual_type != T::type_name() {
             return Err(Error::TypeError(format!(
                 "expected {}, got {}",
@@ -1104,8 +1104,7 @@ impl Context {
         if store.get(id).is_none() {
             return Err(Error::EvalError(format!(
                 "stale foreign handle: {} ({})",
-                id,
-                actual_type
+                id, actual_type
             )));
         }
         Ok(std::cell::Ref::map(store, |s| {
@@ -3513,11 +3512,7 @@ mod tests {
                 if store_ptr.is_null() {
                     let msg = "make-test-counter: no store";
                     let c_msg = CString::new(msg).unwrap_or_default();
-                    return ffi::make_error(
-                        ctx_ptr,
-                        c_msg.as_ptr(),
-                        msg.len() as ffi::sexp_sint_t,
-                    );
+                    return ffi::make_error(ctx_ptr, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
                 }
                 let id = (*store_ptr).borrow_mut().insert(TestCounter { n: 0 });
                 let val = Value::Foreign {
@@ -3730,9 +3725,7 @@ mod tests {
         let ctx = Context::new_standard().expect("context");
         setup_test_counter(&ctx);
 
-        let result = ctx
-            .evaluate("(test-counter? 42)")
-            .expect("predicate false");
+        let result = ctx.evaluate("(test-counter? 42)").expect("predicate false");
         assert_eq!(result, Value::Boolean(false));
     }
 
@@ -3786,15 +3779,11 @@ mod tests {
             .evaluate(
                 "(let ((c (make-test-counter)))
                (test-counter-increment c)
-               (test-counter-get c))"
-            ,
+               (test-counter-get c))",
             )
             .expect("sandboxed foreign call");
         assert_eq!(result, Value::Integer(1));
     }
-
-
-
 
     fn test_foreign_cleanup_on_drop() {
         use std::sync::Arc;

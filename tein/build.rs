@@ -65,7 +65,6 @@ const VFS_FILES: &[&str] = &[
     "lib/srfi/69/interface.scm",
     "lib/srfi/151.sld",
     "lib/srfi/151/bitwise.scm",
-
     // tein foreign type protocol
     "lib/tein/foreign.sld",
     "lib/tein/foreign.scm",

@@ -239,3 +239,70 @@ ctx.define_fn_variadic("my-fn", my_fn)?;
 - lowercase style, casual but precise
 - norse mythology naming theme
 - see TODO.md for roadmap
+
+## foreign type protocol
+
+**milestone 6** — expose rust types as first-class scheme objects with method dispatch,
+introspection, and LLM-friendly error messages. zero C changes.
+
+### architecture
+
+foreign objects are tagged lists `(__tein-foreign "type-name" handle-id)` stored in a
+per-context `ForeignStore` keyed by `u64` handle IDs. scheme sees them as opaque values
+manipulated via the `(tein foreign)` protocol. rust data never crosses the ffi boundary.
+
+```
+ForeignStore (per Context)
+  types: HashMap<&'static str, TypeEntry { methods: &'static [(&'static str, MethodFn)] }>
+  instances: HashMap<u64, ForeignObject { data: Box<dyn Any>, type_name: &'static str }>
+  next_id: u64  (monotonically increasing, starts at 1)
+```
+
+### implementing ForeignType
+
+```rust
+use tein::{ForeignType, MethodFn, Value};
+
+struct MyType { value: i64 }
+
+impl ForeignType for MyType {
+    fn type_name() -> &'static str { "my-type" }
+    fn methods() -> &'static [(&'static str, MethodFn)] {
+        &[
+            ("get", |obj, _ctx, _args| {
+                let t = obj.downcast_ref::<MyType>().unwrap();
+                Ok(Value::Integer(t.value))
+            }),
+        ]
+    }
+}
+```
+
+### registration and use
+
+```rust
+ctx.register_foreign_type::<MyType>()?;
+// scheme now has: my-type?, my-type-get, foreign-call, foreign-types, ...
+
+let val = ctx.foreign_value(MyType { value: 42 })?;
+let result = ctx.call(&ctx.evaluate("my-type-get")?, &[val])?;
+// result == Value::Integer(42)
+```
+
+### dispatch chain
+
+scheme `(my-type-get obj)` → convenience lambda → `(apply foreign-call obj 'get args)` →
+`foreign_call_wrapper` (extern "C") → reads `FOREIGN_STORE_PTR` thread-local →
+`dispatch_foreign_call` → looks up method → calls `MethodFn(&mut dyn Any, ...)` → `Value`
+
+the `FOREIGN_STORE_PTR` thread-local is set by `evaluate()`/`call()` via `ForeignStoreGuard`
+RAII, ensuring the pointer is always valid during scheme execution and cleared on all exit paths.
+
+### scheme-side protocol
+
+`foreign.scm` defines predicates/accessors using only primitives always available:
+- `foreign?` — uses `pair?`, `eq?`, `string?`, `fixnum?` (not `integer?` — not a chibi primitive)
+- `foreign-type` — returns the type-name string
+- `foreign-handle-id` — returns the handle ID fixnum
+
+uses `car`/`cdr` chains instead of `cadr`/`caddr` (those require `scheme/cxr`).

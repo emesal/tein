@@ -233,20 +233,19 @@ impl Value {
                         if ffi::sexp_pairp(rest) != 0 {
                             let name_sexp = ffi::sexp_car(rest);
                             let id_rest = ffi::sexp_cdr(rest);
-                            if ffi::sexp_stringp(name_sexp) != 0
-                                && ffi::sexp_pairp(id_rest) != 0
-                            {
+                            if ffi::sexp_stringp(name_sexp) != 0 && ffi::sexp_pairp(id_rest) != 0 {
                                 let id_sexp = ffi::sexp_car(id_rest);
                                 if ffi::sexp_integerp(id_sexp) != 0 {
                                     let name_ptr = ffi::sexp_string_data(name_sexp);
                                     let name_len = ffi::sexp_string_size(name_sexp) as usize;
-                                    let name_bytes = std::slice::from_raw_parts(
-                                        name_ptr as *const u8,
-                                        name_len,
-                                    );
+                                    let name_bytes =
+                                        std::slice::from_raw_parts(name_ptr as *const u8, name_len);
                                     let type_name = String::from_utf8(name_bytes.to_vec())?;
                                     let handle_id = ffi::sexp_unbox_fixnum(id_sexp) as u64;
-                                    return Ok(Value::Foreign { handle_id, type_name });
+                                    return Ok(Value::Foreign {
+                                        handle_id,
+                                        type_name,
+                                    });
                                 }
                             }
                         }
@@ -475,15 +474,24 @@ impl Value {
                     "cannot convert Other({}) to raw sexp",
                     desc,
                 ))),
-                Value::Foreign { handle_id, type_name } => {
+                Value::Foreign {
+                    handle_id,
+                    type_name,
+                } => {
                     // build tagged list: (__tein-foreign "type-name" handle-id)
                     // scheme predicates and accessors in (tein foreign) recognise this shape.
-                    let name_c = std::ffi::CString::new(type_name.as_str())
-                        .map_err(|_| Error::TypeError("type name contains null bytes".to_string()))?;
-                    let name_sexp = ffi::sexp_c_str(ctx, name_c.as_ptr(), type_name.len() as ffi::sexp_sint_t);
+                    let name_c = std::ffi::CString::new(type_name.as_str()).map_err(|_| {
+                        Error::TypeError("type name contains null bytes".to_string())
+                    })?;
+                    let name_sexp =
+                        ffi::sexp_c_str(ctx, name_c.as_ptr(), type_name.len() as ffi::sexp_sint_t);
                     let _name_root = ffi::GcRoot::new(ctx, name_sexp);
                     let id_sexp = ffi::sexp_make_fixnum(*handle_id as ffi::sexp_sint_t);
-                    let tag = ffi::sexp_intern(ctx, b"__tein-foreign\0".as_ptr() as *const std::os::raw::c_char, 14);
+                    let tag = ffi::sexp_intern(
+                        ctx,
+                        b"__tein-foreign\0".as_ptr() as *const std::os::raw::c_char,
+                        14,
+                    );
                     let _tag_root = ffi::GcRoot::new(ctx, tag);
                     // cons from right to left: tag . (name . (id . ()))
                     let tail = ffi::sexp_cons(ctx, id_sexp, ffi::get_null());
@@ -613,7 +621,10 @@ impl Value {
     /// extract foreign object handle ID and type name
     pub fn as_foreign(&self) -> Option<(u64, &str)> {
         match self {
-            Value::Foreign { handle_id, type_name } => Some((*handle_id, type_name.as_str())),
+            Value::Foreign {
+                handle_id,
+                type_name,
+            } => Some((*handle_id, type_name.as_str())),
             _ => None,
         }
     }
@@ -688,8 +699,14 @@ impl PartialEq for Value {
             (Value::Procedure(a), Value::Procedure(b)) => std::ptr::eq(*a, *b),
             (Value::Other(a), Value::Other(b)) => a == b,
             (
-                Value::Foreign { handle_id: a, type_name: ta },
-                Value::Foreign { handle_id: b, type_name: tb },
+                Value::Foreign {
+                    handle_id: a,
+                    type_name: ta,
+                },
+                Value::Foreign {
+                    handle_id: b,
+                    type_name: tb,
+                },
             ) => a == b && ta == tb,
             _ => false,
         }
@@ -765,7 +782,10 @@ impl fmt::Display for Value {
             Value::Unspecified => write!(f, "#<unspecified>"),
             Value::Procedure(_) => write!(f, "#<procedure>"),
             Value::Other(s) => write!(f, "#<{}>", s),
-            Value::Foreign { handle_id, type_name } => {
+            Value::Foreign {
+                handle_id,
+                type_name,
+            } => {
                 write!(f, "#<foreign {}:{}>", type_name, handle_id)
             }
         }
