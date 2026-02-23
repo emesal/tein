@@ -22,12 +22,14 @@
 mod context;
 mod error;
 mod ffi;
+pub mod foreign;
 pub mod sandbox;
 mod timeout;
 mod value;
 
 pub use context::{Context, ContextBuilder};
 pub use error::{Error, Result};
+pub use foreign::{ForeignType, MethodContext, MethodFn};
 pub use timeout::TimeoutContext;
 pub use value::Value;
 
