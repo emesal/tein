@@ -1117,14 +1117,35 @@ impl Context {
     /// register the foreign object protocol dispatch functions.
     ///
     /// called automatically by `register_foreign_type` on first use.
-    /// wires up `foreign-call`, `foreign-methods`, `foreign-types`,
-    /// `foreign-type-methods` as native variadic functions in the current env.
-    /// these are the rust-side implementations that back the `(tein foreign)` exports.
+    /// registers both the rust-side dispatch functions and the pure-scheme
+    /// predicates/accessors from `(tein foreign)`, making them available in
+    /// the current env without requiring an explicit `(import (tein foreign))`.
     fn register_foreign_protocol(&self) -> Result<()> {
+        // rust-side dispatch and introspection
         self.define_fn_variadic("foreign-call", foreign_call_wrapper)?;
         self.define_fn_variadic("foreign-methods", foreign_methods_wrapper)?;
         self.define_fn_variadic("foreign-types", foreign_types_wrapper)?;
         self.define_fn_variadic("foreign-type-methods", foreign_type_methods_wrapper)?;
+
+        // pure-scheme predicates and accessors (mirrors foreign.scm)
+        // these must be defined before any convenience procs that reference them.
+        // uses only car/cdr (always available) rather than cadr/caddr (require scheme/cxr).
+        self.evaluate(
+            "(define (foreign? x)
+               (and (pair? x)
+                    (eq? (car x) '__tein-foreign)
+                    (pair? (cdr x))
+                    (string? (car (cdr x)))
+                    (pair? (cdr (cdr x)))
+                    (integer? (car (cdr (cdr x))))))
+             (define (foreign-type x)
+               (if (foreign? x) (car (cdr x))
+                   (error \"foreign-type: expected foreign object, got\" x)))
+             (define (foreign-handle-id x)
+               (if (foreign? x) (car (cdr (cdr x)))
+                   (error \"foreign-handle-id: expected foreign object, got\" x)))",
+        )?;
+
         Ok(())
     }
 
@@ -3438,5 +3459,313 @@ mod tests {
             result,
             Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)))
         );
+    }
+
+    // --- foreign type protocol ---
+
+    use crate::foreign::{ForeignType, MethodFn};
+
+    struct TestCounter {
+        n: i64,
+    }
+
+    impl ForeignType for TestCounter {
+        fn type_name() -> &'static str {
+            "test-counter"
+        }
+        fn methods() -> &'static [(&'static str, MethodFn)] {
+            &[
+                ("increment", |obj, _ctx, _args| {
+                    let c = obj.downcast_mut::<TestCounter>().unwrap();
+                    c.n += 1;
+                    Ok(Value::Integer(c.n))
+                }),
+                ("get", |obj, _ctx, _args| {
+                    let c = obj.downcast_ref::<TestCounter>().unwrap();
+                    Ok(Value::Integer(c.n))
+                }),
+                ("reset", |obj, _ctx, _args| {
+                    let c = obj.downcast_mut::<TestCounter>().unwrap();
+                    c.n = 0;
+                    Ok(Value::Unspecified)
+                }),
+            ]
+        }
+    }
+
+    /// register TestCounter and a scheme-callable constructor (make-test-counter)
+    fn setup_test_counter(ctx: &Context) {
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("register TestCounter");
+
+        // constructor function — accesses ForeignStore via the thread-local
+        // set by evaluate/call, following the same pattern as IO wrappers
+        unsafe extern "C" fn make_test_counter(
+            ctx_ptr: ffi::sexp,
+            _self: ffi::sexp,
+            _n: ffi::sexp_sint_t,
+            _args: ffi::sexp,
+        ) -> ffi::sexp {
+            unsafe {
+                let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+                if store_ptr.is_null() {
+                    let msg = "make-test-counter: no store";
+                    let c_msg = CString::new(msg).unwrap_or_default();
+                    return ffi::make_error(
+                        ctx_ptr,
+                        c_msg.as_ptr(),
+                        msg.len() as ffi::sexp_sint_t,
+                    );
+                }
+                let id = (*store_ptr).borrow_mut().insert(TestCounter { n: 0 });
+                let val = Value::Foreign {
+                    handle_id: id,
+                    type_name: "test-counter".to_string(),
+                };
+                val.to_raw(ctx_ptr).unwrap_or_else(|_| ffi::get_void())
+            }
+        }
+
+        ctx.define_fn_variadic("make-test-counter", make_test_counter)
+            .expect("define make-test-counter");
+    }
+
+    // --- task 7: registration and round-trip ---
+
+    #[test]
+    fn test_foreign_type_register() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("register");
+        let types = ctx.evaluate("(foreign-types)").expect("foreign-types");
+        let list = types.as_list().expect("expected list");
+        assert!(
+            list.iter().any(|v| v.as_string() == Some("test-counter")),
+            "test-counter not in foreign-types: {:?}",
+            list
+        );
+    }
+
+    #[test]
+    fn test_foreign_value_roundtrip() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("register");
+
+        let val = ctx
+            .foreign_value(TestCounter { n: 42 })
+            .expect("create foreign value");
+        assert!(val.is_foreign());
+        assert_eq!(val.foreign_type_name(), Some("test-counter"));
+
+        // to_raw → from_raw round-trip
+        let raw = unsafe { val.to_raw(ctx.ctx_ptr()).unwrap() };
+        let back = unsafe { Value::from_raw(ctx.ctx_ptr(), raw).unwrap() };
+        assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_foreign_register_duplicate_error() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("first register");
+        let err = ctx.register_foreign_type::<TestCounter>().unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("already registered"),
+            "expected 'already registered', got: {}",
+            msg
+        );
+    }
+
+    // --- task 8: dispatch and error messages ---
+
+    #[test]
+    fn test_foreign_call_dispatch() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (test-counter-increment c)
+               (test-counter-increment c)
+               (test-counter-get c))",
+            )
+            .expect("dispatch");
+        assert_eq!(result, Value::Integer(2));
+    }
+
+    #[test]
+    fn test_foreign_call_universal_dispatch() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (foreign-call c 'increment)
+               (foreign-call c 'get))",
+            )
+            .expect("foreign-call dispatch");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_foreign_call_mutable_state() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (test-counter-increment c)
+               (test-counter-increment c)
+               (test-counter-reset c)
+               (test-counter-get c))",
+            )
+            .expect("mutable state");
+        assert_eq!(result, Value::Integer(0));
+    }
+
+    #[test]
+    fn test_foreign_call_wrong_method() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let err = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (foreign-call c 'nonexistent))",
+            )
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("no method 'nonexistent'"),
+            "expected method error, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("increment"),
+            "should list available methods, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_foreign_call_not_foreign() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let err = ctx.evaluate("(foreign-call 42 'get)").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("expected foreign object"),
+            "expected type error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_foreign_convenience_wrong_type() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let err = ctx.evaluate("(test-counter-get 42)").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("expected test-counter"),
+            "expected type error, got: {}",
+            msg
+        );
+    }
+
+    // --- task 9: introspection and predicates ---
+
+    #[test]
+    fn test_foreign_introspection_methods() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (foreign-methods c))")
+            .expect("foreign-methods");
+        let methods = result.as_list().expect("expected list");
+        let names: Vec<&str> = methods
+            .iter()
+            .filter_map(|v| v.as_symbol().or_else(|| v.as_string()))
+            .collect();
+        assert!(names.contains(&"increment"), "got: {:?}", names);
+        assert!(names.contains(&"get"), "got: {:?}", names);
+        assert!(names.contains(&"reset"), "got: {:?}", names);
+    }
+
+    #[test]
+    fn test_foreign_introspection_type_methods() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(foreign-type-methods \"test-counter\")")
+            .expect("foreign-type-methods");
+        let methods = result.as_list().expect("expected list");
+        assert_eq!(methods.len(), 3);
+    }
+
+    #[test]
+    fn test_foreign_predicate_true() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (test-counter? c))")
+            .expect("predicate true");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_foreign_predicate_false() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(test-counter? 42)")
+            .expect("predicate false");
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_foreign_display() {
+        let val = Value::Foreign {
+            handle_id: 7,
+            type_name: "http-client".to_string(),
+        };
+        assert_eq!(format!("{}", val), "#<foreign http-client:7>");
+    }
+
+    #[test]
+    fn test_foreign_type_accessor() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (foreign-type c))")
+            .expect("foreign-type accessor");
+        assert_eq!(result, Value::String("test-counter".to_string()));
+    }
+
+    #[test]
+    fn test_foreign_handle_id_accessor() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        // handle IDs start at 1, so the first created object has id >= 1
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (foreign-handle-id c))")
+            .expect("foreign-handle-id accessor");
+        match result {
+            Value::Integer(n) => assert!(n >= 1, "handle id should be >= 1, got {}", n),
+            other => panic!("expected integer handle id, got {}", other),
+        }
     }
 }
