@@ -813,6 +813,7 @@ mod tests {
         assert_eq!(from_str::<f64>("42").unwrap(), 42.0);
     }
 
+
     // --- Sexp as serde value type ---
 
     #[test]
