@@ -818,7 +818,10 @@ mod tests {
     #[test]
     fn sexp_as_deserialize_target() {
         let sexp: Sexp = from_str("(1 2 3)").unwrap();
-        assert_eq!(sexp, Sexp::list(vec![Sexp::integer(1), Sexp::integer(2), Sexp::integer(3)]));
+        assert_eq!(
+            sexp,
+            Sexp::list(vec![Sexp::integer(1), Sexp::integer(2), Sexp::integer(3)])
+        );
     }
 
     #[test]
@@ -939,7 +942,9 @@ mod tests {
             #[serde(rename = "full-name")]
             name: String,
         }
-        let r = Renamed { name: "alice".to_string() };
+        let r = Renamed {
+            name: "alice".to_string(),
+        };
         let text = crate::serde::to_string(&r).unwrap();
         assert!(text.contains("full-name"), "got: {text}");
         let restored: Renamed = from_str(&text).unwrap();
@@ -967,7 +972,10 @@ mod tests {
             #[serde(skip_serializing_if = "Option::is_none")]
             email: Option<String>,
         }
-        let s = Sparse { name: "alice".to_string(), email: None };
+        let s = Sparse {
+            name: "alice".to_string(),
+            email: None,
+        };
         let text = crate::serde::to_string(&s).unwrap();
         assert!(!text.contains("email"), "should skip None: {text}");
     }
@@ -984,7 +992,12 @@ mod tests {
             base: Base,
             age: i32,
         }
-        let e = Extended { base: Base { name: "alice".to_string() }, age: 30 };
+        let e = Extended {
+            base: Base {
+                name: "alice".to_string(),
+            },
+            age: 30,
+        };
         let text = crate::serde::to_string(&e).unwrap();
         let restored: Extended = from_str(&text).unwrap();
         assert_eq!(e, restored);

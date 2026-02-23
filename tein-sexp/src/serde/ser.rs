@@ -643,7 +643,10 @@ mod tests {
     #[test]
     fn serialize_u64_max_errors() {
         let result = crate::serde::to_sexp(&u64::MAX);
-        assert!(result.is_err(), "u64::MAX should error, not silently lose precision");
+        assert!(
+            result.is_err(),
+            "u64::MAX should error, not silently lose precision"
+        );
     }
 
     #[test]
