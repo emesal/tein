@@ -76,7 +76,7 @@
 
 - [x] **REPL example** — interactive scheme session with rustyline
 - [ ] **WASM target** — chibi compiles via emscripten
-- [ ] **serde data format** — s-expression ↔ rust structs via tein-sexp
+- [x] **serde data format** — s-expression ↔ rust structs via tein-sexp (hardened: alist fix, Sexp value type, IO API, attribute compat)
 - [ ] **macro expansion hooks**
 - [ ] **custom reader extensions**
 

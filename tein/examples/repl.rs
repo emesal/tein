@@ -1,5 +1,5 @@
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use tein::{Context, Value};
 
 /// compute net paren depth change for a line, skipping strings and comments.
@@ -72,7 +72,11 @@ fn main() {
     let mut depth = 0i32;
 
     loop {
-        let prompt = if buffer.is_empty() { "tein> " } else { "  ... " };
+        let prompt = if buffer.is_empty() {
+            "tein> "
+        } else {
+            "  ... "
+        };
 
         match rl.readline(prompt) {
             Ok(line) => {

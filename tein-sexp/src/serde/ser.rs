@@ -11,6 +11,15 @@ use crate::error::ParseError;
 use serde::ser;
 
 /// serialize a value to an s-expression AST node
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::to_sexp;
+///
+/// let sexp = to_sexp(&true).unwrap();
+/// assert_eq!(sexp.to_string(), "#t");
+/// ```
 pub fn to_sexp<T: ser::Serialize>(value: &T) -> Result<Sexp, ParseError> {
     value.serialize(Serializer)
 }
@@ -62,13 +71,26 @@ impl ser::Serializer for Serializer {
     }
 
     fn serialize_u64(self, v: u64) -> Result<Sexp, ParseError> {
-        // u64 may overflow i64
         if v <= i64::MAX as u64 {
             self.serialize_i64(v as i64)
         } else {
-            // fall back to float for very large u64
-            self.serialize_f64(v as f64)
+            // silent f64 truncation would corrupt data; explicit error is safer
+            Err(ParseError::no_span(format!(
+                "u64 value {v} exceeds i64::MAX and cannot be represented losslessly"
+            )))
         }
+    }
+
+    fn serialize_i128(self, _v: i128) -> Result<Sexp, ParseError> {
+        Err(ParseError::no_span(
+            "i128 cannot be represented in s-expressions (i64 max)",
+        ))
+    }
+
+    fn serialize_u128(self, _v: u128) -> Result<Sexp, ParseError> {
+        Err(ParseError::no_span(
+            "u128 cannot be represented in s-expressions (i64 max)",
+        ))
     }
 
     fn serialize_f32(self, v: f32) -> Result<Sexp, ParseError> {
@@ -570,5 +592,67 @@ mod tests {
     fn to_string_pretty_api() {
         let result = crate::serde::to_string_pretty(&vec![1, 2, 3]).unwrap();
         assert_eq!(result, "(1 2 3)"); // short enough to stay compact
+    }
+
+    // --- IO api ---
+
+    #[test]
+    fn from_reader_api() {
+        use std::io::Cursor;
+        let reader = Cursor::new(b"42");
+        let result: i32 = crate::serde::from_reader(reader).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn to_writer_api() {
+        let mut buf = Vec::new();
+        crate::serde::to_writer(&mut buf, &42).unwrap();
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), "42");
+    }
+
+    #[test]
+    fn to_writer_pretty_api() {
+        let mut buf = Vec::new();
+        crate::serde::to_writer_pretty(&mut buf, &vec![1, 2, 3]).unwrap();
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), "(1 2 3)");
+    }
+
+    // --- i128/u128 errors ---
+
+    #[test]
+    fn serialize_i128_error_message() {
+        let err = crate::serde::to_sexp(&42i128).unwrap_err();
+        assert!(
+            err.to_string().contains("i128"),
+            "error should mention i128: {err}"
+        );
+    }
+
+    #[test]
+    fn serialize_u128_error_message() {
+        let err = crate::serde::to_sexp(&42u128).unwrap_err();
+        assert!(
+            err.to_string().contains("u128"),
+            "error should mention u128: {err}"
+        );
+    }
+
+    // --- u64 overflow ---
+
+    #[test]
+    fn serialize_u64_max_errors() {
+        let result = crate::serde::to_sexp(&u64::MAX);
+        assert!(
+            result.is_err(),
+            "u64::MAX should error, not silently lose precision"
+        );
+    }
+
+    #[test]
+    fn serialize_u64_fits_i64() {
+        // values that fit in i64 should work fine
+        let sexp = crate::serde::to_sexp(&(i64::MAX as u64)).unwrap();
+        assert_eq!(sexp.to_string(), i64::MAX.to_string());
     }
 }

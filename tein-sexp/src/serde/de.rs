@@ -11,12 +11,31 @@ use serde::de;
 use std::fmt;
 
 /// deserialize a value from s-expression text
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::from_str;
+///
+/// let v: Vec<i32> = from_str("(1 2 3)").unwrap();
+/// assert_eq!(v, vec![1, 2, 3]);
+/// ```
 pub fn from_str<'de, T: de::Deserialize<'de>>(input: &str) -> Result<T, ParseError> {
     let sexp = parser::parse(input)?;
     from_sexp(&sexp)
 }
 
 /// deserialize a value from an [`Sexp`] node
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::{Sexp, serde::from_sexp};
+///
+/// let sexp = Sexp::integer(42);
+/// let n: i32 = from_sexp(&sexp).unwrap();
+/// assert_eq!(n, 42);
+/// ```
 pub fn from_sexp<'de, T: de::Deserialize<'de>>(sexp: &Sexp) -> Result<T, ParseError> {
     T::deserialize(SexpDeserializer { sexp })
 }
@@ -89,6 +108,10 @@ impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
         }
     }
 
+    fn deserialize_i128<V: de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, ParseError> {
+        Err(self.error("i128 cannot be deserialized from s-expressions (i64 max)"))
+    }
+
     fn deserialize_u8<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
         self.deserialize_u64(visitor)
     }
@@ -107,6 +130,10 @@ impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
             SexpKind::Integer(_) => Err(self.error("expected non-negative integer")),
             _ => Err(self.error("expected integer")),
         }
+    }
+
+    fn deserialize_u128<V: de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, ParseError> {
+        Err(self.error("u128 cannot be deserialized from s-expressions (i64 max)"))
     }
 
     fn deserialize_f32<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
@@ -387,17 +414,19 @@ fn alist_value(entry: &Sexp) -> Result<&Sexp, ParseError> {
     }
 }
 
-/// heuristic: check if a list looks like an alist (all dotted pairs with symbol keys)
+/// heuristic: check if a list looks like an alist (all dotted pairs with symbol or string keys)
+///
+/// accepts both symbol keys (e.g. from struct serialisation) and string keys (e.g. from
+/// `BTreeMap<String, V>`), so `deserialize_any` can detect both as maps rather than sequences.
 fn is_alist(items: &[Sexp]) -> bool {
     if items.is_empty() {
         return false;
     }
-    items.iter().all(|item| {
-        matches!(
-            &item.kind,
-            SexpKind::DottedList(keys, _) if keys.len() == 1
-                && matches!(&keys[0].kind, SexpKind::Symbol(_))
-        )
+    items.iter().all(|item| match &item.kind {
+        SexpKind::DottedList(keys, _) if keys.len() == 1 => {
+            matches!(&keys[0].kind, SexpKind::Symbol(_) | SexpKind::String(_))
+        }
+        _ => false,
     })
 }
 
@@ -782,5 +811,324 @@ mod tests {
     fn integer_to_float_coercion() {
         // when deserialize_f64 is called, integers should coerce
         assert_eq!(from_str::<f64>("42").unwrap(), 42.0);
+    }
+
+    // --- Sexp as serde value type ---
+
+    #[test]
+    fn sexp_as_deserialize_target() {
+        let sexp: Sexp = from_str("(1 2 3)").unwrap();
+        assert_eq!(
+            sexp,
+            Sexp::list(vec![Sexp::integer(1), Sexp::integer(2), Sexp::integer(3)])
+        );
+    }
+
+    #[test]
+    fn sexp_as_serialize_source() {
+        let sexp = Sexp::list(vec![Sexp::symbol("hello"), Sexp::integer(42)]);
+        let text = crate::serde::to_string(&sexp).unwrap();
+        // symbols serialize as strings through the serde data model
+        assert_eq!(text, "(\"hello\" 42)");
+    }
+
+    #[test]
+    fn sexp_round_trip_nested() {
+        // dotted lists flatten to sequences through the serde data model, and
+        // symbols become strings — structural fidelity is intentionally limited.
+        // use to_sexp/from_sexp directly for lossless Sexp↔Sexp conversion.
+        //
+        // dotted list (name . test) → serialises as ("name" "test") → deserialises as List
+        let original = Sexp::list(vec![
+            Sexp::string("config"),
+            Sexp::dotted_list(vec![Sexp::string("name")], Sexp::string("test")),
+            Sexp::boolean(true),
+        ]);
+        let text = crate::serde::to_string(&original).unwrap();
+        let restored: Sexp = from_str(&text).unwrap();
+        // dotted list becomes a flat list after the round-trip
+        let expected = Sexp::list(vec![
+            Sexp::string("config"),
+            Sexp::list(vec![Sexp::string("name"), Sexp::string("test")]),
+            Sexp::boolean(true),
+        ]);
+        assert_eq!(restored, expected);
+    }
+
+    #[test]
+    fn sexp_in_struct_field() {
+        use serde::{Deserialize, Serialize};
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Wrapper {
+            tag: String,
+            data: Sexp,
+        }
+        let w = Wrapper {
+            tag: "test".to_string(),
+            data: Sexp::list(vec![Sexp::integer(1), Sexp::integer(2)]),
+        };
+        let text = crate::serde::to_string(&w).unwrap();
+        let restored: Wrapper = from_str(&text).unwrap();
+        assert_eq!(w, restored);
+    }
+
+    // --- i128/u128 errors ---
+
+    #[test]
+    fn deserialize_i128_error_message() {
+        let err = from_str::<i128>("42").unwrap_err();
+        assert!(
+            err.to_string().contains("i128"),
+            "error should mention i128: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_u128_error_message() {
+        let err = from_str::<u128>("42").unwrap_err();
+        assert!(
+            err.to_string().contains("u128"),
+            "error should mention u128: {err}"
+        );
+    }
+
+    // --- alist with string keys ---
+
+    #[test]
+    fn round_trip_btreemap_string_keys() {
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert("name".to_string(), "alice".to_string());
+        m.insert("role".to_string(), "admin".to_string());
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: BTreeMap<String, String> = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    #[test]
+    fn deserialize_any_string_key_alist_as_map() {
+        // string-keyed alists must be detected by deserialize_any, not just typed deserialize_map.
+        // this catches the regression where is_alist only recognised symbol keys.
+        use serde::Deserialize;
+        use std::collections::HashMap;
+
+        // the outer map uses deserialize_map (typed), but the value uses deserialize_any
+        // because the field type is dynamic. wrap in an untagged enum to force deserialize_any path.
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(untagged)]
+        enum Dynamic {
+            Map(HashMap<String, String>),
+            Other(String),
+        }
+
+        // a string-keyed alist — serialised by BTreeMap<String, String>
+        let text = r#"(("name" . "alice") ("role" . "admin"))"#;
+        let result: Dynamic = from_str(text).unwrap();
+        match result {
+            Dynamic::Map(m) => {
+                assert_eq!(m.get("name").unwrap(), "alice");
+                assert_eq!(m.get("role").unwrap(), "admin");
+            }
+            other => panic!("expected Map variant, got {other:?}"),
+        }
+    }
+
+    // --- serde attribute compatibility ---
+
+    #[test]
+    fn serde_rename_field() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Renamed {
+            #[serde(rename = "full-name")]
+            name: String,
+        }
+        let r = Renamed {
+            name: "alice".to_string(),
+        };
+        let text = crate::serde::to_string(&r).unwrap();
+        assert!(text.contains("full-name"), "got: {text}");
+        let restored: Renamed = from_str(&text).unwrap();
+        assert_eq!(r, restored);
+    }
+
+    #[test]
+    fn serde_default_missing_field() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct WithDefault {
+            name: String,
+            #[serde(default)]
+            count: i32,
+        }
+        let d: WithDefault = from_str("((name . \"alice\"))").unwrap();
+        assert_eq!(d.name, "alice");
+        assert_eq!(d.count, 0);
+    }
+
+    #[test]
+    fn serde_skip_serializing_if() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Sparse {
+            name: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            email: Option<String>,
+        }
+        let s = Sparse {
+            name: "alice".to_string(),
+            email: None,
+        };
+        let text = crate::serde::to_string(&s).unwrap();
+        assert!(!text.contains("email"), "should skip None: {text}");
+    }
+
+    #[test]
+    fn serde_flatten() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Base {
+            name: String,
+        }
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Extended {
+            #[serde(flatten)]
+            base: Base,
+            age: i32,
+        }
+        let e = Extended {
+            base: Base {
+                name: "alice".to_string(),
+            },
+            age: 30,
+        };
+        let text = crate::serde::to_string(&e).unwrap();
+        let restored: Extended = from_str(&text).unwrap();
+        assert_eq!(e, restored);
+    }
+
+    #[test]
+    fn serde_internally_tagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(tag = "type")]
+        enum Event {
+            Click { x: i32, y: i32 },
+            Keypress { key: String },
+        }
+        let e = Event::Click { x: 10, y: 20 };
+        let text = crate::serde::to_string(&e).unwrap();
+        let restored: Event = from_str(&text).unwrap();
+        assert_eq!(e, restored);
+    }
+
+    #[test]
+    fn serde_adjacently_tagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(tag = "t", content = "c")]
+        enum Msg {
+            Text(String),
+            Number(i32),
+        }
+        let m = Msg::Text("hello".to_string());
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: Msg = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    // --- edge cases ---
+
+    #[test]
+    fn round_trip_special_floats() {
+        // NaN
+        let text = crate::serde::to_string(&f64::NAN).unwrap();
+        let restored: f64 = from_str(&text).unwrap();
+        assert!(restored.is_nan());
+
+        // infinity
+        let text = crate::serde::to_string(&f64::INFINITY).unwrap();
+        assert_eq!(from_str::<f64>(&text).unwrap(), f64::INFINITY);
+
+        let text = crate::serde::to_string(&f64::NEG_INFINITY).unwrap();
+        assert_eq!(from_str::<f64>(&text).unwrap(), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn round_trip_empty_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Empty {}
+        let e = Empty {};
+        let text = crate::serde::to_string(&e).unwrap();
+        let restored: Empty = from_str(&text).unwrap();
+        assert_eq!(e, restored);
+    }
+
+    #[test]
+    fn round_trip_newtype_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Wrapper(i32);
+        let w = Wrapper(42);
+        let text = crate::serde::to_string(&w).unwrap();
+        let restored: Wrapper = from_str(&text).unwrap();
+        assert_eq!(w, restored);
+    }
+
+    #[test]
+    fn round_trip_tuple_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Pair(i32, String);
+        let p = Pair(42, "hello".to_string());
+        let text = crate::serde::to_string(&p).unwrap();
+        let restored: Pair = from_str(&text).unwrap();
+        assert_eq!(p, restored);
+    }
+
+    #[test]
+    fn round_trip_unit_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Marker;
+        let m = Marker;
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: Marker = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    #[test]
+    fn round_trip_unicode_strings() {
+        let text = crate::serde::to_string(&"héllo wörld 🌍").unwrap();
+        let restored: String = from_str(&text).unwrap();
+        assert_eq!(restored, "héllo wörld 🌍");
+    }
+
+    #[test]
+    fn round_trip_escaped_strings() {
+        let s = "line1\nline2\ttab\\backslash\"quote";
+        let text = crate::serde::to_string(&s).unwrap();
+        let restored: String = from_str(&text).unwrap();
+        assert_eq!(restored, s);
+    }
+
+    #[test]
+    fn round_trip_integer_map_keys() {
+        let mut m = BTreeMap::new();
+        m.insert(1i32, "one".to_string());
+        m.insert(2, "two".to_string());
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: BTreeMap<i32, String> = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    #[test]
+    fn serde_untagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(untagged)]
+        enum StringOrInt {
+            Int(i32),
+            Str(String),
+        }
+        let a = StringOrInt::Int(42);
+        let text_a = crate::serde::to_string(&a).unwrap();
+        let restored_a: StringOrInt = from_str(&text_a).unwrap();
+        assert_eq!(a, restored_a);
+
+        let b = StringOrInt::Str("hello".to_string());
+        let text_b = crate::serde::to_string(&b).unwrap();
+        let restored_b: StringOrInt = from_str(&text_b).unwrap();
+        assert_eq!(b, restored_b);
     }
 }

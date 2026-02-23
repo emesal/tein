@@ -30,15 +30,100 @@ pub use ser::to_sexp;
 
 use crate::error::ParseError;
 use crate::printer;
+use std::io;
 
 /// serialize a value to compact s-expression text
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::to_string;
+///
+/// assert_eq!(to_string(&42).unwrap(), "42");
+/// assert_eq!(to_string(&vec![1, 2, 3]).unwrap(), "(1 2 3)");
+/// ```
 pub fn to_string<T: serde::Serialize>(value: &T) -> Result<String, ParseError> {
     let sexp = to_sexp(value)?;
     Ok(printer::to_string(&sexp))
 }
 
 /// serialize a value to pretty-printed s-expression text
+///
+/// short forms stay compact; long lists break across lines with indentation.
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::to_string_pretty;
+///
+/// assert_eq!(to_string_pretty(&(1, 2, 3)).unwrap(), "(1 2 3)");
+/// ```
 pub fn to_string_pretty<T: serde::Serialize>(value: &T) -> Result<String, ParseError> {
     let sexp = to_sexp(value)?;
     Ok(printer::to_string_pretty(&sexp))
+}
+
+/// deserialize a value from a reader containing s-expression text
+///
+/// reads all available input, then parses it as a single s-expression.
+/// for streaming use, read the input manually and call [`from_str`].
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::from_reader;
+///
+/// let input = b"((name . \"alice\") (age . 30))";
+/// let map: std::collections::BTreeMap<String, tein_sexp::Sexp> =
+///     from_reader(&input[..]).unwrap();
+/// assert_eq!(map["name"], tein_sexp::Sexp::string("alice"));
+/// ```
+pub fn from_reader<R: io::Read, T: serde::de::DeserializeOwned>(
+    mut reader: R,
+) -> Result<T, ParseError> {
+    let mut input = String::new();
+    reader
+        .read_to_string(&mut input)
+        .map_err(|e| ParseError::no_span(format!("io error: {e}")))?;
+    from_str(&input)
+}
+
+/// serialize a value to a writer as compact s-expression text
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::to_writer;
+///
+/// let mut buf = Vec::new();
+/// to_writer(&mut buf, &42).unwrap();
+/// assert_eq!(buf, b"42");
+/// ```
+pub fn to_writer<W: io::Write, T: serde::Serialize>(
+    writer: &mut W,
+    value: &T,
+) -> Result<(), ParseError> {
+    let sexp = to_sexp(value)?;
+    write!(writer, "{}", printer::to_string(&sexp))
+        .map_err(|e| ParseError::no_span(format!("io error: {e}")))
+}
+
+/// serialize a value to a writer as pretty-printed s-expression text
+///
+/// # Examples
+///
+/// ```
+/// use tein_sexp::serde::to_writer_pretty;
+///
+/// let mut buf = Vec::new();
+/// to_writer_pretty(&mut buf, &vec![1, 2, 3]).unwrap();
+/// assert_eq!(std::str::from_utf8(&buf).unwrap(), "(1 2 3)");
+/// ```
+pub fn to_writer_pretty<W: io::Write, T: serde::Serialize>(
+    writer: &mut W,
+    value: &T,
+) -> Result<(), ParseError> {
+    let sexp = to_sexp(value)?;
+    write!(writer, "{}", printer::to_string_pretty(&sexp))
+        .map_err(|e| ParseError::no_span(format!("io error: {e}")))
 }
