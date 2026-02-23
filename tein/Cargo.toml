@@ -12,5 +12,8 @@ categories = ["embedded", "parser-implementations"]
 [dependencies]
 tein-macros = { path = "../tein-macros" }
 
+[dev-dependencies]
+rustyline = { version = "17", features = ["with-file-history"] }
+
 [build-dependencies]
 cc = "1.0"
