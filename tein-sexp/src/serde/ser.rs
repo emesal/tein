@@ -585,6 +585,30 @@ mod tests {
         assert_eq!(result, "(1 2 3)"); // short enough to stay compact
     }
 
+    // --- IO api ---
+
+    #[test]
+    fn from_reader_api() {
+        use std::io::Cursor;
+        let reader = Cursor::new(b"42");
+        let result: i32 = crate::serde::from_reader(reader).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn to_writer_api() {
+        let mut buf = Vec::new();
+        crate::serde::to_writer(&mut buf, &42).unwrap();
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), "42");
+    }
+
+    #[test]
+    fn to_writer_pretty_api() {
+        let mut buf = Vec::new();
+        crate::serde::to_writer_pretty(&mut buf, &vec![1, 2, 3]).unwrap();
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), "(1 2 3)");
+    }
+
     // --- i128/u128 errors ---
 
     #[test]
