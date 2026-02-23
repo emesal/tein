@@ -62,12 +62,13 @@ impl ser::Serializer for Serializer {
     }
 
     fn serialize_u64(self, v: u64) -> Result<Sexp, ParseError> {
-        // u64 may overflow i64
         if v <= i64::MAX as u64 {
             self.serialize_i64(v as i64)
         } else {
-            // fall back to float for very large u64
-            self.serialize_f64(v as f64)
+            // silent f64 truncation would corrupt data; explicit error is safer
+            Err(ParseError::no_span(format!(
+                "u64 value {v} exceeds i64::MAX and cannot be represented losslessly"
+            )))
         }
     }
 
@@ -570,5 +571,20 @@ mod tests {
     fn to_string_pretty_api() {
         let result = crate::serde::to_string_pretty(&vec![1, 2, 3]).unwrap();
         assert_eq!(result, "(1 2 3)"); // short enough to stay compact
+    }
+
+    // --- u64 overflow ---
+
+    #[test]
+    fn serialize_u64_max_errors() {
+        let result = crate::serde::to_sexp(&u64::MAX);
+        assert!(result.is_err(), "u64::MAX should error, not silently lose precision");
+    }
+
+    #[test]
+    fn serialize_u64_fits_i64() {
+        // values that fit in i64 should work fine
+        let sexp = crate::serde::to_sexp(&(i64::MAX as u64)).unwrap();
+        assert_eq!(sexp.to_string(), i64::MAX.to_string());
     }
 }
