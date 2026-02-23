@@ -44,15 +44,20 @@ src/
   managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
   sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions for env restriction
   thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
+  port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
 vendor/chibi-scheme/
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
                  env_copy_named (rename-aware binding copy), error construction,
-                 module import policy (tein_module_allowed, tein_module_policy_set)
+                 module import policy (tein_module_allowed, tein_module_policy_set),
+                 custom port creation, reader dispatch table (set/unset/get/chars/clear/reserved)
   eval.c       — 3 patches: VFS module lookup (A + module policy gate), VFS load (B), VFS open-input-file (C)
+  sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
   lib/tein/foreign.sld — (tein foreign) library definition
   lib/tein/foreign.scm — pure-scheme predicates: foreign?, foreign-type, foreign-handle-id
+  lib/tein/reader.sld — (tein reader) library definition (re-exports native dispatch fns)
+  lib/tein/reader.scm — module documentation
 build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 ```
@@ -70,6 +75,10 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 **foreign type protocol flow**: `ctx.register_foreign_type::<T>()` → registers `ForeignType::methods()` in `ForeignStore` → injects `foreign-call`/`foreign-types`/`foreign-methods`/`foreign-type-methods` as native fns + pure-scheme `foreign?`/`foreign-type`/`foreign-handle-id` → auto-generates `type-name?` and `type-name-method` convenience procs. `ctx.foreign_value(v)` → inserts into store → returns `Value::Foreign { handle_id, type_name }`. scheme calls `(type-name-method obj)` → convenience proc → `(apply foreign-call obj 'method args)` → `foreign_call_wrapper` (extern "C") → reads `FOREIGN_STORE_PTR` thread-local → `dispatch_foreign_call` → looks up method by type name + method name → calls `MethodFn` with `&mut dyn Any` → returns `Value`. `FOREIGN_STORE_PTR` is set by `evaluate()`/`call()` via `ForeignStoreGuard` RAII.
 
 **managed context flow**: `ContextBuilder::build_managed(init)` → spawns dedicated thread → builds Context on that thread → runs init closure → signals ready. subsequent `evaluate()`/`call()` → send `Request` over channel → thread processes → sends `Response` back. `reset()` → sends `Request::Reset` → thread rebuilds context + reruns init. `build_managed_fresh()` → same, but rebuilds before every evaluation (no state leakage).
+
+**custom port flow**: `ctx.open_input_port(reader)` → inserts `Box<dyn Read>` into `PortStore` → creates scheme closure `(lambda (buf start end) (tein-port-read ID buf start end))` → `ffi::make_custom_input_port(ctx, closure)` → chibi's `fopencookie` + `sexp_cookie_reader` calls closure on buffer fill → `port_read_trampoline` (extern "C") reads from `PORT_STORE_PTR` thread-local → copies bytes into scheme string buffer → returns fixnum byte count. output ports mirror via `port_write_trampoline`. `ctx.read(&port)` calls `sexp_read` for one s-expression; `ctx.evaluate_port(&port)` loops read+eval.
+
+**reader dispatch flow**: `ctx.register_reader('j', &handler)` or scheme `(set-reader! #\j handler)` → `ffi::reader_dispatch_set(c, proc)` → stores proc in thread-local `tein_reader_dispatch[128]` table. when chibi's reader encounters `#j`, patched `sexp.c` calls `tein_reader_dispatch_get(c1)` → finds handler → `sexp_apply1(ctx, handler, in)` → handler receives input port, reads further if needed, returns datum → reader returns datum to evaluator. `register_reader_protocol` registers `set-reader!`/`unset-reader!`/`reader-dispatch-chars` as native fns in `build()` for standard env contexts. dispatch table cleared on `Context::drop()`. reserved r7rs chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden.
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. ThreadLocalContext generalises this pattern with persistent/fresh modes. fuel counters are thread-local.
 

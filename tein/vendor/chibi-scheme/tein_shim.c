@@ -308,3 +308,93 @@ int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
 
     return 0;
 }
+
+// --- custom port creation ---
+// sexp_make_custom_input_port / sexp_make_custom_output_port are defined in
+// lib/chibi/io/port.c (compiled via io.c into chibi_io static lib).
+extern sexp sexp_make_custom_input_port(sexp ctx, sexp self,
+                                         sexp read, sexp seek, sexp close);
+extern sexp sexp_make_custom_output_port(sexp ctx, sexp self,
+                                          sexp write, sexp seek, sexp close);
+
+sexp tein_make_custom_input_port(sexp ctx, sexp read_proc) {
+    return sexp_make_custom_input_port(ctx, SEXP_FALSE, read_proc, SEXP_FALSE, SEXP_FALSE);
+}
+
+sexp tein_make_custom_output_port(sexp ctx, sexp write_proc) {
+    return sexp_make_custom_output_port(ctx, SEXP_FALSE, write_proc, SEXP_FALSE, SEXP_FALSE);
+}
+
+// --- reader dispatch table ---
+// maps ASCII chars to scheme procedures for custom #x syntax.
+// thread-local so each context thread has independent dispatch state.
+
+#define TEIN_READER_DISPATCH_SIZE 128
+
+TEIN_THREAD_LOCAL sexp tein_reader_dispatch[TEIN_READER_DISPATCH_SIZE];
+TEIN_THREAD_LOCAL int tein_reader_dispatch_init = 0;
+
+static void tein_reader_dispatch_ensure_init(void) {
+    if (!tein_reader_dispatch_init) {
+        for (int i = 0; i < TEIN_READER_DISPATCH_SIZE; i++)
+            tein_reader_dispatch[i] = SEXP_FALSE;
+        tein_reader_dispatch_init = 1;
+    }
+}
+
+static int tein_reader_char_reserved(int c) {
+    switch (c) {
+    case 'b': case 'B': case 'o': case 'O': case 'd': case 'D':
+    case 'x': case 'X': case 'e': case 'E': case 'i': case 'I':
+    case 'f': case 'F': case 't': case 'T': case 'u': case 'U':
+    case 'v': case 'V': case 's': case 'S': case 'c': case 'C':
+    case '0': case '1': case '2': case '3': case '4':
+    case '5': case '6': case '7': case '8': case '9':
+    case ';': case '|': case '!': case '\\': case '(': case '\'':
+    case '`': case ',':
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+int tein_reader_char_is_reserved(int c) {
+    return tein_reader_char_reserved(c);
+}
+
+int tein_reader_dispatch_set(int c, sexp proc) {
+    tein_reader_dispatch_ensure_init();
+    if (c < 0 || c >= TEIN_READER_DISPATCH_SIZE) return -2;
+    if (tein_reader_char_reserved(c)) return -1;
+    tein_reader_dispatch[c] = proc;
+    return 0;
+}
+
+int tein_reader_dispatch_unset(int c) {
+    tein_reader_dispatch_ensure_init();
+    if (c < 0 || c >= TEIN_READER_DISPATCH_SIZE) return -2;
+    tein_reader_dispatch[c] = SEXP_FALSE;
+    return 0;
+}
+
+sexp tein_reader_dispatch_get(int c) {
+    tein_reader_dispatch_ensure_init();
+    if (c < 0 || c >= TEIN_READER_DISPATCH_SIZE) return SEXP_FALSE;
+    return tein_reader_dispatch[c];
+}
+
+sexp tein_reader_dispatch_chars(sexp ctx) {
+    tein_reader_dispatch_ensure_init();
+    sexp result = SEXP_NULL;
+    for (int i = TEIN_READER_DISPATCH_SIZE - 1; i >= 0; i--) {
+        if (tein_reader_dispatch[i] != SEXP_FALSE)
+            result = sexp_cons(ctx, sexp_make_character(i), result);
+    }
+    return result;
+}
+
+void tein_reader_dispatch_clear(void) {
+    tein_reader_dispatch_ensure_init();
+    for (int i = 0; i < TEIN_READER_DISPATCH_SIZE; i++)
+        tein_reader_dispatch[i] = SEXP_FALSE;
+}

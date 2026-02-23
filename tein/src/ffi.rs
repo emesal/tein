@@ -187,6 +187,18 @@ unsafe extern "C" {
     // vector construction (via tein shim)
     pub fn tein_sexp_make_vector(ctx: sexp, len: sexp_uint_t, dflt: sexp) -> sexp;
     pub fn tein_sexp_vector_set(vec: sexp, i: sexp_uint_t, val: sexp);
+
+    // custom port creation (via tein shim → chibi io lib)
+    pub fn tein_make_custom_input_port(ctx: sexp, read_proc: sexp) -> sexp;
+    pub fn tein_make_custom_output_port(ctx: sexp, write_proc: sexp) -> sexp;
+
+    // reader dispatch table (# syntax extensions)
+    pub fn tein_reader_dispatch_set(c: c_int, proc: sexp) -> c_int;
+    pub fn tein_reader_dispatch_unset(c: c_int) -> c_int;
+    pub fn tein_reader_dispatch_get(c: c_int) -> sexp;
+    pub fn tein_reader_dispatch_chars(ctx: sexp) -> sexp;
+    pub fn tein_reader_dispatch_clear();
+    pub fn tein_reader_char_is_reserved(c: c_int) -> c_int;
 }
 
 // convenience wrappers that call our shim layer
@@ -618,6 +630,18 @@ impl Drop for GcRoot {
     }
 }
 
+/// create a custom input port backed by a scheme read procedure.
+#[inline]
+pub unsafe fn make_custom_input_port(ctx: sexp, read_proc: sexp) -> sexp {
+    unsafe { tein_make_custom_input_port(ctx, read_proc) }
+}
+
+/// create a custom output port backed by a scheme write procedure.
+#[inline]
+pub unsafe fn make_custom_output_port(ctx: sexp, write_proc: sexp) -> sexp {
+    unsafe { tein_make_custom_output_port(ctx, write_proc) }
+}
+
 /// copy a named binding from src_env to dst_env, searching both direct
 /// bindings and rename bindings (module system). returns true if found.
 #[inline]
@@ -629,4 +653,46 @@ pub unsafe fn env_copy_named(
     name_len: sexp_sint_t,
 ) -> bool {
     unsafe { tein_env_copy_named(ctx, src_env, dst_env, name, name_len) != 0 }
+}
+
+// --- reader dispatch table ---
+
+/// register a reader dispatch handler for `#c` syntax.
+///
+/// returns 0 on success, -1 if the character is reserved, -2 if out of range.
+#[inline]
+pub unsafe fn reader_dispatch_set(c: c_int, proc: sexp) -> c_int {
+    unsafe { tein_reader_dispatch_set(c, proc) }
+}
+
+/// remove a reader dispatch handler for `#c` syntax.
+///
+/// returns 0 on success, -2 if out of range.
+#[inline]
+pub unsafe fn reader_dispatch_unset(c: c_int) -> c_int {
+    unsafe { tein_reader_dispatch_unset(c) }
+}
+
+/// get the reader dispatch handler for `#c`, or SEXP_FALSE if none.
+#[inline]
+pub unsafe fn reader_dispatch_get(c: c_int) -> sexp {
+    unsafe { tein_reader_dispatch_get(c) }
+}
+
+/// return a list of characters with active dispatch handlers.
+#[inline]
+pub unsafe fn reader_dispatch_chars(ctx: sexp) -> sexp {
+    unsafe { tein_reader_dispatch_chars(ctx) }
+}
+
+/// clear all reader dispatch handlers.
+#[inline]
+pub unsafe fn reader_dispatch_clear() {
+    unsafe { tein_reader_dispatch_clear() }
+}
+
+/// check if a character is reserved by r7rs and cannot be dispatched.
+#[inline]
+pub unsafe fn reader_char_is_reserved(c: c_int) -> bool {
+    unsafe { tein_reader_char_is_reserved(c) != 0 }
 }

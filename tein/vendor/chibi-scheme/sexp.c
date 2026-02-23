@@ -3509,7 +3509,17 @@ sexp sexp_read_raw (sexp ctx, sexp in, sexp *shares) {
     break;
 #endif
   case '#':
-    switch (c1=sexp_read_char(ctx, in)) {
+    c1=sexp_read_char(ctx, in);
+    /* tein patch: check user-registered dispatch before built-in # syntax */
+    {
+      extern sexp tein_reader_dispatch_get(int c);
+      sexp _tein_dispatch = tein_reader_dispatch_get(c1);
+      if (_tein_dispatch != SEXP_FALSE && sexp_applicablep(_tein_dispatch)) {
+        res = sexp_apply1(ctx, _tein_dispatch, in);
+        break;
+      }
+    }
+    switch (c1) {
     case 'b': case 'B':
       res = sexp_read_number(ctx, in, 2, 0); break;
     case 'o': case 'O':
