@@ -1018,6 +1018,88 @@ mod tests {
         assert_eq!(m, restored);
     }
 
+    // --- edge cases ---
+
+    #[test]
+    fn round_trip_special_floats() {
+        // NaN
+        let text = crate::serde::to_string(&f64::NAN).unwrap();
+        let restored: f64 = from_str(&text).unwrap();
+        assert!(restored.is_nan());
+
+        // infinity
+        let text = crate::serde::to_string(&f64::INFINITY).unwrap();
+        assert_eq!(from_str::<f64>(&text).unwrap(), f64::INFINITY);
+
+        let text = crate::serde::to_string(&f64::NEG_INFINITY).unwrap();
+        assert_eq!(from_str::<f64>(&text).unwrap(), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn round_trip_empty_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Empty {}
+        let e = Empty {};
+        let text = crate::serde::to_string(&e).unwrap();
+        let restored: Empty = from_str(&text).unwrap();
+        assert_eq!(e, restored);
+    }
+
+    #[test]
+    fn round_trip_newtype_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Wrapper(i32);
+        let w = Wrapper(42);
+        let text = crate::serde::to_string(&w).unwrap();
+        let restored: Wrapper = from_str(&text).unwrap();
+        assert_eq!(w, restored);
+    }
+
+    #[test]
+    fn round_trip_tuple_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Pair(i32, String);
+        let p = Pair(42, "hello".to_string());
+        let text = crate::serde::to_string(&p).unwrap();
+        let restored: Pair = from_str(&text).unwrap();
+        assert_eq!(p, restored);
+    }
+
+    #[test]
+    fn round_trip_unit_struct() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Marker;
+        let m = Marker;
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: Marker = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    #[test]
+    fn round_trip_unicode_strings() {
+        let text = crate::serde::to_string(&"héllo wörld 🌍").unwrap();
+        let restored: String = from_str(&text).unwrap();
+        assert_eq!(restored, "héllo wörld 🌍");
+    }
+
+    #[test]
+    fn round_trip_escaped_strings() {
+        let s = "line1\nline2\ttab\\backslash\"quote";
+        let text = crate::serde::to_string(&s).unwrap();
+        let restored: String = from_str(&text).unwrap();
+        assert_eq!(restored, s);
+    }
+
+    #[test]
+    fn round_trip_integer_map_keys() {
+        let mut m = BTreeMap::new();
+        m.insert(1i32, "one".to_string());
+        m.insert(2, "two".to_string());
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: BTreeMap<i32, String> = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
     #[test]
     fn serde_untagged_enum() {
         #[derive(Debug, Serialize, Deserialize, PartialEq)]
