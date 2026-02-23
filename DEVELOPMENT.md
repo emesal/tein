@@ -69,8 +69,10 @@ tein/
     error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
                    IoError, StepLimitExceeded, Timeout)
     ffi.rs       — unsafe c bindings + safe wrappers, `raw` module
+    managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
     sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
-    timeout.rs   — TimeoutContext: wall-clock timeout via thread wrapper
+    thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
+    timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
   vendor/chibi-scheme/
     tein_shim.c  — exports chibi c macros as real functions, fuel control,
                    environment manipulation, module import policy
@@ -145,7 +147,10 @@ exposed by VFS modules remain subject to these controls.
 ### thread safety
 
 - `Context` is intentionally !Send + !Sync (chibi is not thread-safe)
-- `TimeoutContext` wraps Context on a dedicated thread
+- `TimeoutContext` wraps Context on a dedicated thread for wall-clock deadlines
+- `ThreadLocalContext` generalises the pattern: persistent mode (state accumulates, `reset()` rebuilds) or fresh mode (context rebuilt before every call)
+- both types are `Send + Sync` via channel-based proxying; the Context itself never leaves its thread
+- shared channel protocol in `thread.rs`: `Request`/`Response`/`SendableValue`/`ForeignFnPtr`
 - fuel counters are `__thread` (thread-local) so parallel tests don't interfere
 
 ### key design decisions
@@ -191,7 +196,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (112 lib + 12 scheme_fn + 8 doc)
+cargo test                         # all tests (165 lib + 12 scheme_fn + 9 doc)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint

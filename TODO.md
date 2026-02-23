@@ -93,9 +93,20 @@
   - LLM-friendly error messages (lists available methods on wrong-method call)
   - 22 tests: registration, round-trip, dispatch, introspection, predicates, cleanup
 
+### milestone 7 — managed contexts
+
+- [x] **ThreadLocalContext** — `Send + Sync` managed context on a dedicated thread
+  - persistent mode: state accumulates, `reset()` tears down and rebuilds
+  - fresh mode: context rebuilt before every evaluation, no state leakage
+  - init closure: runs once (persistent) or before each call (fresh)
+  - `ContextBuilder::build_managed(init)` / `build_managed_fresh(init)`
+  - `ContextBuilder` gains `Clone` (required for fresh mode rebuild)
+  - shared channel protocol extracted to `thread.rs` (generalises `TimeoutContext`)
+  - 14 tests: evaluate, state accumulation, init, call, define_fn_variadic, reset, error handling
+
 ## ideas (unscheduled)
 
 - **norse naming for modules?** core: `yggdrasil`, io: `bifrost`, macros: `galdr`, sexp: `runar`
 - **scheme test harness** — run .scm files as cargo integration tests
-- **context pooling / thread-local contexts** — ergonomic per-thread patterns
+- **context pool** — pool of `ThreadLocalContext` instances for high-throughput workloads
 - **foreign type constructor macro** — ergonomic `make-type` registration from rust
