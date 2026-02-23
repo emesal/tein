@@ -929,4 +929,111 @@ mod tests {
             other => panic!("expected Map variant, got {other:?}"),
         }
     }
+
+    // --- serde attribute compatibility ---
+
+    #[test]
+    fn serde_rename_field() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Renamed {
+            #[serde(rename = "full-name")]
+            name: String,
+        }
+        let r = Renamed { name: "alice".to_string() };
+        let text = crate::serde::to_string(&r).unwrap();
+        assert!(text.contains("full-name"), "got: {text}");
+        let restored: Renamed = from_str(&text).unwrap();
+        assert_eq!(r, restored);
+    }
+
+    #[test]
+    fn serde_default_missing_field() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct WithDefault {
+            name: String,
+            #[serde(default)]
+            count: i32,
+        }
+        let d: WithDefault = from_str("((name . \"alice\"))").unwrap();
+        assert_eq!(d.name, "alice");
+        assert_eq!(d.count, 0);
+    }
+
+    #[test]
+    fn serde_skip_serializing_if() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Sparse {
+            name: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            email: Option<String>,
+        }
+        let s = Sparse { name: "alice".to_string(), email: None };
+        let text = crate::serde::to_string(&s).unwrap();
+        assert!(!text.contains("email"), "should skip None: {text}");
+    }
+
+    #[test]
+    fn serde_flatten() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Base {
+            name: String,
+        }
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Extended {
+            #[serde(flatten)]
+            base: Base,
+            age: i32,
+        }
+        let e = Extended { base: Base { name: "alice".to_string() }, age: 30 };
+        let text = crate::serde::to_string(&e).unwrap();
+        let restored: Extended = from_str(&text).unwrap();
+        assert_eq!(e, restored);
+    }
+
+    #[test]
+    fn serde_internally_tagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(tag = "type")]
+        enum Event {
+            Click { x: i32, y: i32 },
+            Keypress { key: String },
+        }
+        let e = Event::Click { x: 10, y: 20 };
+        let text = crate::serde::to_string(&e).unwrap();
+        let restored: Event = from_str(&text).unwrap();
+        assert_eq!(e, restored);
+    }
+
+    #[test]
+    fn serde_adjacently_tagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(tag = "t", content = "c")]
+        enum Msg {
+            Text(String),
+            Number(i32),
+        }
+        let m = Msg::Text("hello".to_string());
+        let text = crate::serde::to_string(&m).unwrap();
+        let restored: Msg = from_str(&text).unwrap();
+        assert_eq!(m, restored);
+    }
+
+    #[test]
+    fn serde_untagged_enum() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(untagged)]
+        enum StringOrInt {
+            Int(i32),
+            Str(String),
+        }
+        let a = StringOrInt::Int(42);
+        let text_a = crate::serde::to_string(&a).unwrap();
+        let restored_a: StringOrInt = from_str(&text_a).unwrap();
+        assert_eq!(a, restored_a);
+
+        let b = StringOrInt::Str("hello".to_string());
+        let text_b = crate::serde::to_string(&b).unwrap();
+        let restored_b: StringOrInt = from_str(&text_b).unwrap();
+        assert_eq!(b, restored_b);
+    }
 }
