@@ -1039,7 +1039,32 @@ impl Context {
         }
         self.foreign_store.borrow_mut().register_type::<T>()?;
 
-        // auto-register convenience procs (deferred to task 6 — placeholder for now)
+        // auto-register scheme convenience procedures
+        let type_name = T::type_name();
+
+        // predicate: (type-name? x)
+        let pred_code = format!(
+            "(define ({tn}? x) (and (foreign? x) (equal? (foreign-type x) \"{tn}\")))",
+            tn = type_name
+        );
+        self.evaluate(&pred_code)?;
+
+        // method wrappers: (type-name-method obj arg ...)
+        // each wrapper type-checks obj and delegates to foreign-call, with a
+        // type-specific error message for wrong-type arguments.
+        for (method_name, _) in T::methods() {
+            let wrapper_code = format!(
+                "(define ({tn}-{mn} obj . args) \
+                   (if (and (foreign? obj) (equal? (foreign-type obj) \"{tn}\")) \
+                       (apply foreign-call obj (quote {mn}) args) \
+                       (error \"{tn}-{mn}: expected {tn}, got\" \
+                              (if (foreign? obj) (foreign-type obj) obj))))",
+                tn = type_name,
+                mn = method_name
+            );
+            self.evaluate(&wrapper_code)?;
+        }
+
         Ok(())
     }
 
