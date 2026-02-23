@@ -14,61 +14,7 @@ use std::time::Duration;
 use crate::Value;
 use crate::context::ContextBuilder;
 use crate::error::{Error, Result};
-
-/// internal request sent to the context thread
-enum Request {
-    /// evaluate a string of scheme code
-    Evaluate(String),
-    /// call a procedure with arguments (procedure + args sent as sendable wrappers)
-    Call(SendableValue, Vec<SendableValue>),
-    /// register a variadic foreign function
-    DefineFnVariadic {
-        /// scheme name for the function
-        name: String,
-        /// the raw function pointer
-        f: unsafe extern "C" fn(
-            crate::ffi::sexp,
-            crate::ffi::sexp,
-            crate::ffi::sexp_sint_t,
-            crate::ffi::sexp,
-        ) -> crate::ffi::sexp,
-    },
-    /// shut down the context thread
-    Shutdown,
-}
-
-// SAFETY: Request contains SendableValue which wraps Value (may hold raw
-// sexp pointers). safe because values only travel to the context thread
-// where the context that created them lives.
-unsafe impl Send for Request {}
-
-/// internal response from the context thread
-enum Response {
-    /// result of evaluate or call
-    Value(Result<Value>),
-    /// result of define_fn_variadic
-    Defined(Result<()>),
-}
-
-// SAFETY: Response contains Result<Value> which may hold Value::Procedure
-// (a raw *mut c_void). this is safe because values only travel between the
-// caller and the single context thread — Procedure pointers are only
-// dereferenced on the context thread where the context lives.
-unsafe impl Send for Response {}
-
-/// wrapper allowing a Value to be sent across threads
-///
-/// # safety
-/// safe because values are only ever sent *back* to the thread that owns
-/// the context. Procedure values contain raw sexp pointers that are only
-/// valid on the context thread — this wrapper ensures they travel back
-/// to where they came from.
-struct SendableValue(Value);
-
-// SAFETY: see struct-level doc. values only travel between the caller
-// and the single context thread, and Procedure pointers are only
-// dereferenced on the context thread.
-unsafe impl Send for SendableValue {}
+use crate::thread::{ForeignFnPtr, Request, Response, SendableValue};
 
 /// a scheme context with wall-clock timeout enforcement
 ///
@@ -152,7 +98,8 @@ impl ContextBuilder {
                             break;
                         }
                     }
-                    Request::Shutdown => break,
+                    // TimeoutContext doesn't support reset — treat as shutdown
+                    Request::Reset | Request::Shutdown => break,
                 }
             }
         });
@@ -218,16 +165,7 @@ impl TimeoutContext {
     }
 
     /// register a variadic foreign function (with timeout on response)
-    pub fn define_fn_variadic(
-        &self,
-        name: &str,
-        f: unsafe extern "C" fn(
-            crate::ffi::sexp,
-            crate::ffi::sexp,
-            crate::ffi::sexp_sint_t,
-            crate::ffi::sexp,
-        ) -> crate::ffi::sexp,
-    ) -> Result<()> {
+    pub fn define_fn_variadic(&self, name: &str, f: ForeignFnPtr) -> Result<()> {
         self.tx
             .send(Request::DefineFnVariadic {
                 name: name.to_string(),

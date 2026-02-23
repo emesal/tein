@@ -23,13 +23,16 @@ mod context;
 mod error;
 mod ffi;
 pub mod foreign;
+pub mod managed;
 pub mod sandbox;
+mod thread;
 mod timeout;
 mod value;
 
 pub use context::{Context, ContextBuilder};
 pub use error::{Error, Result};
 pub use foreign::{ForeignType, MethodContext, MethodFn};
+pub use managed::{Mode, ThreadLocalContext};
 pub use timeout::TimeoutContext;
 pub use value::Value;
 
