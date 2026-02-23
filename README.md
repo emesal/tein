@@ -48,10 +48,6 @@ designed for:
 
 because embedding scheme in rust shouldn't require wrestling with raw ffi. tein handles the unsafe bits and gives you a safe, idiomatic rust api.
 
-## license
-
-dual-licensed under MIT or Apache-2.0, at your option
-
 ---
 
 *carved with care, grown with intention*
