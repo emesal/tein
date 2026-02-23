@@ -72,6 +72,18 @@ impl ser::Serializer for Serializer {
         }
     }
 
+    fn serialize_i128(self, _v: i128) -> Result<Sexp, ParseError> {
+        Err(ParseError::no_span(
+            "i128 cannot be represented in s-expressions (i64 max)",
+        ))
+    }
+
+    fn serialize_u128(self, _v: u128) -> Result<Sexp, ParseError> {
+        Err(ParseError::no_span(
+            "u128 cannot be represented in s-expressions (i64 max)",
+        ))
+    }
+
     fn serialize_f32(self, v: f32) -> Result<Sexp, ParseError> {
         self.serialize_f64(v as f64)
     }
@@ -571,6 +583,26 @@ mod tests {
     fn to_string_pretty_api() {
         let result = crate::serde::to_string_pretty(&vec![1, 2, 3]).unwrap();
         assert_eq!(result, "(1 2 3)"); // short enough to stay compact
+    }
+
+    // --- i128/u128 errors ---
+
+    #[test]
+    fn serialize_i128_error_message() {
+        let err = crate::serde::to_sexp(&42i128).unwrap_err();
+        assert!(
+            err.to_string().contains("i128"),
+            "error should mention i128: {err}"
+        );
+    }
+
+    #[test]
+    fn serialize_u128_error_message() {
+        let err = crate::serde::to_sexp(&42u128).unwrap_err();
+        assert!(
+            err.to_string().contains("u128"),
+            "error should mention u128: {err}"
+        );
     }
 
     // --- u64 overflow ---

@@ -89,6 +89,10 @@ impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
         }
     }
 
+    fn deserialize_i128<V: de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, ParseError> {
+        Err(self.error("i128 cannot be deserialized from s-expressions (i64 max)"))
+    }
+
     fn deserialize_u8<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
         self.deserialize_u64(visitor)
     }
@@ -107,6 +111,10 @@ impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
             SexpKind::Integer(_) => Err(self.error("expected non-negative integer")),
             _ => Err(self.error("expected integer")),
         }
+    }
+
+    fn deserialize_u128<V: de::Visitor<'de>>(self, _visitor: V) -> Result<V::Value, ParseError> {
+        Err(self.error("u128 cannot be deserialized from s-expressions (i64 max)"))
     }
 
     fn deserialize_f32<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value, ParseError> {
@@ -784,6 +792,26 @@ mod tests {
     fn integer_to_float_coercion() {
         // when deserialize_f64 is called, integers should coerce
         assert_eq!(from_str::<f64>("42").unwrap(), 42.0);
+    }
+
+    // --- i128/u128 errors ---
+
+    #[test]
+    fn deserialize_i128_error_message() {
+        let err = from_str::<i128>("42").unwrap_err();
+        assert!(
+            err.to_string().contains("i128"),
+            "error should mention i128: {err}"
+        );
+    }
+
+    #[test]
+    fn deserialize_u128_error_message() {
+        let err = from_str::<u128>("42").unwrap_err();
+        assert!(
+            err.to_string().contains("u128"),
+            "error should mention u128: {err}"
+        );
     }
 
     // --- alist with string keys ---
