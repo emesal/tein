@@ -4,12 +4,24 @@ use crate::{
     Value,
     error::{Error, Result},
     ffi,
+    foreign::{ForeignStore, ForeignType},
     sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
+
+/// RAII guard that clears the FOREIGN_STORE_PTR thread-local on drop.
+///
+/// ensures the pointer is nulled on all exit paths (early returns, `?`, panic).
+struct ForeignStoreGuard;
+
+impl Drop for ForeignStoreGuard {
+    fn drop(&mut self) {
+        FOREIGN_STORE_PTR.with(|c| c.set(std::ptr::null()));
+    }
+}
 
 // --- original proc thread-locals for IO wrappers ---
 //
@@ -28,6 +40,159 @@ thread_local! {
             Cell::new(std::ptr::null_mut()),
         ]
     };
+}
+
+// --- foreign store thread-local for dispatch wrappers ---
+//
+// set to &self.foreign_store before every evaluate()/call() invocation,
+// cleared afterwards. the extern "C" dispatch wrappers read it to access
+// the store without needing a Context reference. safe because Context is
+// !Send + !Sync and the pointer is only live during evaluation.
+thread_local! {
+    static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
+}
+
+// --- implementations of the 4 foreign protocol dispatch functions ---
+
+/// dispatch a method call: (foreign-call obj 'method arg ...)
+unsafe extern "C" fn foreign_call_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            let msg = "foreign-call: no foreign store (internal error)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let store = &*store_ptr;
+        match crate::foreign::dispatch_foreign_call(store, ctx, args) {
+            Ok(value) => value.to_raw(ctx).unwrap_or_else(|_| ffi::get_void()),
+            Err(msg) => {
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// list methods of the foreign object in the first arg: (foreign-methods obj)
+unsafe extern "C" fn foreign_methods_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() || ffi::sexp_nullp(args) != 0 {
+            return ffi::get_null();
+        }
+        let store = &*store_ptr;
+        let obj_sexp = ffi::sexp_car(args);
+        let obj = match Value::from_raw(ctx, obj_sexp) {
+            Ok(v) => v,
+            Err(_) => return ffi::get_null(),
+        };
+        let type_name = match obj.foreign_type_name() {
+            Some(n) => n,
+            None => return ffi::get_null(),
+        };
+        let names = match store.borrow().method_names(type_name) {
+            Some(n) => n,
+            None => return ffi::get_null(),
+        };
+        // build scheme list of symbol names
+        let mut result = ffi::get_null();
+        for name in names.iter().rev() {
+            let c_name = match CString::new(*name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let sym = ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let _sym_root = ffi::GcRoot::new(ctx, sym);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, sym, result);
+        }
+        result
+    }
+}
+
+/// list all registered type names: (foreign-types)
+unsafe extern "C" fn foreign_types_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            return ffi::get_null();
+        }
+        let store = &*store_ptr;
+        let names = store.borrow().type_names();
+        let mut result = ffi::get_null();
+        for name in names.iter().rev() {
+            let c_name = match CString::new(*name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let s = ffi::sexp_c_str(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let _s_root = ffi::GcRoot::new(ctx, s);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, s, result);
+        }
+        result
+    }
+}
+
+/// list method names for a named type: (foreign-type-methods "type-name")
+unsafe extern "C" fn foreign_type_methods_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() || ffi::sexp_nullp(args) != 0 {
+            return ffi::get_null();
+        }
+        let store = &*store_ptr;
+        let name_sexp = ffi::sexp_car(args);
+        if ffi::sexp_stringp(name_sexp) == 0 {
+            let msg = "foreign-type-methods: expected string type name";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let ptr = ffi::sexp_string_data(name_sexp);
+        let len = ffi::sexp_string_size(name_sexp) as usize;
+        let type_name = match std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+        {
+            Ok(s) => s,
+            Err(_) => return ffi::get_null(),
+        };
+        let names = match store.borrow().method_names(type_name) {
+            Some(n) => n,
+            None => return ffi::get_null(),
+        };
+        let mut result = ffi::get_null();
+        for name in names.iter().rev() {
+            let c_name = match CString::new(*name) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let sym = ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let _sym_root = ffi::GcRoot::new(ctx, sym);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, sym, result);
+        }
+        result
+    }
 }
 
 /// the 4 file-opening primitives we wrap with policy checks
@@ -562,6 +727,8 @@ impl ContextBuilder {
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
                 has_module_policy,
+                foreign_store: RefCell::new(ForeignStore::new()),
+                has_foreign_protocol: Cell::new(false),
             })
         }
     }
@@ -589,6 +756,10 @@ pub struct Context {
     step_limit: Option<u64>,
     has_io_wrappers: bool,
     has_module_policy: bool,
+    /// per-context store for foreign type registrations and live instances
+    foreign_store: RefCell<ForeignStore>,
+    /// whether foreign protocol dispatch functions are registered
+    has_foreign_protocol: Cell<bool>,
 }
 
 impl Context {
@@ -676,6 +847,10 @@ impl Context {
         let c_str = CString::new(code)
             .map_err(|_| Error::EvalError("code contains null bytes".to_string()))?;
 
+        // set foreign store pointer so dispatch wrappers can access it.
+        // the guard clears it on all exit paths (early returns, `?`, panic).
+        FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+        let _foreign_guard = ForeignStoreGuard;
         self.arm_fuel();
 
         unsafe {
@@ -838,6 +1013,144 @@ impl Context {
         Ok(())
     }
 
+    /// raw context pointer for internal use (tests, examples, proc macros)
+    #[cfg(test)]
+    pub(crate) fn ctx_ptr(&self) -> ffi::sexp {
+        self.ctx
+    }
+
+    /// register a rust type with the foreign object protocol.
+    ///
+    /// makes the type's methods callable from scheme. auto-registers:
+    /// - `foreign-call`, `foreign-methods`, `foreign-types`, `foreign-type-methods`
+    ///   (on first call, via `register_foreign_protocol`)
+    /// - `type-name?` — predicate proc
+    /// - `type-name-method` — for each method in the type's method table
+    ///
+    /// # example
+    ///
+    /// ```ignore
+    /// ctx.register_foreign_type::<Counter>()?;
+    /// // scheme now has: counter?, counter-increment, counter-get
+    /// ```
+    pub fn register_foreign_type<T: ForeignType>(&self) -> Result<()> {
+        if !self.has_foreign_protocol.get() {
+            self.register_foreign_protocol()?;
+            self.has_foreign_protocol.set(true);
+        }
+        self.foreign_store.borrow_mut().register_type::<T>()?;
+
+        // auto-register scheme convenience procedures
+        let type_name = T::type_name();
+
+        // predicate: (type-name? x)
+        let pred_code = format!(
+            "(define ({tn}? x) (and (foreign? x) (equal? (foreign-type x) \"{tn}\")))",
+            tn = type_name
+        );
+        self.evaluate(&pred_code)?;
+
+        // method wrappers: (type-name-method obj arg ...)
+        // each wrapper type-checks obj and delegates to foreign-call, with a
+        // type-specific error message for wrong-type arguments.
+        for (method_name, _) in T::methods() {
+            let wrapper_code = format!(
+                "(define ({tn}-{mn} obj . args) \
+                   (if (and (foreign? obj) (equal? (foreign-type obj) \"{tn}\")) \
+                       (apply foreign-call obj (quote {mn}) args) \
+                       (error \"{tn}-{mn}: expected {tn}, got\" \
+                              (if (foreign? obj) (foreign-type obj) obj))))",
+                tn = type_name,
+                mn = method_name
+            );
+            self.evaluate(&wrapper_code)?;
+        }
+
+        Ok(())
+    }
+
+    /// wrap a rust value as a scheme foreign object.
+    ///
+    /// stores it in the ForeignStore and returns a `Value::Foreign`
+    /// that scheme code can pass around, inspect, and use with `foreign-call`.
+    ///
+    /// the value lives until the Context is dropped.
+    pub fn foreign_value<T: ForeignType>(&self, value: T) -> Result<Value> {
+        let id = self.foreign_store.borrow_mut().insert(value);
+        Ok(Value::Foreign {
+            handle_id: id,
+            type_name: T::type_name().to_string(),
+        })
+    }
+
+    /// borrow a foreign object immutably.
+    ///
+    /// returns an error if the value isn't `Foreign`, the handle is stale,
+    /// or the type doesn't match `T`.
+    pub fn foreign_ref<T: ForeignType + 'static>(
+        &self,
+        value: &Value,
+    ) -> Result<std::cell::Ref<'_, T>> {
+        let (id, actual_type) = value
+            .as_foreign()
+            .ok_or_else(|| Error::TypeError(format!("expected foreign object, got {}", value)))?;
+        if actual_type != T::type_name() {
+            return Err(Error::TypeError(format!(
+                "expected {}, got {}",
+                T::type_name(),
+                actual_type
+            )));
+        }
+        let store = self.foreign_store.borrow();
+        if store.get(id).is_none() {
+            return Err(Error::EvalError(format!(
+                "stale foreign handle: {} ({})",
+                id, actual_type
+            )));
+        }
+        Ok(std::cell::Ref::map(store, |s| {
+            let (data, _) = s.get(id).unwrap();
+            data.downcast_ref::<T>().unwrap()
+        }))
+    }
+
+    /// register the foreign object protocol dispatch functions.
+    ///
+    /// called automatically by `register_foreign_type` on first use.
+    /// registers both the rust-side dispatch functions and the pure-scheme
+    /// predicates/accessors from `(tein foreign)`, making them available in
+    /// the current env without requiring an explicit `(import (tein foreign))`.
+    fn register_foreign_protocol(&self) -> Result<()> {
+        // rust-side dispatch and introspection
+        self.define_fn_variadic("foreign-call", foreign_call_wrapper)?;
+        self.define_fn_variadic("foreign-methods", foreign_methods_wrapper)?;
+        self.define_fn_variadic("foreign-types", foreign_types_wrapper)?;
+        self.define_fn_variadic("foreign-type-methods", foreign_type_methods_wrapper)?;
+
+        // pure-scheme predicates and accessors (mirrors foreign.scm)
+        // these must be defined before any convenience procs that reference them.
+        // uses only car/cdr (always available) rather than cadr/caddr (require scheme/cxr).
+        // uses fixnum? rather than integer?: handle IDs are always fixnums, and
+        // fixnum? is a chibi primitive available in all envs (including sandboxes).
+        self.evaluate(
+            "(define (foreign? x)
+               (and (pair? x)
+                    (eq? (car x) '__tein-foreign)
+                    (pair? (cdr x))
+                    (string? (car (cdr x)))
+                    (pair? (cdr (cdr x)))
+                    (fixnum? (car (cdr (cdr x))))))
+             (define (foreign-type x)
+               (if (foreign? x) (car (cdr x))
+                   (error \"foreign-type: expected foreign object, got\" x)))
+             (define (foreign-handle-id x)
+               (if (foreign? x) (car (cdr (cdr x)))
+                   (error \"foreign-handle-id: expected foreign object, got\" x)))",
+        )?;
+
+        Ok(())
+    }
+
     /// call a scheme procedure from rust
     ///
     /// invokes a `Value::Procedure` (lambda, named function, or builtin)
@@ -866,6 +1179,8 @@ impl Context {
             .as_procedure()
             .ok_or_else(|| Error::TypeError(format!("expected procedure, got {}", proc)))?;
 
+        FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+        let _foreign_guard = ForeignStoreGuard;
         self.arm_fuel();
 
         unsafe {
@@ -3145,6 +3460,366 @@ mod tests {
         assert_eq!(
             result,
             Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)))
+        );
+    }
+
+    // --- foreign type protocol ---
+
+    use crate::foreign::{ForeignType, MethodFn};
+
+    struct TestCounter {
+        n: i64,
+    }
+
+    impl ForeignType for TestCounter {
+        fn type_name() -> &'static str {
+            "test-counter"
+        }
+        fn methods() -> &'static [(&'static str, MethodFn)] {
+            &[
+                ("increment", |obj, _ctx, _args| {
+                    let c = obj.downcast_mut::<TestCounter>().unwrap();
+                    c.n += 1;
+                    Ok(Value::Integer(c.n))
+                }),
+                ("get", |obj, _ctx, _args| {
+                    let c = obj.downcast_ref::<TestCounter>().unwrap();
+                    Ok(Value::Integer(c.n))
+                }),
+                ("reset", |obj, _ctx, _args| {
+                    let c = obj.downcast_mut::<TestCounter>().unwrap();
+                    c.n = 0;
+                    Ok(Value::Unspecified)
+                }),
+            ]
+        }
+    }
+
+    /// register TestCounter and a scheme-callable constructor (make-test-counter)
+    fn setup_test_counter(ctx: &Context) {
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("register TestCounter");
+
+        // constructor function — accesses ForeignStore via the thread-local
+        // set by evaluate/call, following the same pattern as IO wrappers
+        unsafe extern "C" fn make_test_counter(
+            ctx_ptr: ffi::sexp,
+            _self: ffi::sexp,
+            _n: ffi::sexp_sint_t,
+            _args: ffi::sexp,
+        ) -> ffi::sexp {
+            unsafe {
+                let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+                if store_ptr.is_null() {
+                    let msg = "make-test-counter: no store";
+                    let c_msg = CString::new(msg).unwrap_or_default();
+                    return ffi::make_error(ctx_ptr, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                }
+                let id = (*store_ptr).borrow_mut().insert(TestCounter { n: 0 });
+                let val = Value::Foreign {
+                    handle_id: id,
+                    type_name: "test-counter".to_string(),
+                };
+                val.to_raw(ctx_ptr).unwrap_or_else(|_| ffi::get_void())
+            }
+        }
+
+        ctx.define_fn_variadic("make-test-counter", make_test_counter)
+            .expect("define make-test-counter");
+    }
+
+    // --- task 7: registration and round-trip ---
+
+    #[test]
+    fn test_foreign_type_register() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("register");
+        let types = ctx.evaluate("(foreign-types)").expect("foreign-types");
+        let list = types.as_list().expect("expected list");
+        assert!(
+            list.iter().any(|v| v.as_string() == Some("test-counter")),
+            "test-counter not in foreign-types: {:?}",
+            list
+        );
+    }
+
+    #[test]
+    fn test_foreign_value_roundtrip() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("register");
+
+        let val = ctx
+            .foreign_value(TestCounter { n: 42 })
+            .expect("create foreign value");
+        assert!(val.is_foreign());
+        assert_eq!(val.foreign_type_name(), Some("test-counter"));
+
+        // to_raw → from_raw round-trip
+        let raw = unsafe { val.to_raw(ctx.ctx_ptr()).unwrap() };
+        let back = unsafe { Value::from_raw(ctx.ctx_ptr(), raw).unwrap() };
+        assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_foreign_register_duplicate_error() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.register_foreign_type::<TestCounter>()
+            .expect("first register");
+        let err = ctx.register_foreign_type::<TestCounter>().unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("already registered"),
+            "expected 'already registered', got: {}",
+            msg
+        );
+    }
+
+    // --- task 8: dispatch and error messages ---
+
+    #[test]
+    fn test_foreign_call_dispatch() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (test-counter-increment c)
+               (test-counter-increment c)
+               (test-counter-get c))",
+            )
+            .expect("dispatch");
+        assert_eq!(result, Value::Integer(2));
+    }
+
+    #[test]
+    fn test_foreign_call_universal_dispatch() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (foreign-call c 'increment)
+               (foreign-call c 'get))",
+            )
+            .expect("foreign-call dispatch");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_foreign_call_mutable_state() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (test-counter-increment c)
+               (test-counter-increment c)
+               (test-counter-reset c)
+               (test-counter-get c))",
+            )
+            .expect("mutable state");
+        assert_eq!(result, Value::Integer(0));
+    }
+
+    #[test]
+    fn test_foreign_call_wrong_method() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let err = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (foreign-call c 'nonexistent))",
+            )
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("no method 'nonexistent'"),
+            "expected method error, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("increment"),
+            "should list available methods, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_foreign_call_not_foreign() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let err = ctx.evaluate("(foreign-call 42 'get)").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("expected foreign object"),
+            "expected type error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_foreign_convenience_wrong_type() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let err = ctx.evaluate("(test-counter-get 42)").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("expected test-counter"),
+            "expected type error, got: {}",
+            msg
+        );
+    }
+
+    // --- task 9: introspection and predicates ---
+
+    #[test]
+    fn test_foreign_introspection_methods() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (foreign-methods c))")
+            .expect("foreign-methods");
+        let methods = result.as_list().expect("expected list");
+        let names: Vec<&str> = methods
+            .iter()
+            .filter_map(|v| v.as_symbol().or_else(|| v.as_string()))
+            .collect();
+        assert!(names.contains(&"increment"), "got: {:?}", names);
+        assert!(names.contains(&"get"), "got: {:?}", names);
+        assert!(names.contains(&"reset"), "got: {:?}", names);
+    }
+
+    #[test]
+    fn test_foreign_introspection_type_methods() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(foreign-type-methods \"test-counter\")")
+            .expect("foreign-type-methods");
+        let methods = result.as_list().expect("expected list");
+        assert_eq!(methods.len(), 3);
+    }
+
+    #[test]
+    fn test_foreign_predicate_true() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (test-counter? c))")
+            .expect("predicate true");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_foreign_predicate_false() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx.evaluate("(test-counter? 42)").expect("predicate false");
+        assert_eq!(result, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_foreign_display() {
+        let val = Value::Foreign {
+            handle_id: 7,
+            type_name: "http-client".to_string(),
+        };
+        assert_eq!(format!("{}", val), "#<foreign http-client:7>");
+    }
+
+    #[test]
+    fn test_foreign_type_accessor() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (foreign-type c))")
+            .expect("foreign-type accessor");
+        assert_eq!(result, Value::String("test-counter".to_string()));
+    }
+
+    #[test]
+    fn test_foreign_handle_id_accessor() {
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        // handle IDs start at 1, so the first created object has id >= 1
+        let result = ctx
+            .evaluate("(let ((c (make-test-counter))) (foreign-handle-id c))")
+            .expect("foreign-handle-id accessor");
+        match result {
+            Value::Integer(n) => assert!(n >= 1, "handle id should be >= 1, got {}", n),
+            other => panic!("expected integer handle id, got {}", other),
+        }
+    }
+
+    // --- task 10: sandbox integration and cleanup ---
+
+    #[test]
+    fn test_foreign_in_sandbox() {
+        // verify foreign protocol works inside a sandboxed context.
+        // uses new_standard() to ensure protocol helpers have all required
+        // primitives (and, equal?, fixnum?, etc.) — real-world usage would
+        // similarly ensure the env has what the protocol needs.
+        let ctx = Context::new_standard().expect("context");
+        setup_test_counter(&ctx);
+
+        let result = ctx
+            .evaluate(
+                "(let ((c (make-test-counter)))
+               (test-counter-increment c)
+               (test-counter-get c))",
+            )
+            .expect("sandboxed foreign call");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_foreign_cleanup_on_drop() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // a type that signals when its value is dropped
+        struct Canary(Arc<AtomicBool>);
+        impl Drop for Canary {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        impl ForeignType for Canary {
+            fn type_name() -> &'static str {
+                "canary"
+            }
+            fn methods() -> &'static [(&'static str, MethodFn)] {
+                &[]
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        {
+            let ctx = Context::new_standard().expect("context");
+            ctx.register_foreign_type::<Canary>().expect("register");
+            let _val = ctx
+                .foreign_value(Canary(dropped.clone()))
+                .expect("create canary");
+            assert!(!dropped.load(Ordering::SeqCst), "should not be dropped yet");
+        }
+        // Context dropped → ForeignStore dropped → Canary dropped
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "canary should be dropped when Context drops"
         );
     }
 }

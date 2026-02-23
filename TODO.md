@@ -80,9 +80,22 @@
 - [ ] **macro expansion hooks**
 - [ ] **custom reader extensions**
 
+### milestone 6 — foreign type protocol
+
+- [x] **foreign type protocol**
+  - `ForeignType` trait + `ForeignStore` handle-map per context
+  - `Value::Foreign { handle_id, type_name }` with tagged-list wire format
+  - `(tein foreign)` VFS module: `foreign?`, `foreign-type`, `foreign-handle-id`
+  - `foreign-call` / `foreign-methods` / `foreign-types` / `foreign-type-methods` native fns
+  - auto-generated `type-name?` predicates + `type-name-method` convenience procs
+  - `FOREIGN_STORE_PTR` thread-local bridge with `ForeignStoreGuard` RAII
+  - `ctx.foreign_value(v)`, `ctx.foreign_ref::<T>(&val)` rust-side API
+  - LLM-friendly error messages (lists available methods on wrong-method call)
+  - 22 tests: registration, round-trip, dispatch, introspection, predicates, cleanup
+
 ## ideas (unscheduled)
 
 - **norse naming for modules?** core: `yggdrasil`, io: `bifrost`, macros: `galdr`, sexp: `runar`
 - **scheme test harness** — run .scm files as cargo integration tests
 - **context pooling / thread-local contexts** — ergonomic per-thread patterns
-- **scheme-defined foreign type protocol** — rust types as opaque scheme objects
+- **foreign type constructor macro** — ergonomic `make-type` registration from rust

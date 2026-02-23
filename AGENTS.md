@@ -14,12 +14,12 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (113 lib + 12 scheme_fn + 8 doc-tests)
+cargo test                         # all tests (150 lib + 12 scheme_fn + 8 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
 cargo fmt --check                  # format check
-cargo run --example basic          # run an example (basic|floats|ffi|debug|sandbox)
+cargo run --example basic          # run an example (basic|floats|ffi|debug|sandbox|foreign_types)
 cargo clean && cargo build         # nuclear option if ffi gets weird
 ```
 
@@ -27,16 +27,19 @@ cargo clean && cargo build         # nuclear option if ffi gets weird
 
 ```
 src/
-  lib.rs       — public api re-exports (Context, ContextBuilder, TimeoutContext, Value, Error)
+  lib.rs       — public api re-exports (Context, ContextBuilder, TimeoutContext, Value, Error,
+                 ForeignType, MethodFn, MethodContext)
   context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests
   value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
                  variants: Integer, Float, String, Symbol, Boolean, List, Pair,
                  Vector, Char, Bytevector, Port (opaque), HashTable (opaque,
                  falls to Other until runtime type detection added), Nil,
-                 Unspecified, Procedure, Other
+                 Unspecified, Procedure, Other, Foreign { handle_id, type_name }
   error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
                  StepLimitExceeded, Timeout, SandboxViolation)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
+  foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore handle-map,
+                 dispatch_foreign_call — the foreign type protocol engine
   sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions for env restriction
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
 vendor/chibi-scheme/
@@ -45,8 +48,10 @@ vendor/chibi-scheme/
                  module import policy (tein_module_allowed, tein_module_policy_set)
   eval.c       — 3 patches: VFS module lookup (A + module policy gate), VFS load (B), VFS open-input-file (C)
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
+  lib/tein/foreign.sld — (tein foreign) library definition
+  lib/tein/foreign.scm — pure-scheme predicates: foreign?, foreign-type, foreign-handle-id
 build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
-examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
+examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 ```
 
 **data flow**: rust code → `Context::evaluate()` → arm_fuel() → ffi.rs safe wrappers → tein_shim.c → chibi-scheme vm → tein_fuel_consume_slice() at timeslice boundary → sexp result → `Value::from_raw()` → check_fuel() → rust `Value` enum
@@ -58,6 +63,8 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
 **IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
 
 **module policy flow**: ContextBuilder with standard_env + presets → set MODULE_POLICY = VfsOnly (thread-local + C-level) → sexp_find_module_file_raw checks tein_module_allowed() → VFS paths pass, filesystem paths blocked → policy cleared on Context::drop()
+
+**foreign type protocol flow**: `ctx.register_foreign_type::<T>()` → registers `ForeignType::methods()` in `ForeignStore` → injects `foreign-call`/`foreign-types`/`foreign-methods`/`foreign-type-methods` as native fns + pure-scheme `foreign?`/`foreign-type`/`foreign-handle-id` → auto-generates `type-name?` and `type-name-method` convenience procs. `ctx.foreign_value(v)` → inserts into store → returns `Value::Foreign { handle_id, type_name }`. scheme calls `(type-name-method obj)` → convenience proc → `(apply foreign-call obj 'method args)` → `foreign_call_wrapper` (extern "C") → reads `FOREIGN_STORE_PTR` thread-local → `dispatch_foreign_call` → looks up method by type name + method name → calls `MethodFn` with `&mut dyn Any` → returns `Value`. `FOREIGN_STORE_PTR` is set by `evaluate()`/`call()` via `ForeignStoreGuard` RAII.
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. fuel counters are thread-local.
 
