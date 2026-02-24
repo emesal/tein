@@ -111,4 +111,4 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 - comments explain *why*, code shows *what*
 - lowercase style, casual but precise
 - norse mythology naming theme
-- see DEVELOPMENT.md for full architecture docs, TODO.md for roadmap
+- see ARCHITECTURE.md for full architecture docs, TODO.md for roadmap

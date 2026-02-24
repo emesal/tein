@@ -1,4 +1,4 @@
-# tein development handoff
+# tein architecture
 
 > *branch and rune-stick* — embeddable chibi-scheme for rust
 
@@ -67,18 +67,29 @@ tein/
     context.rs   — Context, ContextBuilder, evaluation, fuel mgmt, all tests
     value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
     error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
-                   IoError, StepLimitExceeded, Timeout)
+                   IoError, StepLimitExceeded, Timeout, SandboxViolation)
     ffi.rs       — unsafe c bindings + safe wrappers, `raw` module
+    foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore, dispatch
     managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
+    port.rs      — PortStore: Read/Write bridge via thread-local trampoline
     sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
     thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
     timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
   vendor/chibi-scheme/
     tein_shim.c  — exports chibi c macros as real functions, fuel control,
-                   environment manipulation, module import policy
+                   environment manipulation, module import policy,
+                   custom port creation, reader dispatch table,
+                   macro expansion hook
+    eval.c       — 4 patches: VFS module lookup (A + policy gate), VFS load (B),
+                   VFS open-input-file (C), macro expansion hook (D)
+    sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
     vm.c         — 2-line patch: fuel budget consumption at timeslice boundary
+    lib/tein/foreign.sld/.scm — (tein foreign) predicates
+    lib/tein/reader.sld/.scm  — (tein reader) dispatch fns
+    lib/tein/macro.sld/.scm   — (tein macro) expansion hook fns
   build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
-  examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs
+  examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs,
+                   foreign_types.rs, managed.rs, repl.rs
 tein-macros/     — #[scheme_fn] proc macro crate
 tein-sexp/       — pure rust s-expression parser/printer
 ```
@@ -196,7 +207,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (165 lib + 12 scheme_fn + 9 doc)
+cargo test                         # all tests (196 lib + 12 scheme_fn + 21 doc)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
@@ -370,3 +381,37 @@ assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
 - dispatch table is thread-local, matching chibi's !Send context model
 - table cleared on `Context::drop()` so next context on the thread starts clean
 - handler return value becomes the reader result — gets evaluated by `evaluate()`, so return self-evaluating datums (numbers, strings, lists) or use `read()` for raw datum access
+
+## macro expansion hook protocol
+
+intercepts chibi's macro expansion at analysis time — replace-and-reanalyse semantics.
+
+### architecture
+
+- **tein_macro_expand_hook** (`tein_shim.c`): thread-local slot for a scheme proc, with GC preservation
+- **tein_macro_expand_hook_active** (`tein_shim.c`): thread-local recursion guard (prevents hook from triggering on its own macro usage)
+- **eval.c patch D**: in `analyze_macro_once()`, after macro expansion, checks hook → if set and not active, calls `sexp_apply(ctx, hook, (name unexpanded expanded env))` → hook return value replaces expanded form → `goto loop` reanalyses
+- **(tein macro)** VFS module: re-exports `set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`
+
+### usage
+
+```rust
+// from rust
+let hook = ctx.evaluate("(lambda (name pre post env) post)")?;
+ctx.set_macro_expand_hook(&hook)?;
+```
+
+```scheme
+;; from scheme
+(import (tein macro))
+(set-macro-expand-hook!
+  (lambda (name unexpanded expanded env)
+    expanded))  ; observe or transform
+```
+
+### design notes
+
+- hook receives 4 args: macro name (symbol), unexpanded form, expanded form, syntactic environment
+- return value replaces the expansion — returning the expanded form unchanged is a no-op observation
+- recursion guard prevents infinite loops when the hook itself uses macros
+- hook cleared on `Context::drop()`
