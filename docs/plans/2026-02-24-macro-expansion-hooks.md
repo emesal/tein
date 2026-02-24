@@ -19,27 +19,25 @@
 - [x] Task 3: rust FFI bindings
 - [x] Task 4: scheme wrappers in context.rs (REVISED — see deviation notes)
 - [x] Task 5: VFS module — `(tein macro)` (REVISED — see deviation notes)
-- [ ] Task 6: tests — observation mode
-- [ ] Task 7: tests — transformation + edge cases
-- [ ] Task 8: update documentation
+- [x] Task 6: tests — observation mode
+- [x] Task 7: tests — transformation + edge cases (REVISED — see deviation notes)
+- [x] Task 8: update documentation
 
-**current state:** 183 existing tests pass. all infrastructure is in place. tests + docs remain.
-
-**to resume:** `cd /home/fey/projects/tein/tein-dev/.worktrees/macro-expansion-hooks` and continue from task 6.
+**current state:** COMPLETE. 196 lib tests pass (183 existing + 13 new macro hook tests). all clippy clean.
 
 ---
 
-## deviation from original plan: dispatch pattern
+## deviation from original plan: dispatch pattern → individual native fns
 
-tasks 4 and 5 were revised during implementation due to a **chibi env binding capacity issue**. defining 6+ foreign procs into a standard env causes sandbox import tests to fail (the env hash table overflows or collides, breaking `(import (scheme write))` in sandboxed contexts).
+tasks 4 and 5 were initially revised to use a single-dispatch pattern due to what was believed to be a **chibi env binding capacity issue** — defining 6+ foreign procs into a standard env caused sandbox import tests to fail.
 
-**original approach (broken):** 3 separate native fns (`set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`) registered via `define_fn_variadic`, totalling 6 env bindings with the 3 existing reader protocol fns.
+**root cause (discovered during task 7):** the failure was actually a **heap pressure issue**. 6 native fn registrations via `sexp_define_foreign_proc` allocated enough objects in the 4MB default heap that subsequent `(import (scheme write))` + transitive dependencies ran out of space. bumping `DEFAULT_HEAP_SIZE` from 4MB to 8MB resolved this entirely (related to GC rooting fix in f69c48a).
 
-**actual approach (working):** single dispatch native fn `tein-macro-expand-hook-dispatch` that accepts `'set`, `'unset`, or `'get` as first arg, totalling 4 env bindings. scheme-level wrappers (`set-macro-expand-hook!` etc.) are:
-- for non-sandboxed standard env: eagerly evaluated as `(define ...)` forms via `register_macro_expand_wrappers()` after sandbox setup
-- for sandboxed contexts: provided by `(import (tein macro))` VFS module
+**final approach:** 3 individual native fns (`set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`) registered via `register_protocol_fns()` — same pattern as the reader fns. no dispatch layer, no scheme define wrappers needed. `(tein macro)` is a clean re-export module like `(tein reader)`.
 
-**also changed:** both reader and macro protocol native fns are now registered **pre-sandbox** via `register_protocol_fns()` (free function), replacing the old `register_reader_protocol()` / `register_macro_expand_protocol()` methods that ran post-sandbox.
+**also discovered:** VFS module re-export pattern doesn't work in sandboxed contexts (neither reader nor macro — filed as #31). sandbox tests use `.allow()` instead of `(import ...)`.
+
+**also changed:** both reader and macro protocol native fns are registered **pre-sandbox** via `register_protocol_fns()` (free function).
 
 ---
 

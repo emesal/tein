@@ -464,7 +464,10 @@ unsafe extern "C" fn macro_expand_hook_get_wrapper(
 /// before sandboxing, these are available via `(import ...)` even in
 /// restricted contexts.
 unsafe fn register_protocol_fns(ctx: ffi::sexp) {
-    let protocol_fns: &[(&str, unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp)] = &[
+    let protocol_fns: &[(
+        &str,
+        unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+    )] = &[
         // reader dispatch protocol
         ("set-reader!", reader_set_wrapper),
         ("unset-reader!", reader_unset_wrapper),
@@ -484,9 +487,7 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
             let c_name = CString::new(*name).unwrap();
             let f_typed: Option<
                 unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-            > = std::mem::transmute::<*const std::ffi::c_void, _>(
-                *f as *const std::ffi::c_void,
-            );
+            > = std::mem::transmute::<*const std::ffi::c_void, _>(*f as *const std::ffi::c_void);
             ffi::sexp_define_foreign_proc(
                 ctx,
                 env,
@@ -5082,7 +5083,10 @@ mod tests {
         let result = ctx.evaluate("(double 5)");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("hook failed"), "expected 'hook failed' in: {msg}");
+        assert!(
+            msg.contains("hook failed"),
+            "expected 'hook failed' in: {msg}"
+        );
     }
 
     #[test]
