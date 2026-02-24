@@ -1523,9 +1523,10 @@ impl Context {
 
     /// Register a reader dispatch handler for `#ch` syntax.
     ///
-    /// The handler must be a Scheme procedure taking one argument (the input
-    /// port) and returning a datum. Reserved R7RS characters (`#t`, `#f`,
-    /// `#\\`, `#(`, numeric prefixes, etc.) cannot be overridden.
+    /// `ch` must be a printable ASCII byte (< 128). The handler must be a
+    /// Scheme procedure taking one argument (the input port) and returning a
+    /// datum. Reserved R7RS characters (`#t`, `#f`, `#\\`, `#(`, numeric
+    /// prefixes, etc.) cannot be overridden.
     ///
     /// # examples
     ///
@@ -1535,12 +1536,12 @@ impl Context {
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ctx = Context::new_standard()?;
     /// let handler = ctx.evaluate("(lambda (port) 42)")?;
-    /// ctx.register_reader('j', &handler)?;
+    /// ctx.register_reader(b'j', &handler)?;
     /// assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
     /// # Ok(())
     /// # }
     /// ```
-    pub fn register_reader(&self, ch: char, handler: &Value) -> Result<()> {
+    pub fn register_reader(&self, ch: u8, handler: &Value) -> Result<()> {
         let raw_proc = handler
             .as_procedure()
             .ok_or_else(|| Error::TypeError("handler must be a procedure".into()))?;
@@ -1551,9 +1552,13 @@ impl Context {
                 0 => Ok(()),
                 -1 => Err(Error::EvalError(format!(
                     "reader dispatch #{} is reserved by r7rs and cannot be overridden",
-                    ch
+                    ch as char
                 ))),
-                _ => Err(Error::EvalError("character out of ASCII range".into())),
+                // c < 128 always holds for u8, so this branch is unreachable,
+                // but kept for exhaustiveness against the C return contract.
+                _ => Err(Error::EvalError(
+                    "reader dispatch: character out of range".into(),
+                )),
             }
         }
     }
@@ -1593,7 +1598,8 @@ impl Context {
     /// Return the current macro expansion hook, or `None` if not set.
     pub fn macro_expand_hook(&self) -> Option<Value> {
         let raw = unsafe { ffi::macro_expand_hook_get() };
-        if unsafe { ffi::sexp_booleanp(raw) != 0 } {
+        // sentinel is SEXP_FALSE (set by tein_macro_expand_hook_clear)
+        if raw == unsafe { ffi::get_false() } {
             None
         } else {
             Some(Value::Procedure(raw))
@@ -1603,8 +1609,15 @@ impl Context {
     /// Wrap a Rust `Read` as a Scheme input port.
     ///
     /// Returns a `Value::Port` that Scheme code can pass to `read`,
-    /// `read-char`, `read-line`, etc. The backing `Read` lives in the
-    /// per-context `PortStore` until the context is dropped.
+    /// `read-char`, `read-line`, etc.
+    ///
+    /// # lifetime note
+    ///
+    /// The backing `Read` is stored in the context's `PortStore` and lives
+    /// until the `Context` is dropped. There is no explicit close API.
+    /// For resources that must be released promptly (file handles, sockets),
+    /// drop the `Context` or use a wrapper that signals completion via a
+    /// shared flag.
     ///
     /// # examples
     ///
@@ -1626,15 +1639,11 @@ impl Context {
 
         let port_id = self.port_store.borrow_mut().insert_reader(Box::new(reader));
 
-        // create scheme closure capturing port ID
+        // create scheme closure capturing port ID; evaluate() sets PORT_STORE_PTR itself
         let closure_code = format!(
             "(lambda (buf start end) (tein-port-read {} buf start end))",
             port_id
         );
-
-        // need PORT_STORE_PTR set for the evaluate call
-        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
-        let _guard = PortStoreGuard;
 
         let read_proc_val = self.evaluate(&closure_code)?;
         let raw_proc = read_proc_val
@@ -1655,8 +1664,15 @@ impl Context {
     /// Wrap a Rust `Write` as a Scheme output port.
     ///
     /// Returns a `Value::Port` that Scheme code can pass to `write`,
-    /// `display`, `write-char`, etc. The backing `Write` lives in the
-    /// per-context `PortStore` until the context is dropped.
+    /// `display`, `write-char`, etc.
+    ///
+    /// # lifetime note
+    ///
+    /// The backing `Write` is stored in the context's `PortStore` and lives
+    /// until the `Context` is dropped. There is no explicit close API.
+    /// For resources that must be released promptly (file handles, sockets),
+    /// drop the `Context` or use a wrapper that signals completion via a
+    /// shared flag.
     ///
     /// # examples
     ///
@@ -1689,13 +1705,11 @@ impl Context {
 
         let port_id = self.port_store.borrow_mut().insert_writer(Box::new(writer));
 
+        // evaluate() sets PORT_STORE_PTR itself
         let closure_code = format!(
             "(lambda (buf start end) (tein-port-write {} buf start end))",
             port_id
         );
-
-        PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
-        let _guard = PortStoreGuard;
 
         let write_proc_val = self.evaluate(&closure_code)?;
         let raw_proc = write_proc_val
@@ -4978,7 +4992,7 @@ mod tests {
     fn test_register_reader_from_rust() {
         let ctx = Context::new_standard().expect("context");
         let handler = ctx.evaluate("(lambda (port) 42)").expect("handler");
-        ctx.register_reader('j', &handler).expect("register");
+        ctx.register_reader(b'j', &handler).expect("register");
         let result = ctx.evaluate("#j").expect("eval");
         assert_eq!(result, Value::Integer(42));
     }
@@ -4987,7 +5001,7 @@ mod tests {
     fn test_register_reader_reserved_from_rust() {
         let ctx = Context::new_standard().expect("context");
         let handler = ctx.evaluate("(lambda (port) 42)").expect("handler");
-        let err = ctx.register_reader('t', &handler).unwrap_err();
+        let err = ctx.register_reader(b't', &handler).unwrap_err();
         assert!(format!("{}", err).contains("reserved"));
     }
 

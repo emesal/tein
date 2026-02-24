@@ -443,7 +443,14 @@ pub unsafe fn sexp_define_foreign_proc(
     unsafe { tein_sexp_define_foreign_proc(ctx, env, name, num_args, flags, fname, f) }
 }
 
-// error construction (policy violations)
+/// Construct a Scheme user exception with the given message.
+///
+/// `msg` must be a valid nul-terminated C string pointer. `len` is passed
+/// through for API symmetry but is unused by the C implementation (which
+/// treats `msg` as a C string). `CString::new(s).unwrap_or_default()` is
+/// safe to use at all call sites because `tein_make_error` ignores `len`
+/// and reads `msg` as a nul-terminated string; the empty-string fallback
+/// just produces a Scheme exception with an empty message.
 #[inline]
 pub unsafe fn make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp {
     unsafe { tein_make_error(ctx, msg, len) }

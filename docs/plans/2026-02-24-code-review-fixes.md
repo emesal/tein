@@ -41,9 +41,9 @@ and simplify the call.
 
 ---
 
-## important
+## important ✓ fixed in next commit
 
-### 3. `macro_expand_hook()` uses `sexp_booleanp` instead of false-check
+### 3. `macro_expand_hook()` uses `sexp_booleanp` instead of false-check ✓
 
 **file:** `src/context.rs:1593`
 
@@ -55,7 +55,7 @@ too, which cannot currently be set but is still wrong.
 
 ---
 
-### 4. `register_reader` accepts `char` but table is ASCII-only
+### 4. `register_reader` accepts `char` but table is ASCII-only ✓
 
 **file:** `src/context.rs:1544`
 
@@ -69,7 +69,7 @@ the out-of-range path.
 
 ---
 
-### 5. `PortStore` never removes entries — handle/object lifetime leak
+### 5. `PortStore` never removes entries — handle/object lifetime leak ✓ (doc warning added)
 
 **file:** `src/port.rs`
 
@@ -83,7 +83,7 @@ close_port API` comment. a full fix would add explicit handle removal.
 
 ---
 
-### 6. redundant `PORT_STORE_PTR` guard in `open_input_port` / `open_output_port`
+### 6. redundant `PORT_STORE_PTR` guard in `open_input_port` / `open_output_port` ✓
 
 **file:** `src/context.rs:1632` (input), `1694` (output)
 
@@ -102,7 +102,7 @@ remove the misleading comment "need PORT_STORE_PTR set for the evaluate call".
 
 ---
 
-### 7. `CString::new().unwrap_or_default()` with mismatched length (13 occurrences)
+### 7. `CString::new().unwrap_or_default()` with mismatched length (13 occurrences) ✓ (documented in ffi.rs)
 
 **file:** `src/context.rs` (13 call sites, e.g. line 126)
 
