@@ -401,16 +401,12 @@ unsafe extern "C" fn reader_chars_wrapper(
     unsafe { ffi::reader_dispatch_chars(ctx) }
 }
 
-/// extern "C" dispatch wrapper for `(tein-macro-expand-hook-dispatch op ...)`.
+/// extern "C" wrapper for `(set-macro-expand-hook! proc)`.
 ///
-/// single native fn for all macro expansion hook operations, decomposed by
-/// scheme wrappers in `(tein macro)`:
-/// - `(tein-macro-expand-hook-dispatch 'set proc)` — set the hook
-/// - `(tein-macro-expand-hook-dispatch 'unset)` — clear the hook
-/// - `(tein-macro-expand-hook-dispatch 'get)` — return current hook or #f
-///
-/// uses a single env binding to stay within chibi's env capacity budget.
-unsafe extern "C" fn macro_expand_hook_dispatch_wrapper(
+/// sets the thread-local macro expansion hook. the hook receives
+/// `(name unexpanded expanded env)` after each macro expansion and
+/// returns the form to use (return `expanded` unchanged for observation).
+unsafe extern "C" fn macro_expand_hook_set_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
     _n: ffi::sexp_sint_t,
@@ -418,47 +414,46 @@ unsafe extern "C" fn macro_expand_hook_dispatch_wrapper(
 ) -> ffi::sexp {
     unsafe {
         if ffi::sexp_nullp(args) != 0 {
-            let msg = "tein-macro-expand-hook-dispatch: expected (dispatch op ...)";
+            let msg = "set-macro-expand-hook!: expected a procedure argument";
             let c_msg = CString::new(msg).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
-        let op = ffi::sexp_car(args);
-        if ffi::sexp_symbolp(op) == 0 {
-            let msg = "tein-macro-expand-hook-dispatch: op must be a symbol";
+        let proc = ffi::sexp_car(args);
+        if ffi::sexp_procedurep(proc) == 0 {
+            let msg = "set-macro-expand-hook!: argument must be a procedure";
             let c_msg = CString::new(msg).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
-        let sym_str = ffi::sexp_symbol_to_string(ctx, op);
-        let c_str = std::ffi::CStr::from_ptr(ffi::sexp_string_data(sym_str));
-        match c_str.to_bytes() {
-            b"set" => {
-                let rest = ffi::sexp_cdr(args);
-                if ffi::sexp_nullp(rest) != 0 {
-                    let msg = "set-macro-expand-hook!: expected a procedure argument";
-                    let c_msg = CString::new(msg).unwrap_or_default();
-                    return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-                }
-                let proc = ffi::sexp_car(rest);
-                if ffi::sexp_procedurep(proc) == 0 {
-                    let msg = "set-macro-expand-hook!: argument must be a procedure";
-                    let c_msg = CString::new(msg).unwrap_or_default();
-                    return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-                }
-                ffi::macro_expand_hook_set(ctx, proc);
-                ffi::get_void()
-            }
-            b"unset" => {
-                ffi::macro_expand_hook_clear(ctx);
-                ffi::get_void()
-            }
-            b"get" => ffi::macro_expand_hook_get(),
-            _ => {
-                let msg = "tein-macro-expand-hook-dispatch: unknown op (expected set, unset, get)";
-                let c_msg = CString::new(msg).unwrap_or_default();
-                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
-            }
-        }
+        ffi::macro_expand_hook_set(ctx, proc);
+        ffi::get_void()
     }
+}
+
+/// extern "C" wrapper for `(unset-macro-expand-hook!)`.
+///
+/// clears the thread-local macro expansion hook.
+unsafe extern "C" fn macro_expand_hook_unset_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        ffi::macro_expand_hook_clear(ctx);
+        ffi::get_void()
+    }
+}
+
+/// extern "C" wrapper for `(macro-expand-hook)`.
+///
+/// returns the current hook procedure or `#f` if none is set.
+unsafe extern "C" fn macro_expand_hook_get_wrapper(
+    _ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe { ffi::macro_expand_hook_get() }
 }
 
 /// register protocol native fns into the context's current env.
@@ -474,13 +469,18 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
         ("set-reader!", reader_set_wrapper),
         ("unset-reader!", reader_unset_wrapper),
         ("reader-dispatch-chars", reader_chars_wrapper),
-        // macro expansion hook protocol — single dispatch fn, decomposed
-        // into set/unset/get by scheme wrappers in (tein macro) module
-        ("tein-macro-expand-hook-dispatch", macro_expand_hook_dispatch_wrapper),
+        // macro expansion hook protocol
+        ("set-macro-expand-hook!", macro_expand_hook_set_wrapper),
+        ("unset-macro-expand-hook!", macro_expand_hook_unset_wrapper),
+        ("macro-expand-hook", macro_expand_hook_get_wrapper),
     ];
     unsafe {
-        let env = ffi::sexp_context_env(ctx);
         for (name, f) in protocol_fns {
+            // re-fetch env each iteration — sexp_define_foreign_proc allocates
+            // (interning symbols, creating procedures and env cells), which can
+            // trigger GC. since env is not GC-rooted here, a stale pointer
+            // would corrupt the binding list.
+            let env = ffi::sexp_context_env(ctx);
             let c_name = CString::new(*name).unwrap();
             let f_typed: Option<
                 unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
@@ -496,26 +496,6 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
                 c_name.as_ptr(),
                 f_typed,
             );
-        }
-    }
-}
-
-/// register scheme-level wrappers for macro expansion hook operations.
-///
-/// evaluates 3 `define` forms in the current env to create the public API
-/// (`set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`)
-/// that delegate to the single `tein-macro-expand-hook-dispatch` native fn.
-unsafe fn register_macro_expand_wrappers(ctx: ffi::sexp) {
-    let wrappers = [
-        "(define (set-macro-expand-hook! proc) (tein-macro-expand-hook-dispatch 'set proc))",
-        "(define (unset-macro-expand-hook!) (tein-macro-expand-hook-dispatch 'unset))",
-        "(define (macro-expand-hook) (tein-macro-expand-hook-dispatch 'get))",
-    ];
-    for src in &wrappers {
-        unsafe {
-            let c_src = CString::new(*src).unwrap();
-            let env = ffi::sexp_context_env(ctx);
-            ffi::sexp_eval_string(ctx, c_src.as_ptr(), src.len() as ffi::sexp_sint_t, env);
         }
     }
 }
@@ -690,7 +670,7 @@ fn wrapper_fn_for(
 
 // --- default sizes ---
 
-const DEFAULT_HEAP_SIZE: usize = 4 * 1024 * 1024;
+const DEFAULT_HEAP_SIZE: usize = 8 * 1024 * 1024;
 const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
 
 /// builder for configuring a scheme context before creation
@@ -727,7 +707,7 @@ pub struct ContextBuilder {
 }
 
 impl ContextBuilder {
-    /// set the initial heap size in bytes (default: 4mb)
+    /// set the initial heap size in bytes (default: 8mb)
     pub fn heap_size(mut self, size: usize) -> Self {
         self.heap_size = size;
         self
@@ -1068,14 +1048,6 @@ impl ContextBuilder {
                 has_port_protocol: Cell::new(false),
             };
 
-            // define scheme-level wrappers for the macro hook dispatch fn.
-            // these evaluate (define ...) in the current env, making
-            // set-macro-expand-hook! etc. available without (import (tein macro)).
-            // only for non-sandboxed contexts; sandboxed contexts use import.
-            if self.standard_env && self.allowed_primitives.is_none() {
-                register_macro_expand_wrappers(ctx);
-            }
-
             Ok(context)
         }
     }
@@ -1139,7 +1111,7 @@ impl Context {
     /// create a new scheme context with default settings
     ///
     /// initializes a chibi-scheme context with:
-    /// - 4mb initial heap
+    /// - 8mb initial heap
     /// - 128mb max heap
     /// - full primitive environment (no restrictions)
     /// - no step limit
@@ -3849,7 +3821,7 @@ mod tests {
     #[test]
     fn test_standard_env_import() {
         // user-facing (import ...) in a standard env context.
-        // works with default 4MB heap now that evaluate() gc-protects its
+        // works with default 8MB heap now that evaluate() gc-protects its
         // port and sexp_load_op properly preserves VFS strings.
         let ctx = Context::new_standard().unwrap();
 
@@ -4966,5 +4938,243 @@ mod tests {
         let handler = ctx.evaluate("(lambda (port) 42)").expect("handler");
         let err = ctx.register_reader('t', &handler).unwrap_err();
         assert!(format!("{}", err).contains("reserved"));
+    }
+
+    // --- macro expansion hook tests ---
+
+    #[test]
+    fn test_macro_expand_hook_basic() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(define hook-called #f)
+             (set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (set! hook-called #t)
+                 expanded))",
+        )
+        .expect("set hook");
+        ctx.evaluate("(double 5)").expect("use macro");
+        let called = ctx.evaluate("hook-called").expect("check");
+        assert_eq!(called, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_observation() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(define captured-unexpanded #f)
+             (set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (set! captured-unexpanded unexpanded)
+                 expanded))",
+        )
+        .expect("set hook");
+        ctx.evaluate("(double 5)").expect("use macro");
+        let captured = ctx.evaluate("captured-unexpanded").expect("check");
+        let list = captured.as_list().expect("should be list");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1], Value::Integer(5));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_name_arg() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(define captured-name #f)
+             (set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (set! captured-name name)
+                 expanded))",
+        )
+        .expect("set hook");
+        ctx.evaluate("(double 5)").expect("use macro");
+        let name = ctx.evaluate("captured-name").expect("check");
+        assert_eq!(name, Value::Symbol("double".into()));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_transformation() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 42))",
+        )
+        .expect("set hook");
+        let result = ctx.evaluate("(double 5)").expect("use macro");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_reanalyze() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define double");
+        ctx.evaluate("(define-syntax add1 (syntax-rules () ((add1 x) (+ x 1))))")
+            .expect("define add1");
+        ctx.evaluate(
+            "(set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (if (eq? name 'double)
+                     '(add1 99)
+                     expanded)))",
+        )
+        .expect("set hook");
+        let result = ctx.evaluate("(double 5)").expect("use macro");
+        // (add1 99) -> (+ 99 1) -> 100
+        assert_eq!(result, Value::Integer(100));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_unset() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(set-macro-expand-hook!
+               (lambda (name unexpanded expanded env) 42))",
+        )
+        .expect("set hook");
+        assert_eq!(ctx.evaluate("(double 5)").unwrap(), Value::Integer(42));
+        ctx.evaluate("(unset-macro-expand-hook!)").expect("unset");
+        assert_eq!(ctx.evaluate("(double 5)").unwrap(), Value::Integer(10));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_recursion_guard() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(define hook-count 0)
+             (set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (if (eq? name 'double)
+                     (set! hook-count (+ hook-count 1)))
+                 expanded))",
+        )
+        .expect("set hook");
+        let result = ctx.evaluate("(double 5)").expect("use macro");
+        assert_eq!(result, Value::Integer(10));
+        let count = ctx.evaluate("hook-count").expect("check count");
+        assert_eq!(count, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_error_propagation() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (error \"hook failed\")))",
+        )
+        .expect("set hook");
+        let result = ctx.evaluate("(double 5)");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("hook failed"), "expected 'hook failed' in: {msg}");
+    }
+
+    #[test]
+    fn test_macro_expand_hook_introspection() {
+        let ctx = Context::new_standard().expect("context");
+        let none = ctx.evaluate("(macro-expand-hook)").expect("get");
+        assert_eq!(none, Value::Boolean(false));
+        ctx.evaluate(
+            "(set-macro-expand-hook!
+               (lambda (name unexpanded expanded env) expanded))",
+        )
+        .expect("set");
+        let hook = ctx.evaluate("(macro-expand-hook)").expect("get");
+        assert!(matches!(hook, Value::Procedure(_)));
+        ctx.evaluate("(unset-macro-expand-hook!)").expect("unset");
+        let none_again = ctx.evaluate("(macro-expand-hook)").expect("get");
+        assert_eq!(none_again, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_cleanup_on_drop() {
+        {
+            let ctx = Context::new_standard().expect("context");
+            ctx.evaluate(
+                "(set-macro-expand-hook!
+                   (lambda (name unexpanded expanded env) expanded))",
+            )
+            .expect("set");
+        }
+        let ctx2 = Context::new_standard().expect("context2");
+        let hook = ctx2.evaluate("(macro-expand-hook)").expect("get");
+        assert_eq!(hook, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_sandbox() {
+        // sandboxed context with macro hook fns allowed directly.
+        // VFS module re-export doesn't work in sandboxes (see #31),
+        // so we allow the native fns via the sandbox allowlist instead.
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&[
+                "define-syntax",
+                "syntax-rules",
+                "set!",
+                "define",
+                "set-macro-expand-hook!",
+                "unset-macro-expand-hook!",
+                "macro-expand-hook",
+            ])
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
+            .expect("define macro");
+        ctx.evaluate(
+            "(define hook-called #f)
+             (set-macro-expand-hook!
+               (lambda (name unexpanded expanded env)
+                 (set! hook-called #t)
+                 expanded))",
+        )
+        .expect("set hook");
+        ctx.evaluate("(double 5)").expect("use macro");
+        let called = ctx.evaluate("hook-called").expect("check");
+        assert_eq!(called, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_macro_expand_hook_rust_api() {
+        let ctx = Context::new_standard().expect("context");
+        assert!(ctx.macro_expand_hook().is_none());
+        let hook = ctx
+            .evaluate("(lambda (name unexpanded expanded env) expanded)")
+            .expect("hook");
+        ctx.set_macro_expand_hook(&hook).expect("set");
+        assert!(ctx.macro_expand_hook().is_some());
+        ctx.unset_macro_expand_hook();
+        assert!(ctx.macro_expand_hook().is_none());
+    }
+
+    #[test]
+    fn test_macro_expand_hook_via_import() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
+        ctx.evaluate(
+            "(set-macro-expand-hook!
+               (lambda (name unexpanded expanded env) expanded))",
+        )
+        .expect("set via import");
+        let hook = ctx.evaluate("(macro-expand-hook)").expect("get");
+        assert!(matches!(hook, Value::Procedure(_)));
     }
 }
