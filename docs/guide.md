@@ -3,8 +3,7 @@
 A walkthrough for developers embedding Scheme in Rust with tein. Covers every major
 feature with context, worked examples, and decision guides.
 
-**Prerequisites:** familiarity with Rust, basic Scheme syntax (or willingness to learn
-as you go). No prior embedding experience required.
+**Prerequisites:** familiarity with Rust and basic Scheme syntax. No prior embedding experience required.
 
 ---
 
