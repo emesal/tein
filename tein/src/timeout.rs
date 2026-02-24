@@ -1,6 +1,6 @@
 //! wall-clock timeout wrapper for scheme contexts
 //!
-//! [`TimeoutContext`] runs a [`Context`] on a dedicated thread and enforces
+//! [`TimeoutContext`] runs a [`crate::Context`] on a dedicated thread and enforces
 //! wall-clock deadlines on evaluation calls. the underlying context never
 //! crosses thread boundaries (satisfying !Send).
 //!
@@ -18,7 +18,7 @@ use crate::thread::{ForeignFnPtr, Request, Response, SendableValue};
 
 /// a scheme context with wall-clock timeout enforcement
 ///
-/// wraps a [`Context`] running on a dedicated thread. each evaluation
+/// wraps a [`crate::Context`] running on a dedicated thread. each evaluation
 /// call has a wall-clock deadline; if exceeded, `Error::Timeout` is returned.
 ///
 /// the context thread is bounded by the step limit — after timeout fires,

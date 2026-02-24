@@ -4,7 +4,7 @@
 //! selectively allowed in a restricted context. presets are additive —
 //! combine them via [`ContextBuilder::preset()`](crate::ContextBuilder::preset).
 //!
-//! [`FsPolicy`] controls which filesystem paths scheme code can access.
+//! `FsPolicy` controls which filesystem paths scheme code can access.
 //! used internally by the IO wrapper functions registered via
 //! [`ContextBuilder::file_read()`](crate::ContextBuilder::file_read) and
 //! [`ContextBuilder::file_write()`](crate::ContextBuilder::file_write).

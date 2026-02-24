@@ -380,7 +380,7 @@ impl Value {
     /// convert a rust value to a raw chibi sexp
     ///
     /// useful for returning values from foreign functions registered
-    /// with [`Context::define_fn_variadic`] or `#[scheme_fn]`.
+    /// with [`crate::Context::define_fn_variadic`] or `#[scheme_fn]`.
     ///
     /// supports all value types except `Other`.
     ///
@@ -570,7 +570,7 @@ impl Value {
 
     /// extract the raw sexp pointer, if this value is a `Procedure`
     ///
-    /// the returned pointer is opaque — pass it to [`Context::call`] to invoke.
+    /// the returned pointer is opaque — pass it to [`crate::Context::call`] to invoke.
     pub fn as_procedure(&self) -> Option<ffi::sexp> {
         match self {
             Value::Procedure(raw) => Some(*raw),
@@ -596,7 +596,7 @@ impl Value {
 
     /// extract the raw sexp pointer, if this value is a `Port`
     ///
-    /// the returned pointer is opaque — pass it back to scheme via [`Context::call`].
+    /// the returned pointer is opaque — pass it back to scheme via [`crate::Context::call`].
     pub fn as_port(&self) -> Option<ffi::sexp> {
         match self {
             Value::Port(raw) => Some(*raw),
@@ -606,7 +606,7 @@ impl Value {
 
     /// extract the raw sexp pointer, if this value is a `HashTable`
     ///
-    /// the returned pointer is opaque — pass it back to scheme via [`Context::call`].
+    /// the returned pointer is opaque — pass it back to scheme via [`crate::Context::call`].
     pub fn as_hash_table(&self) -> Option<ffi::sexp> {
         match self {
             Value::HashTable(raw) => Some(*raw),

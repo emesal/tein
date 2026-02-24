@@ -1,6 +1,6 @@
 //! managed context on a dedicated thread
 //!
-//! [`ThreadLocalContext`] runs a [`Context`] on a dedicated thread and
+//! [`ThreadLocalContext`] runs a [`crate::Context`] on a dedicated thread and
 //! proxies evaluation requests over channels. supports persistent mode
 //! (state accumulates) and fresh mode (context rebuilt each call).
 //! the type is `Send + Sync`, safe to share across threads via `Arc`.
