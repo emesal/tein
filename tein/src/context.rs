@@ -401,6 +401,125 @@ unsafe extern "C" fn reader_chars_wrapper(
     unsafe { ffi::reader_dispatch_chars(ctx) }
 }
 
+/// extern "C" dispatch wrapper for `(tein-macro-expand-hook-dispatch op ...)`.
+///
+/// single native fn for all macro expansion hook operations, decomposed by
+/// scheme wrappers in `(tein macro)`:
+/// - `(tein-macro-expand-hook-dispatch 'set proc)` — set the hook
+/// - `(tein-macro-expand-hook-dispatch 'unset)` — clear the hook
+/// - `(tein-macro-expand-hook-dispatch 'get)` — return current hook or #f
+///
+/// uses a single env binding to stay within chibi's env capacity budget.
+unsafe extern "C" fn macro_expand_hook_dispatch_wrapper(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "tein-macro-expand-hook-dispatch: expected (dispatch op ...)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let op = ffi::sexp_car(args);
+        if ffi::sexp_symbolp(op) == 0 {
+            let msg = "tein-macro-expand-hook-dispatch: op must be a symbol";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let sym_str = ffi::sexp_symbol_to_string(ctx, op);
+        let c_str = std::ffi::CStr::from_ptr(ffi::sexp_string_data(sym_str));
+        match c_str.to_bytes() {
+            b"set" => {
+                let rest = ffi::sexp_cdr(args);
+                if ffi::sexp_nullp(rest) != 0 {
+                    let msg = "set-macro-expand-hook!: expected a procedure argument";
+                    let c_msg = CString::new(msg).unwrap_or_default();
+                    return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                }
+                let proc = ffi::sexp_car(rest);
+                if ffi::sexp_procedurep(proc) == 0 {
+                    let msg = "set-macro-expand-hook!: argument must be a procedure";
+                    let c_msg = CString::new(msg).unwrap_or_default();
+                    return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                }
+                ffi::macro_expand_hook_set(ctx, proc);
+                ffi::get_void()
+            }
+            b"unset" => {
+                ffi::macro_expand_hook_clear(ctx);
+                ffi::get_void()
+            }
+            b"get" => ffi::macro_expand_hook_get(),
+            _ => {
+                let msg = "tein-macro-expand-hook-dispatch: unknown op (expected set, unset, get)";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// register protocol native fns into the context's current env.
+///
+/// called during `build()` for standard env contexts, *before* sandbox
+/// restriction. defines native functions that back the `(tein reader)`
+/// and `(tein macro)` VFS modules. by registering into the source env
+/// before sandboxing, these are available via `(import ...)` even in
+/// restricted contexts.
+unsafe fn register_protocol_fns(ctx: ffi::sexp) {
+    let protocol_fns: &[(&str, unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp)] = &[
+        // reader dispatch protocol
+        ("set-reader!", reader_set_wrapper),
+        ("unset-reader!", reader_unset_wrapper),
+        ("reader-dispatch-chars", reader_chars_wrapper),
+        // macro expansion hook protocol — single dispatch fn, decomposed
+        // into set/unset/get by scheme wrappers in (tein macro) module
+        ("tein-macro-expand-hook-dispatch", macro_expand_hook_dispatch_wrapper),
+    ];
+    unsafe {
+        let env = ffi::sexp_context_env(ctx);
+        for (name, f) in protocol_fns {
+            let c_name = CString::new(*name).unwrap();
+            let f_typed: Option<
+                unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
+            > = std::mem::transmute::<*const std::ffi::c_void, _>(
+                *f as *const std::ffi::c_void,
+            );
+            ffi::sexp_define_foreign_proc(
+                ctx,
+                env,
+                c_name.as_ptr(),
+                0,
+                ffi::SEXP_PROC_VARIADIC,
+                c_name.as_ptr(),
+                f_typed,
+            );
+        }
+    }
+}
+
+/// register scheme-level wrappers for macro expansion hook operations.
+///
+/// evaluates 3 `define` forms in the current env to create the public API
+/// (`set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`)
+/// that delegate to the single `tein-macro-expand-hook-dispatch` native fn.
+unsafe fn register_macro_expand_wrappers(ctx: ffi::sexp) {
+    let wrappers = [
+        "(define (set-macro-expand-hook! proc) (tein-macro-expand-hook-dispatch 'set proc))",
+        "(define (unset-macro-expand-hook!) (tein-macro-expand-hook-dispatch 'unset))",
+        "(define (macro-expand-hook) (tein-macro-expand-hook-dispatch 'get))",
+    ];
+    for src in &wrappers {
+        unsafe {
+            let c_src = CString::new(*src).unwrap();
+            let env = ffi::sexp_context_env(ctx);
+            ffi::sexp_eval_string(ctx, c_src.as_ptr(), src.len() as ffi::sexp_sint_t, env);
+        }
+    }
+}
+
 /// the 4 file-opening primitives we wrap with policy checks
 #[derive(Clone, Copy)]
 #[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
@@ -783,6 +902,15 @@ impl ContextBuilder {
                 }
             }
 
+            // register protocol native fns into the full standard env before
+            // sandbox restriction. these are needed for (import (tein reader))
+            // and (import (tein macro)) to work — the VFS modules re-export
+            // these bindings. placed here so they exist in the source env that
+            // sandboxing copies from, rather than in the restricted env.
+            if self.standard_env {
+                register_protocol_fns(ctx);
+            }
+
             // activate VFS-only module policy if both standard_env and
             // sandbox (presets) are configured. this restricts (import ...)
             // to only load modules from the embedded VFS, blocking
@@ -940,11 +1068,12 @@ impl ContextBuilder {
                 has_port_protocol: Cell::new(false),
             };
 
-            // reader dispatch native fns are always registered for standard env
-            // contexts — cheap (3 fn registrations) and needed before any
-            // (import (tein reader)) can work.
-            if self.standard_env {
-                context.register_reader_protocol()?;
+            // define scheme-level wrappers for the macro hook dispatch fn.
+            // these evaluate (define ...) in the current env, making
+            // set-macro-expand-hook! etc. available without (import (tein macro)).
+            // only for non-sandboxed contexts; sandboxed contexts use import.
+            if self.standard_env && self.allowed_primitives.is_none() {
+                register_macro_expand_wrappers(ctx);
             }
 
             Ok(context)
@@ -1369,18 +1498,6 @@ impl Context {
         Ok(())
     }
 
-    /// register native fns for reader dispatch protocol.
-    ///
-    /// called automatically by `build()` for standard env contexts. the native
-    /// fns (`tein-reader-set!` etc.) are used by the `(tein reader)` VFS module
-    /// to provide the public API (`set-reader!`, `unset-reader!`, etc.).
-    fn register_reader_protocol(&self) -> Result<()> {
-        self.define_fn_variadic("set-reader!", reader_set_wrapper)?;
-        self.define_fn_variadic("unset-reader!", reader_unset_wrapper)?;
-        self.define_fn_variadic("reader-dispatch-chars", reader_chars_wrapper)?;
-        Ok(())
-    }
-
     /// register a reader dispatch handler for `#ch` syntax.
     ///
     /// the handler must be a scheme procedure taking one argument (the input
@@ -1415,6 +1532,48 @@ impl Context {
                 ))),
                 _ => Err(Error::EvalError("character out of ASCII range".into())),
             }
+        }
+    }
+
+    /// set a scheme procedure as the macro expansion hook.
+    ///
+    /// the hook receives `(name unexpanded expanded env)` after each macro
+    /// expansion and returns the form to use (replace-and-reanalyze semantics).
+    /// return `expanded` unchanged for observation-only mode.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// # use tein::Context;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let hook = ctx.evaluate(
+    ///     "(lambda (name unexpanded expanded env) expanded)"
+    /// )?;
+    /// ctx.set_macro_expand_hook(&hook)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_macro_expand_hook(&self, proc: &Value) -> Result<()> {
+        let raw_proc = proc
+            .as_procedure()
+            .ok_or_else(|| Error::TypeError("hook must be a procedure".into()))?;
+        unsafe { ffi::macro_expand_hook_set(self.ctx, raw_proc) };
+        Ok(())
+    }
+
+    /// clear the macro expansion hook.
+    pub fn unset_macro_expand_hook(&self) {
+        unsafe { ffi::macro_expand_hook_clear(self.ctx) };
+    }
+
+    /// return the current macro expansion hook, or `None` if not set.
+    pub fn macro_expand_hook(&self) -> Option<Value> {
+        let raw = unsafe { ffi::macro_expand_hook_get() };
+        if unsafe { ffi::sexp_booleanp(raw) != 0 } {
+            None
+        } else {
+            Some(Value::Procedure(raw))
         }
     }
 
@@ -1755,6 +1914,9 @@ impl Drop for Context {
         // clear reader dispatch table so the next context on this thread
         // starts with a clean slate (dispatch state is thread-local in C)
         unsafe { ffi::reader_dispatch_clear() };
+
+        // clear macro expansion hook (thread-local in C)
+        unsafe { ffi::macro_expand_hook_clear(self.ctx) };
 
         unsafe {
             if !self.ctx.is_null() {
