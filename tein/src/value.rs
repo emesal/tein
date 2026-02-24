@@ -1,4 +1,39 @@
 //! scheme value representation
+//!
+//! [`Value`] is the safe rust representation of a chibi-scheme sexp.
+//! most variants own their data; `Procedure`, `Port`, and `HashTable`
+//! hold raw sexp pointers valid only within the originating
+//! [`crate::Context`].
+//!
+//! # variants
+//!
+//! | variant | scheme type | rust extraction |
+//! |---------|------------|-----------------|
+//! | `Integer(i64)` | fixnum | `as_integer()` |
+//! | `Float(f64)` | flonum | `as_float()` |
+//! | `String(String)` | string | `as_str()` |
+//! | `Symbol(String)` | symbol | `as_symbol()` |
+//! | `Boolean(bool)` | `#t` / `#f` | `as_bool()` |
+//! | `List(Vec<Value>)` | proper list | `as_list()` |
+//! | `Pair(Box, Box)` | dotted pair | `as_pair()` |
+//! | `Vector(Vec<Value>)` | `#(...)` | `as_vector()` |
+//! | `Char(char)` | character | `as_char()` |
+//! | `Bytevector(Vec<u8>)` | `#u8(...)` | `as_bytevector()` |
+//! | `Port(sexp)` | port | `as_port()` |
+//! | `HashTable(sexp)` | hash-table | `as_hash_table()` |
+//! | `Nil` | `'()` | — |
+//! | `Unspecified` | void | — |
+//! | `Procedure(sexp)` | lambda/opcode | `as_procedure()` |
+//! | `Foreign { .. }` | foreign object | `ctx.foreign_ref::<T>()` |
+//! | `Other(String)` | unhandled type | — |
+//!
+//! # conversion
+//!
+//! `Value::from_raw()` converts chibi sexps to safe values. type checking
+//! order matters: flonum is checked *before* integer because chibi's
+//! integer predicate matches flonums like `4.0`.
+//!
+//! `Value::to_raw()` converts back to chibi sexps for calling into scheme.
 
 use crate::{
     error::{Error, Result},
@@ -380,7 +415,7 @@ impl Value {
     /// convert a rust value to a raw chibi sexp
     ///
     /// useful for returning values from foreign functions registered
-    /// with [`Context::define_fn_variadic`] or `#[scheme_fn]`.
+    /// with [`crate::Context::define_fn_variadic`] or `#[scheme_fn]`.
     ///
     /// supports all value types except `Other`.
     ///
@@ -570,7 +605,7 @@ impl Value {
 
     /// extract the raw sexp pointer, if this value is a `Procedure`
     ///
-    /// the returned pointer is opaque — pass it to [`Context::call`] to invoke.
+    /// the returned pointer is opaque — pass it to [`crate::Context::call`] to invoke.
     pub fn as_procedure(&self) -> Option<ffi::sexp> {
         match self {
             Value::Procedure(raw) => Some(*raw),
@@ -596,7 +631,7 @@ impl Value {
 
     /// extract the raw sexp pointer, if this value is a `Port`
     ///
-    /// the returned pointer is opaque — pass it back to scheme via [`Context::call`].
+    /// the returned pointer is opaque — pass it back to scheme via [`crate::Context::call`].
     pub fn as_port(&self) -> Option<ffi::sexp> {
         match self {
             Value::Port(raw) => Some(*raw),
@@ -606,7 +641,7 @@ impl Value {
 
     /// extract the raw sexp pointer, if this value is a `HashTable`
     ///
-    /// the returned pointer is opaque — pass it back to scheme via [`Context::call`].
+    /// the returned pointer is opaque — pass it back to scheme via [`crate::Context::call`].
     pub fn as_hash_table(&self) -> Option<ffi::sexp> {
         match self {
             Value::HashTable(raw) => Some(*raw),

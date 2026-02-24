@@ -10,22 +10,61 @@
 //! tagged lists `(__tein-foreign "type-name" handle-id)`. the actual data
 //! lives rust-side — scheme never touches it directly.
 //!
-//! # usage
+//! # dispatch chain
 //!
-//! ```ignore
-//! use tein::foreign::{ForeignType, MethodFn};
+//! when scheme calls e.g. `(counter-get obj)`:
+//!
+//! 1. auto-generated convenience proc calls `(apply foreign-call obj 'get args)`
+//! 2. `foreign-call` (native fn) reads `FOREIGN_STORE_PTR` from thread-local storage
+//! 3. `dispatch_foreign_call` extracts handle ID, looks up type + method
+//! 4. method's [`MethodFn`] is called with `&mut dyn Any` + [`MethodContext`] + args
+//! 5. returned [`crate::Value`] is converted back to a scheme sexp
+//!
+//! `FOREIGN_STORE_PTR` is set by [`crate::Context::evaluate()`] /
+//! [`crate::Context::call()`] via an RAII guard and cleared on return,
+//! so foreign dispatch is only active during evaluation.
+//!
+//! # complete example
+//!
+//! ```
+//! use tein::{Context, ForeignType, MethodFn, Value};
 //!
 //! struct Counter { n: i64 }
 //!
 //! impl ForeignType for Counter {
 //!     fn type_name() -> &'static str { "counter" }
 //!     fn methods() -> &'static [(&'static str, MethodFn)] {
-//!         &[("get", |obj, _ctx, _args| {
-//!             let c = obj.downcast_ref::<Counter>().unwrap();
-//!             Ok(Value::Integer(c.n))
-//!         })]
+//!         &[
+//!             ("increment", |obj, _ctx, _args| {
+//!                 let c = obj.downcast_mut::<Counter>().unwrap();
+//!                 c.n += 1;
+//!                 Ok(Value::Integer(c.n))
+//!             }),
+//!             ("get", |obj, _ctx, _args| {
+//!                 let c = obj.downcast_ref::<Counter>().unwrap();
+//!                 Ok(Value::Integer(c.n))
+//!             }),
+//!         ]
 //!     }
 //! }
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = Context::new_standard()?;
+//!
+//! // register type — auto-generates counter?, counter-increment, counter-get
+//! ctx.register_foreign_type::<Counter>()?;
+//!
+//! // create a foreign value and call methods via ctx.call
+//! let c = ctx.foreign_value(Counter { n: 0 })?;
+//! let inc = ctx.evaluate("counter-increment")?;
+//! let get = ctx.evaluate("counter-get")?;
+//!
+//! ctx.call(&inc, std::slice::from_ref(&c))?;
+//! ctx.call(&inc, std::slice::from_ref(&c))?;
+//! let result = ctx.call(&get, std::slice::from_ref(&c))?;
+//! assert_eq!(result, Value::Integer(2));
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::Value;

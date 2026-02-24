@@ -1,11 +1,39 @@
 //! wall-clock timeout wrapper for scheme contexts
 //!
-//! [`TimeoutContext`] runs a [`Context`] on a dedicated thread and enforces
+//! [`TimeoutContext`] runs a [`crate::Context`] on a dedicated thread and enforces
 //! wall-clock deadlines on evaluation calls. the underlying context never
-//! crosses thread boundaries (satisfying !Send).
+//! crosses thread boundaries (satisfying `!Send`).
 //!
 //! requires `step_limit` to be set on the builder so the context thread
 //! is guaranteed to eventually terminate after a timeout fires.
+//!
+//! # when to use
+//!
+//! - **`TimeoutContext`** — single-owner, wall-clock deadlines, state persists
+//! - **[`crate::managed::ThreadLocalContext`]** — `Send + Sync`, persistent or
+//!   fresh modes, no built-in timeout
+//! - **[`crate::Context`]** — single-threaded, no timeout, maximum control
+//!
+//! # example
+//!
+//! ```
+//! use tein::{Context, Value, Error};
+//! use std::time::Duration;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = Context::builder()
+//!     .step_limit(1_000_000)
+//!     .build_timeout(Duration::from_secs(5))?;
+//!
+//! let result = ctx.evaluate("(+ 1 2 3)")?;
+//! assert_eq!(result, Value::Integer(6));
+//!
+//! // state persists between evaluations
+//! ctx.evaluate("(define x 42)")?;
+//! assert_eq!(ctx.evaluate("x")?, Value::Integer(42));
+//! # Ok(())
+//! # }
+//! ```
 
 use std::sync::mpsc;
 use std::thread;
@@ -18,7 +46,7 @@ use crate::thread::{ForeignFnPtr, Request, Response, SendableValue};
 
 /// a scheme context with wall-clock timeout enforcement
 ///
-/// wraps a [`Context`] running on a dedicated thread. each evaluation
+/// wraps a [`crate::Context`] running on a dedicated thread. each evaluation
 /// call has a wall-clock deadline; if exceeded, `Error::Timeout` is returned.
 ///
 /// the context thread is bounded by the step limit — after timeout fires,

@@ -1,13 +1,84 @@
 //! sandboxing presets and filesystem policy for restricted scheme environments
 //!
-//! each preset defines a set of chibi-scheme primitive names that can be
-//! selectively allowed in a restricted context. presets are additive —
-//! combine them via [`ContextBuilder::preset()`](crate::ContextBuilder::preset).
+//! tein's sandboxing has four independent layers:
 //!
-//! [`FsPolicy`] controls which filesystem paths scheme code can access.
-//! used internally by the IO wrapper functions registered via
+//! 1. **environment restriction** — expose only selected primitives via presets
+//! 2. **step limits** — cap VM instructions per evaluation
+//! 3. **file IO policy** — allowlist filesystem paths for reading/writing
+//! 4. **module policy** — restrict `(import ...)` to VFS-only modules
+//!
+//! # presets
+//!
+//! each [`Preset`] defines a set of chibi-scheme primitive names. presets are
+//! additive — combine them via [`ContextBuilder::preset()`](crate::ContextBuilder::preset).
+//! core syntax (`define`, `lambda`, `if`, `set!`, `quote`, etc.) is always
+//! available regardless of preset selection.
+//!
+//! ```
+//! use tein::Context;
+//! use tein::sandbox::{ARITHMETIC, LISTS};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = Context::builder()
+//!     .preset(&ARITHMETIC)
+//!     .preset(&LISTS)
+//!     .step_limit(50_000)
+//!     .build()?;
+//!
+//! // arithmetic and list ops work
+//! let result = ctx.evaluate("(+ 1 (car (cons 2 3)))")?;
+//! assert_eq!(result, tein::Value::Integer(3));
+//!
+//! // string ops are blocked
+//! assert!(ctx.evaluate(r#"(string-length "hello")"#).is_err());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # preset reference
+//!
+//! | preset | primitives |
+//! |--------|-----------|
+//! | [`ARITHMETIC`] | `+`, `-`, `*`, `/`, `quotient`, `remainder`, `expt`, comparisons, exact↔inexact |
+//! | [`MATH`] | `exp`, `ln`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan1`, `sqrt`, rounding |
+//! | [`LISTS`] | `car`, `cdr`, `cons`, `null?`, `pair?`, `list?`, `length*`, `reverse`, `append2`, `memq`, `assq` |
+//! | [`VECTORS`] | `vector-ref`, `vector-set!`, `vector-length`, `make-vector`, `list->vector` |
+//! | [`STRINGS`] | `string-ref`, `string-length`, `substring`, `string?`, conversions, `make-string` |
+//! | [`CHARACTERS`] | `char?`, `char->integer`, `integer->char`, `char-upcase`, `char-downcase` |
+//! | [`TYPE_PREDICATES`] | `eq?`, `equal?`, `null?`, `symbol?`, `char?`, `fixnum?`, `flonum?`, type tests |
+//! | [`MUTATION`] | `set-car!`, `set-cdr!`, `vector-set!`, `string-set!` |
+//! | [`STRING_PORTS`] | `open-input-string`, `open-output-string`, `get-output-string` |
+//! | [`STDOUT_ONLY`] | `write`, `write-char`, `flush-output`, `current-output-port`, `current-error-port` |
+//! | [`EXCEPTIONS`] | `make-exception`, `raise`, exception accessors |
+//! | [`BYTEVECTORS`] | `bytevector-u8-ref`, `bytevector-u8-set!`, `bytevector-length`, `make-bytevector` |
+//! | [`IO_READ`] | `read`, `read-char`, `peek-char`, `char-ready?`, `current-input-port` |
+//! | [`CONTROL`] | `apply1`, `%call/cc` |
+//!
+//! # convenience builders
+//!
+//! two convenience methods on [`crate::ContextBuilder`] compose presets for common use cases:
+//!
+//! - [`.pure_computation()`](crate::ContextBuilder::pure_computation) — `ARITHMETIC` + `MATH` +
+//!   `LISTS` + `VECTORS` + `STRINGS` + `CHARACTERS` + `TYPE_PREDICATES`
+//! - [`.safe()`](crate::ContextBuilder::safe) — `pure_computation()` + `MUTATION` +
+//!   `STRING_PORTS` + `STDOUT_ONLY` + `EXCEPTIONS`
+//!
+//! # file IO policy
+//!
+//! `FsPolicy` controls which filesystem paths scheme code can access.
+//! registered internally via
 //! [`ContextBuilder::file_read()`](crate::ContextBuilder::file_read) and
 //! [`ContextBuilder::file_write()`](crate::ContextBuilder::file_write).
+//! paths are canonicalised before prefix-checking, so symlink and `..`
+//! traversals are resolved.
+//!
+//! # module policy
+//!
+//! when a sandboxed context uses the standard environment, the module
+//! policy is automatically set to VFS-only — `(import ...)` can only
+//! load modules embedded in tein's virtual filesystem, not from the
+//! host filesystem. this prevents sandbox escapes via modules like
+//! `(chibi process)` or `(chibi filesystem)`.
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;

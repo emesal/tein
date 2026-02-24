@@ -1,4 +1,42 @@
 //! scheme evaluation context
+//!
+//! [`Context`] is a single-threaded scheme evaluation environment backed
+//! by a chibi-scheme heap. create one directly with [`Context::new()`] or
+//! configure via [`ContextBuilder`] for sandboxing, step limits, and
+//! environment control.
+//!
+//! # builder pattern
+//!
+//! ```
+//! use tein::Context;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = Context::builder()
+//!     .standard_env()                   // load (scheme base)
+//!     .preset(&tein::sandbox::ARITHMETIC) // restrict to arithmetic
+//!     .step_limit(100_000)              // cap vm steps
+//!     .build()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # evaluation
+//!
+//! - [`Context::evaluate()`] — evaluate a scheme expression string
+//! - [`Context::call()`] — call a scheme procedure with rust arguments
+//! - [`Context::load_file()`] — load and evaluate a `.scm` file
+//!
+//! # sandboxing
+//!
+//! four independent layers of control:
+//!
+//! 1. **environment restriction** — [`ContextBuilder::preset()`] / [`.allow()`](ContextBuilder::allow) /
+//!    [`.pure_computation()`](ContextBuilder::pure_computation) / [`.safe()`](ContextBuilder::safe)
+//! 2. **step limits** — [`ContextBuilder::step_limit()`]
+//! 3. **file IO policy** — [`ContextBuilder::file_read()`] / [`.file_write()`](ContextBuilder::file_write)
+//! 4. **module policy** — automatic VFS-only when using standard env + presets
+//!
+//! see the [`sandbox`](crate::sandbox) module for preset details.
 
 use crate::{
     Value,
@@ -677,7 +715,11 @@ const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
 /// builder for configuring a scheme context before creation
 ///
 /// provides a fluent api for setting heap sizes, step limits,
-/// and environment restrictions (sandboxing).
+/// environment restrictions (sandboxing), file IO policies, and
+/// standard library loading. finish with [`build()`](Self::build),
+/// [`build_managed()`](Self::build_managed), or
+/// [`build_timeout()`](crate::TimeoutContext) depending on your
+/// threading needs.
 ///
 /// # examples
 ///
@@ -1078,8 +1120,13 @@ impl ContextBuilder {
 
 /// a scheme evaluation context
 ///
-/// this is the main entry point for evaluating scheme code.
-/// each context maintains its own heap and environment.
+/// the main entry point for evaluating scheme code. each context owns a
+/// chibi-scheme heap and environment. intentionally `!Send + !Sync` — for
+/// cross-thread use, see [`crate::ThreadLocalContext`] or [`crate::TimeoutContext`].
+///
+/// use [`Context::new()`] for a quick primitive environment, or
+/// [`Context::builder()`] to configure sandboxing, step limits, file IO
+/// policies, and the standard library.
 ///
 /// # examples
 ///

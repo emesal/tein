@@ -1,4 +1,37 @@
 //! error types for tein
+//!
+//! all fallible operations in tein return [`Result<T>`](Result), which uses
+//! [`Error`] as the error type. [`Error`] implements `std::error::Error`
+//! and converts from `std::io::Error` and utf-8 errors.
+//!
+//! # when each variant occurs
+//!
+//! | variant | cause |
+//! |---------|-------|
+//! | [`Error::EvalError`] | scheme evaluation error (syntax, unbound variable, etc.) |
+//! | [`Error::TypeError`] | rust↔scheme type conversion failure |
+//! | [`Error::InitError`] | context creation or thread communication failure |
+//! | [`Error::Utf8Error`] | invalid utf-8 in scheme string/symbol |
+//! | [`Error::IoError`] | file or port IO failure |
+//! | [`Error::StepLimitExceeded`] | evaluation exceeded [`ContextBuilder::step_limit()`](crate::ContextBuilder::step_limit) |
+//! | [`Error::Timeout`] | evaluation exceeded [`TimeoutContext`](crate::TimeoutContext) deadline |
+//! | [`Error::SandboxViolation`] | blocked module import, denied file access, or missing preset |
+//!
+//! # example
+//!
+//! ```
+//! use tein::{Context, Error};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let ctx = Context::builder().step_limit(100).build()?;
+//!
+//! match ctx.evaluate("((lambda () (define (f) (f)) (f)))") {
+//!     Err(Error::StepLimitExceeded) => { /* expected */ }
+//!     other => panic!("unexpected: {:?}", other),
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use std::fmt;
 

@@ -1,9 +1,47 @@
 //! managed context on a dedicated thread
 //!
-//! [`ThreadLocalContext`] runs a [`Context`] on a dedicated thread and
-//! proxies evaluation requests over channels. supports persistent mode
-//! (state accumulates) and fresh mode (context rebuilt each call).
-//! the type is `Send + Sync`, safe to share across threads via `Arc`.
+//! [`ThreadLocalContext`] runs a [`crate::Context`] on a dedicated thread and
+//! proxies evaluation requests over channels. the type is `Send + Sync`,
+//! safe to share across threads via `Arc`.
+//!
+//! # modes
+//!
+//! | | persistent | fresh |
+//! |---|---|---|
+//! | **state** | accumulates across calls | rebuilt each call |
+//! | **init closure** | runs once at creation | runs before every evaluation |
+//! | **`reset()`** | tears down + rebuilds | no-op |
+//! | **use case** | REPL, stateful scripting | deterministic evaluation |
+//!
+//! # when to use
+//!
+//! - need `Send + Sync` for scheme evaluation → [`ThreadLocalContext`]
+//! - need wall-clock timeouts → [`crate::TimeoutContext`]
+//! - single-threaded use → [`crate::Context`] directly
+//!
+//! # example
+//!
+//! ```
+//! use tein::{Context, Value};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // persistent: state accumulates
+//! let ctx = Context::builder()
+//!     .step_limit(1_000_000)
+//!     .build_managed(|ctx| {
+//!         ctx.evaluate("(define counter 0)")?;
+//!         Ok(())
+//!     })?;
+//!
+//! ctx.evaluate("(set! counter (+ counter 1))")?;
+//! ctx.evaluate("(set! counter (+ counter 1))")?;
+//! assert_eq!(ctx.evaluate("counter")?, Value::Integer(2));
+//!
+//! ctx.reset()?; // rebuilds, re-runs init
+//! assert_eq!(ctx.evaluate("counter")?, Value::Integer(0));
+//! # Ok(())
+//! # }
+//! ```
 
 use std::sync::Mutex;
 use std::sync::mpsc;
