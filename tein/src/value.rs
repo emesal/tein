@@ -1,4 +1,39 @@
 //! scheme value representation
+//!
+//! [`Value`] is the safe rust representation of a chibi-scheme sexp.
+//! most variants own their data; `Procedure`, `Port`, and `HashTable`
+//! hold raw sexp pointers valid only within the originating
+//! [`crate::Context`].
+//!
+//! # variants
+//!
+//! | variant | scheme type | rust extraction |
+//! |---------|------------|-----------------|
+//! | `Integer(i64)` | fixnum | `as_integer()` |
+//! | `Float(f64)` | flonum | `as_float()` |
+//! | `String(String)` | string | `as_str()` |
+//! | `Symbol(String)` | symbol | `as_symbol()` |
+//! | `Boolean(bool)` | `#t` / `#f` | `as_bool()` |
+//! | `List(Vec<Value>)` | proper list | `as_list()` |
+//! | `Pair(Box, Box)` | dotted pair | `as_pair()` |
+//! | `Vector(Vec<Value>)` | `#(...)` | `as_vector()` |
+//! | `Char(char)` | character | `as_char()` |
+//! | `Bytevector(Vec<u8>)` | `#u8(...)` | `as_bytevector()` |
+//! | `Port(sexp)` | port | `as_port()` |
+//! | `HashTable(sexp)` | hash-table | `as_hash_table()` |
+//! | `Nil` | `'()` | — |
+//! | `Unspecified` | void | — |
+//! | `Procedure(sexp)` | lambda/opcode | `as_procedure()` |
+//! | `Foreign { .. }` | foreign object | `ctx.foreign_ref::<T>()` |
+//! | `Other(String)` | unhandled type | — |
+//!
+//! # conversion
+//!
+//! `Value::from_raw()` converts chibi sexps to safe values. type checking
+//! order matters: flonum is checked *before* integer because chibi's
+//! integer predicate matches flonums like `4.0`.
+//!
+//! `Value::to_raw()` converts back to chibi sexps for calling into scheme.
 
 use crate::{
     error::{Error, Result},
