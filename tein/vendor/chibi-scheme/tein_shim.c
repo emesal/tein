@@ -398,3 +398,31 @@ void tein_reader_dispatch_clear(void) {
     for (int i = 0; i < TEIN_READER_DISPATCH_SIZE; i++)
         tein_reader_dispatch[i] = SEXP_FALSE;
 }
+
+// ─── macro expansion hook ───────────────────────────────────────────
+// thread-local hook called after each macro expansion. when set (not
+// SEXP_FALSE), the hook receives (name unexpanded expanded env) and
+// its return value replaces the expanded form (replace-and-reanalyze).
+// the active flag prevents recursion when the hook body uses macros.
+
+TEIN_THREAD_LOCAL sexp tein_macro_expand_hook = SEXP_FALSE;
+TEIN_THREAD_LOCAL int tein_macro_expand_hook_active = 0;
+
+void tein_macro_expand_hook_set(sexp ctx, sexp proc) {
+    if (tein_macro_expand_hook != SEXP_FALSE)
+        sexp_release_object(ctx, tein_macro_expand_hook);
+    tein_macro_expand_hook = proc;
+    if (proc != SEXP_FALSE)
+        sexp_preserve_object(ctx, proc);
+}
+
+sexp tein_macro_expand_hook_get(void) {
+    return tein_macro_expand_hook;
+}
+
+void tein_macro_expand_hook_clear(sexp ctx) {
+    if (tein_macro_expand_hook != SEXP_FALSE)
+        sexp_release_object(ctx, tein_macro_expand_hook);
+    tein_macro_expand_hook = SEXP_FALSE;
+    tein_macro_expand_hook_active = 0;
+}
