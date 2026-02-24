@@ -58,7 +58,7 @@
   - [x] module import policy: VFS-only restriction in sandboxed standard-env contexts
     - C-level interception in sexp_find_module_file_raw via tein_module_allowed()
     - automatic: standard_env + any preset → VfsOnly, no explicit API needed
-  - [x] import during standard env: GC rooting fix (default 4MB heap)
+  - [x] import during standard env: GC rooting fix (default 8MB heap)
     - root cause: rust locals invisible to chibi GC (no conservative stack scanning)
     - fix: sexp_preserve_object in evaluate(), gc_preserve fix in sexp_load_op VFS patch
   - [x] sandboxed import: `.allow(&["import"])` enables idiomatic r7rs imports in sandbox
@@ -77,7 +77,12 @@
 - [x] **REPL example** — interactive scheme session with rustyline
 - [ ] **WASM target** — chibi compiles via emscripten
 - [x] **serde data format** — s-expression ↔ rust structs via tein-sexp (hardened: alist fix, Sexp value type, IO API, attribute compat)
-- [ ] **macro expansion hooks**
+- [x] **macro expansion hooks**
+  - thread-local hook in `tein_shim.c` + eval.c patch in `analyze_macro_once()`
+  - `(tein macro)` VFS module: `set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`
+  - `Context::set_macro_expand_hook`, `unset_macro_expand_hook`, `macro_expand_hook` rust API
+  - 3 individual native fns registered via `register_protocol_fns`, replace-and-reanalyse semantics, recursion guard, GC-safe
+  - 13 tests: observation, transformation, reanalyse, unset, recursion, errors, introspection, cleanup, sandbox, rust API, via import
 - [x] **custom ports** — rust `Read`/`Write` as scheme input/output ports
   - `open_input_port`/`open_output_port` → `PortStore` + thread-local trampoline
   - `read()` for single s-expression, `evaluate_port()` for read+eval loop

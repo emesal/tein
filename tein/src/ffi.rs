@@ -199,6 +199,11 @@ unsafe extern "C" {
     pub fn tein_reader_dispatch_chars(ctx: sexp) -> sexp;
     pub fn tein_reader_dispatch_clear();
     pub fn tein_reader_char_is_reserved(c: c_int) -> c_int;
+
+    // macro expansion hook
+    pub fn tein_macro_expand_hook_set(ctx: sexp, proc: sexp);
+    pub fn tein_macro_expand_hook_get() -> sexp;
+    pub fn tein_macro_expand_hook_clear(ctx: sexp);
 }
 
 // convenience wrappers that call our shim layer
@@ -695,4 +700,23 @@ pub unsafe fn reader_dispatch_clear() {
 #[inline]
 pub unsafe fn reader_char_is_reserved(c: c_int) -> bool {
     unsafe { tein_reader_char_is_reserved(c) != 0 }
+}
+
+/// set the macro expansion hook procedure, or SEXP_FALSE to clear.
+/// GC-safe: preserves the proc and releases any previous hook.
+#[inline]
+pub unsafe fn macro_expand_hook_set(ctx: sexp, proc: sexp) {
+    unsafe { tein_macro_expand_hook_set(ctx, proc) }
+}
+
+/// get the current macro expansion hook, or SEXP_FALSE if none.
+#[inline]
+pub unsafe fn macro_expand_hook_get() -> sexp {
+    unsafe { tein_macro_expand_hook_get() }
+}
+
+/// clear the macro expansion hook, releasing the GC reference.
+#[inline]
+pub unsafe fn macro_expand_hook_clear(ctx: sexp) {
+    unsafe { tein_macro_expand_hook_clear(ctx) }
 }
