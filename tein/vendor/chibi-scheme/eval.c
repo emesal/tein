@@ -12,6 +12,16 @@
 extern const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length);
 /* tein module policy: forward declaration for import restriction (tein_shim.c) */
 extern int tein_module_allowed(const char *path);
+/* tein macro expansion hook: thread-local hook + recursion guard (tein_shim.c) */
+#ifndef TEIN_THREAD_LOCAL
+#ifdef _MSC_VER
+#define TEIN_THREAD_LOCAL __declspec(thread)
+#else
+#define TEIN_THREAD_LOCAL __thread
+#endif
+#endif
+extern TEIN_THREAD_LOCAL sexp tein_macro_expand_hook;
+extern TEIN_THREAD_LOCAL int tein_macro_expand_hook_active;
 
 /************************************************************************/
 
@@ -772,10 +782,10 @@ static sexp analyze_seq (sexp ctx, sexp ls, int depth, int defok) {
   return res;
 }
 
-static sexp analyze_macro_once (sexp ctx, sexp x, sexp op, int depth) {
+static sexp analyze_macro_once (sexp ctx, sexp name, sexp x, sexp op, int depth) {
   sexp res;
-  sexp_gc_var1(tmp);
-  sexp_gc_preserve1(ctx, tmp);
+  sexp_gc_var2(tmp, hook_args);
+  sexp_gc_preserve2(ctx, tmp, hook_args);
   tmp = sexp_cons(ctx, sexp_macro_env(op), SEXP_NULL);
   tmp = sexp_cons(ctx, sexp_context_env(ctx), tmp);
   tmp = sexp_cons(ctx, x, tmp);
@@ -788,7 +798,18 @@ static sexp analyze_macro_once (sexp ctx, sexp x, sexp op, int depth) {
     else if (sexp_exceptionp(res) && sexp_not(sexp_exception_source(x)))
       sexp_exception_source(res) = sexp_pair_source(sexp_car(tmp));
   }
-  sexp_gc_release1(ctx);
+  /* tein: macro expansion hook (D) */
+  if (!sexp_exceptionp(res) && tein_macro_expand_hook != SEXP_FALSE
+      && !tein_macro_expand_hook_active) {
+    tein_macro_expand_hook_active = 1;
+    hook_args = sexp_cons(ctx, sexp_context_env(ctx), SEXP_NULL);
+    hook_args = sexp_cons(ctx, res, hook_args);
+    hook_args = sexp_cons(ctx, x, hook_args);
+    hook_args = sexp_cons(ctx, name, hook_args);
+    res = sexp_apply(ctx, tein_macro_expand_hook, hook_args);
+    tein_macro_expand_hook_active = 0;
+  }
+  sexp_gc_release2(ctx);
   return res;
 }
 
@@ -823,7 +844,7 @@ static sexp analyze_set (sexp ctx, sexp x, int depth) {
       if (!sexp_procedure_variable_transformer_p(sexp_macro_proc(op))) {
         res = sexp_compile_error(ctx, "can't mutate a syntax keyword", sexp_cadr(x));
       } else {
-        res = analyze_macro_once(ctx, x, op, depth);
+        res = analyze_macro_once(ctx, sexp_car(x), x, op, depth);
       }
     } else {
       ref = analyze_var_ref(ctx, sexp_cadr(x), &varenv);
@@ -1161,7 +1182,7 @@ static sexp analyze (sexp ctx, sexp object, int depth, int defok) {
             res = sexp_compile_error(ctx, "unknown core form", op); break;
           }
         } else if (sexp_macrop(op)) {
-          x = analyze_macro_once(ctx, x, op, depth);
+          x = analyze_macro_once(ctx, sexp_car(x), x, op, depth);
           goto loop;
         } else if (sexp_opcodep(op)) {
           res = sexp_length(ctx, sexp_cdr(x));
@@ -1196,7 +1217,7 @@ static sexp analyze (sexp ctx, sexp object, int depth, int defok) {
     cell = sexp_env_cell(ctx, sexp_context_env(ctx), x, 0);
     op = cell ? sexp_cdr(cell) : NULL;
     if (op && sexp_macrop(op)) {
-      x = analyze_macro_once(ctx, x, op, depth);
+      x = analyze_macro_once(ctx, x, x, op, depth);
       goto loop;
     } else {
       res = analyze_var_ref(ctx, x, NULL);
