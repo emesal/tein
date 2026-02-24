@@ -1,74 +1,74 @@
 # tein architecture
 
-> *branch and rune-stick* — embeddable chibi-scheme for rust
+> *Branch and rune-stick* — embeddable Chibi-Scheme for Rust
 
-## project status
+## Project status
 
-### completed milestones
+### Completed milestones
 
-**milestone 1 — core types & ergonomics**
-- vendored chibi-scheme 0.11 with custom build system
-- c ffi shim layer (`tein_shim.c`) for macro-based apis
-- safe rust wrappers around unsafe c functions
-- all core value types: integers, floats, strings, symbols, booleans, lists, pairs, vectors, nil, procedures
-- typed extraction helpers (`as_integer()`, `as_list()`, `is_procedure()`, etc.)
-- bidirectional value bridge (`Value::to_raw()` ↔ `Value::from_raw()`)
-- multi-expression evaluation, file loading
-- tortoise-and-hare cycle detection, depth limits
+**Milestone 1 — core types & ergonomics**
+- Vendored Chibi-Scheme 0.11 with custom build system
+- C FFI shim layer (`tein_shim.c`) for macro-based APIs
+- Safe Rust wrappers around unsafe C functions
+- All core value types: integers, floats, strings, symbols, booleans, lists, pairs, vectors, nil, procedures
+- Typed extraction helpers (`as_integer()`, `as_list()`, `is_procedure()`, etc.)
+- Bidirectional value bridge (`Value::to_raw()` ↔ `Value::from_raw()`)
+- Multi-expression evaluation, file loading
+- Tortoise-and-hare cycle detection, depth limits
 
-**milestone 2 — scheme as extension language**
-- procedures as values via `sexp_applicablep`
-- `ctx.call(proc, &[args])` for rust→scheme callbacks
-- `define_fn_variadic` for registering rust functions
-- `#[scheme_fn]` proc macro for ergonomic ffi
-- panic safety at ffi boundary
+**Milestone 2 — Scheme as extension language**
+- Procedures as values via `sexp_applicablep`
+- `ctx.call(proc, &[args])` for Rust→Scheme callbacks
+- `define_fn_variadic` for registering Rust functions
+- `#[scheme_fn]` proc macro for ergonomic FFI
+- Panic safety at FFI boundary
 
-**milestone 3 — tein-sexp pure rust s-expression crate**
-- separate workspace crate, no chibi dependency
+**Milestone 3 — tein-sexp pure Rust s-expression crate**
+- Separate workspace crate, no Chibi dependency
 - `Sexp` AST with source spans
-- r7rs-compatible lexer and parser
-- comment preservation mode
-- pretty printer with configurable output
+- R7RS-compatible lexer and parser
+- Comment preservation mode
+- Pretty printer with configurable output
 
-**milestone 4a — sandboxing & resource limits**
-- `ContextBuilder` with fluent api for heap sizes, step limits, and environment restriction
-- fuel-based step limiting via thread-local counters + vm.c patch
-- allowlist-based sandbox presets using chibi's null env (14 presets)
+**Milestone 4a — sandboxing & resource limits**
+- `ContextBuilder` with fluent API for heap sizes, step limits, and environment restriction
+- Fuel-based step limiting via thread-local counters + vm.c patch
+- Allowlist-based sandbox presets using Chibi's null env (14 presets)
 - `TimeoutContext` for wall-clock deadlines via dedicated thread
 - `Error::StepLimitExceeded` and `Error::Timeout` variants
 
-**milestone 4b — parameterised IO presets**
+**Milestone 4b — parameterised IO presets**
 - `FsPolicy` with path prefix matching and canonicalisation
-- wrapper foreign functions for all 4 file-open primitives
-- `.file_read(&[...])` / `.file_write(&[...])` builder api
-- support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
-- path traversal and symlink protection via `canonicalize()`
+- Wrapper foreign functions for all 4 file-open primitives
+- `.file_read(&[...])` / `.file_write(&[...])` builder API
+- Support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
+- Path traversal and symlink protection via `canonicalize()`
 
-**r7rs standard environment**
+**R7RS standard environment**
 - VFS + static libs + eval.c patches for embedded module loading
 - `Context::new_standard()` / `ContextBuilder::standard_env()` API
 - ~200 bindings (map, for-each, values, dynamic-wind, etc.)
 - `ModulePolicy`: VFS-only import restriction in sandboxed standard-env contexts
 - C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
 
-### known limitations
+### Known limitations
 
-1. **limited type coverage**
-   - hash tables and ports are opaque (`Value::HashTable`, `Value::Port`) — no rich rust api
-   - continuations surface as `Value::Procedure` (chibi uses the same type tag)
+1. **Limited type coverage**
+   - Hash tables and ports are opaque (`Value::HashTable`, `Value::Port`) — no rich Rust API
+   - Continuations surface as `Value::Procedure` (Chibi uses the same type tag)
 
-## architecture
+## Architecture
 
-### directory structure
+### Directory structure
 ```
 tein/
   src/
-    lib.rs       — public api re-exports
+    lib.rs       — public API re-exports
     context.rs   — Context, ContextBuilder, evaluation, fuel mgmt, all tests
     value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
     error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
                    IoError, StepLimitExceeded, Timeout, SandboxViolation)
-    ffi.rs       — unsafe c bindings + safe wrappers, `raw` module
+    ffi.rs       — unsafe C bindings + safe wrappers, `raw` module
     foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore, dispatch
     managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
     port.rs      — PortStore: Read/Write bridge via thread-local trampoline
@@ -76,7 +76,7 @@ tein/
     thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
     timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
   vendor/chibi-scheme/
-    tein_shim.c  — exports chibi c macros as real functions, fuel control,
+    tein_shim.c  — exports chibi C macros as real functions, fuel control,
                    environment manipulation, module import policy,
                    custom port creation, reader dispatch table,
                    macro expansion hook
@@ -87,14 +87,14 @@ tein/
     lib/tein/foreign.sld/.scm — (tein foreign) predicates
     lib/tein/reader.sld/.scm  — (tein reader) dispatch fns
     lib/tein/macro.sld/.scm   — (tein macro) expansion hook fns
-  build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
+  build.rs       — compiles Chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs,
                    foreign_types.rs, managed.rs, repl.rs
 tein-macros/     — #[scheme_fn] proc macro crate
-tein-sexp/       — pure rust s-expression parser/printer
+tein-sexp/       — pure Rust s-expression parser/printer
 ```
 
-### data flow
+### Data flow
 
 ```
 rust code → Context::evaluate()
@@ -105,7 +105,7 @@ rust code → Context::evaluate()
   → rust Value enum (or Error::StepLimitExceeded)
 ```
 
-### sandboxing flow
+### Sandboxing flow
 
 ```
 ContextBuilder::build() with presets:
@@ -128,7 +128,7 @@ ContextBuilder with file_read/file_write:
   6. on Context::drop(): clear FsPolicy and ORIGINAL_PROCS thread-locals
 ```
 
-### module import policy
+### Module import policy
 
 ```
 ContextBuilder with standard_env + presets:
@@ -143,10 +143,10 @@ ContextBuilder with standard_env + presets:
 
 **VFS safety contract**: VFS modules are safe by construction — tein curates
 the embedded virtual filesystem to ensure no module can bypass the existing
-safety layers (preset allowlists, FsPolicy, fuel/timeout). capabilities
+safety layers (preset allowlists, FsPolicy, fuel/timeout). Capabilities
 exposed by VFS modules remain subject to these controls.
 
-**security layers** (independent, composable):
+**Security layers** (independent, composable):
 
 | layer              | gates                                    |
 |--------------------|------------------------------------------|
@@ -155,20 +155,20 @@ exposed by VFS modules remain subject to these controls.
 | FsPolicy           | which filesystem paths can be opened     |
 | fuel/timeout       | resource exhaustion                      |
 
-### thread safety
+### Thread safety
 
-- `Context` is intentionally !Send + !Sync (chibi is not thread-safe)
+- `Context` is intentionally !Send + !Sync (Chibi is not thread-safe)
 - `TimeoutContext` wraps Context on a dedicated thread for wall-clock deadlines
 - `ThreadLocalContext` generalises the pattern: persistent mode (state accumulates, `reset()` rebuilds) or fresh mode (context rebuilt before every call)
-- both types are `Send + Sync` via channel-based proxying; the Context itself never leaves its thread
-- shared channel protocol in `thread.rs`: `Request`/`Response`/`SendableValue`/`ForeignFnPtr`
-- fuel counters are `__thread` (thread-local) so parallel tests don't interfere
+- Both types are `Send + Sync` via channel-based proxying; the Context itself never leaves its thread
+- Shared channel protocol in `thread.rs`: `Request`/`Response`/`SendableValue`/`ForeignFnPtr`
+- Fuel counters are `__thread` (thread-local) so parallel tests don't interfere
 
-### key design decisions
+### Key design decisions
 
-**GC safety — `ffi::GcRoot`**: chibi's conservative stack scanning is disabled in our build. the GC does NOT see rust locals — only objects reachable from the context's heap roots survive collection. any `sexp` held as a rust local across an allocation point must be rooted via `ffi::GcRoot`, an RAII guard that calls `sexp_preserve_object` on creation and `sexp_release_object` on drop.
+**GC safety — `ffi::GcRoot`**: Chibi's conservative stack scanning is disabled in our build. The GC does NOT see Rust locals — only objects reachable from the context's heap roots survive collection. Any `sexp` held as a Rust local across an allocation point must be rooted via `ffi::GcRoot`, an RAII guard that calls `sexp_preserve_object` on creation and `sexp_release_object` on drop.
 
-allocating FFI calls (trigger GC, require rooting across):
+Allocating FFI calls (trigger GC, require rooting across):
 - `sexp_make_flonum`, `sexp_c_str`, `sexp_intern` — create heap objects
 - `sexp_cons`, `sexp_make_vector` — create containers
 - `sexp_symbol_to_string` — allocates a string from a symbol
@@ -177,33 +177,33 @@ allocating FFI calls (trigger GC, require rooting across):
 - `sexp_env_define`, `env_copy_named`, `sexp_define_foreign_proc` — env mutation
 - `sexp_preserve_object` itself — allocates a cons cell on the preservatives list
 
-non-allocating FFI calls (safe, no rooting needed):
-- type predicates: `sexp_integerp`, `sexp_flonump`, `sexp_pairp`, etc.
-- value extractors: `sexp_unbox_fixnum`, `sexp_flonum_value`, `sexp_string_data`, `sexp_car`, `sexp_cdr`, `sexp_vector_data`
-- immediate constructors: `sexp_make_fixnum`, `sexp_make_boolean`, `get_null`, `get_void`
+Non-allocating FFI calls (safe, no rooting needed):
+- Type predicates: `sexp_integerp`, `sexp_flonump`, `sexp_pairp`, etc.
+- Value extractors: `sexp_unbox_fixnum`, `sexp_flonum_value`, `sexp_string_data`, `sexp_car`, `sexp_cdr`, `sexp_vector_data`
+- Immediate constructors: `sexp_make_fixnum`, `sexp_make_boolean`, `get_null`, `get_void`
 - `sexp_vector_set` — writes to an existing vector slot, no allocation
 
 C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (see eval.c patches).
 
-**vendoring chibi**: source bundled, compiled via build.rs, zero external deps.
+**Vendoring Chibi**: source bundled, compiled via build.rs, zero external deps.
 
-**shim layer**: chibi uses c macros extensively; `tein_shim.c` exports them as real functions for rust ffi.
+**Shim layer**: Chibi uses C macros extensively; `tein_shim.c` exports them as real functions for Rust FFI.
 
-**fuel implementation**: chibi's vm creates child contexts per eval, so context-level refuel doesn't work. thread-local counters + a 2-line vm.c patch intercept the timeslice boundary to implement true total-fuel budgeting. when fuel limiting is inactive, behaviour is identical to stock chibi.
+**Fuel implementation**: Chibi's VM creates child contexts per eval, so context-level refuel doesn't work. Thread-local counters + a 2-line vm.c patch intercept the timeslice boundary to implement true total-fuel budgeting. When fuel limiting is inactive, behaviour is identical to stock Chibi.
 
-**type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and matches floats like 4.0, producing garbage.
+**Type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. The integer predicate includes `_or_integer_flonump` and matches floats like 4.0, producing garbage.
 
-**VFS path prefix**: use `/vfs/lib` not `vfs://...` — chibi's `sexp_add_path` splits on `:`, so colons in paths break module resolution.
+**VFS path prefix**: use `/vfs/lib` not `vfs://...` — Chibi's `sexp_add_path` splits on `:`, so colons in paths break module resolution.
 
-**`sexp_load_standard_env` signature**: the version parameter is `sexp` (a tagged fixnum via `sexp_make_fixnum`), NOT `sexp_uint_t`. this is a chibi API quirk.
+**`sexp_load_standard_env` signature**: the version parameter is `sexp` (a tagged fixnum via `sexp_make_fixnum`), NOT `sexp_uint_t`. This is a Chibi API quirk.
 
-**rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping. note: the env parent chain terminates with NULL, and `sexp_envp(NULL)` segfaults because `sexp_pointerp(NULL)` returns true (`SEXP_POINTER_TAG == 0`). the env walk loop must guard against NULL explicitly.
+**Rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping. Note: the env parent chain terminates with NULL, and `sexp_envp(NULL)` segfaults because `sexp_pointerp(NULL)` returns true (`SEXP_POINTER_TAG == 0`). The env walk loop must guard against NULL explicitly.
 
-**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. it can be copied into the restricted null env via `.allow(&["import"])` like any other binding. the module policy (VFS-only) still applies, so only curated VFS modules are importable. both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
+**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. It can be copied into the restricted null env via `.allow(&["import"])` like any other binding. The module policy (VFS-only) still applies, so only curated VFS modules are importable. Both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
 
-**`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. this is a scope chain issue specific to the null env sandbox approach.
+**`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. Using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. This is a scope chain issue specific to the null env sandbox approach.
 
-## building & testing
+## Building & testing
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
@@ -217,19 +217,19 @@ cargo run --example sandbox        # sandboxing demo
 cargo clean && cargo build         # nuclear option if ffi gets weird
 ```
 
-## adding a new scheme type
+## Adding a new Scheme type
 
-1. add predicate wrapper to `vendor/chibi-scheme/tein_shim.c`
-2. add extern declaration + safe wrapper in `src/ffi.rs`
-3. add variant to `Value` enum in `src/value.rs`
-4. add extraction in `Value::from_raw()` (respect type check ordering!)
-5. add `to_raw()` conversion
-6. add Display impl
-7. add test in `src/context.rs`
+1. Add predicate wrapper to `vendor/chibi-scheme/tein_shim.c`
+2. Add extern declaration + safe wrapper in `src/ffi.rs`
+3. Add variant to `Value` enum in `src/value.rs`
+4. Add extraction in `Value::from_raw()` (respect type check ordering!)
+5. Add `to_raw()` conversion
+6. Add Display impl
+7. Add test in `src/context.rs`
 
-## registering rust functions in scheme
+## Registering Rust functions in Scheme
 
-**via proc macro (recommended):**
+**Via proc macro (recommended):**
 ```rust
 #[scheme_fn]
 fn add(a: i64, b: i64) -> i64 { a + b }
@@ -237,7 +237,7 @@ fn add(a: i64, b: i64) -> i64 { a + b }
 ctx.define_fn_variadic("add", __tein_add)?;
 ```
 
-**via raw ffi:**
+**Via raw FFI:**
 ```rust
 unsafe extern "C" fn my_fn(
     ctx: raw::sexp, _self: raw::sexp,
@@ -247,25 +247,25 @@ unsafe extern "C" fn my_fn(
 ctx.define_fn_variadic("my-fn", my_fn)?;
 ```
 
-## conventions
+## Conventions
 
-- edition 2024: `unsafe fn` bodies need inner `unsafe { }` blocks
-- every public item has a docstring
-- comments explain *why*, code shows *what*
-- lowercase style, casual but precise
-- norse mythology naming theme
-- see TODO.md for roadmap
+- Edition 2024: `unsafe fn` bodies need inner `unsafe { }` blocks
+- Every public item has a docstring
+- Comments explain *why*, code shows *what*
+- Lowercase style, casual but precise
+- Norse mythology naming theme
+- See TODO.md for roadmap
 
-## foreign type protocol
+## Foreign type protocol
 
-**milestone 6** — expose rust types as first-class scheme objects with method dispatch,
-introspection, and LLM-friendly error messages. zero C changes.
+**Milestone 6** — expose Rust types as first-class Scheme objects with method dispatch,
+introspection, and LLM-friendly error messages. Zero C changes.
 
-### architecture
+### Architecture
 
-foreign objects are tagged lists `(__tein-foreign "type-name" handle-id)` stored in a
-per-context `ForeignStore` keyed by `u64` handle IDs. scheme sees them as opaque values
-manipulated via the `(tein foreign)` protocol. rust data never crosses the ffi boundary.
+Foreign objects are tagged lists `(__tein-foreign "type-name" handle-id)` stored in a
+per-context `ForeignStore` keyed by `u64` handle IDs. Scheme sees them as opaque values
+manipulated via the `(tein foreign)` protocol. Rust data never crosses the FFI boundary.
 
 ```
 ForeignStore (per Context)
@@ -274,7 +274,7 @@ ForeignStore (per Context)
   next_id: u64  (monotonically increasing, starts at 1)
 ```
 
-### implementing ForeignType
+### Implementing ForeignType
 
 ```rust
 use tein::{ForeignType, MethodFn, Value};
@@ -294,7 +294,7 @@ impl ForeignType for MyType {
 }
 ```
 
-### registration and use
+### Registration and use
 
 ```rust
 ctx.register_foreign_type::<MyType>()?;
@@ -305,35 +305,35 @@ let result = ctx.call(&ctx.evaluate("my-type-get")?, &[val])?;
 // result == Value::Integer(42)
 ```
 
-### dispatch chain
+### Dispatch chain
 
-scheme `(my-type-get obj)` → convenience lambda → `(apply foreign-call obj 'get args)` →
+Scheme `(my-type-get obj)` → convenience lambda → `(apply foreign-call obj 'get args)` →
 `foreign_call_wrapper` (extern "C") → reads `FOREIGN_STORE_PTR` thread-local →
 `dispatch_foreign_call` → looks up method → calls `MethodFn(&mut dyn Any, ...)` → `Value`
 
-the `FOREIGN_STORE_PTR` thread-local is set by `evaluate()`/`call()` via `ForeignStoreGuard`
-RAII, ensuring the pointer is always valid during scheme execution and cleared on all exit paths.
+The `FOREIGN_STORE_PTR` thread-local is set by `evaluate()`/`call()` via `ForeignStoreGuard`
+RAII, ensuring the pointer is always valid during Scheme execution and cleared on all exit paths.
 
-### scheme-side protocol
+### Scheme-side protocol
 
 `foreign.scm` defines predicates/accessors using only primitives always available:
-- `foreign?` — uses `pair?`, `eq?`, `string?`, `fixnum?` (not `integer?` — not a chibi primitive)
+- `foreign?` — uses `pair?`, `eq?`, `string?`, `fixnum?` (not `integer?` — not a Chibi primitive)
 - `foreign-type` — returns the type-name string
 - `foreign-handle-id` — returns the handle ID fixnum
 
-uses `car`/`cdr` chains instead of `cadr`/`caddr` (those require `scheme/cxr`).
+Uses `car`/`cdr` chains instead of `cadr`/`caddr` (those require `scheme/cxr`).
 
-## custom port protocol
+## Custom port protocol
 
-bridges rust `Read`/`Write` objects to chibi's custom port mechanism via thread-local trampoline — same pattern as ForeignStore.
+Bridges Rust `Read`/`Write` objects to Chibi's custom port mechanism via thread-local trampoline — same pattern as ForeignStore.
 
-### architecture
+### Architecture
 
 - **PortStore** (`port.rs`): per-context map from port ID → `Box<dyn Read>` or `Box<dyn Write>`
 - **PORT_STORE_PTR** (`context.rs`): thread-local raw pointer, set before evaluate/call via `PortStoreGuard` RAII
-- **port_read_trampoline** / **port_write_trampoline**: extern "C" fns called by chibi's `sexp_cookie_reader`/`writer` via `fopencookie`
+- **port_read_trampoline** / **port_write_trampoline**: extern "C" fns called by Chibi's `sexp_cookie_reader`/`writer` via `fopencookie`
 
-### creating ports
+### Creating ports
 
 ```rust
 let port = ctx.open_input_port(std::io::Cursor::new(b"(+ 1 2)"))?;
@@ -341,26 +341,26 @@ let val = ctx.read(&port)?;           // read one s-expression
 let result = ctx.evaluate_port(&port)?; // read+eval loop
 ```
 
-output ports work similarly via `open_output_port`. pass the port value to scheme's `display`/`write`/`write-char`.
+Output ports work similarly via `open_output_port`. Pass the port value to Scheme's `display`/`write`/`write-char`.
 
-### chibi protocol details
+### Chibi protocol details
 
-- read callback receives `(buf start end)` where `buf[0..start)` has valid data from prior partial fills
-- return value must be `start + new_bytes_read` (chibi copies from position 0)
+- Read callback receives `(buf start end)` where `buf[0..start)` has valid data from prior partial fills
+- Return value must be `start + new_bytes_read` (Chibi copies from position 0)
 - `flush-output` is the primitive name; `flush-output-port` requires `(scheme extras)`
 
-## reader dispatch protocol
+## Reader dispatch protocol
 
-extends chibi's `#` reader syntax with user-defined handlers via a C-level dispatch table.
+Extends Chibi's `#` reader syntax with user-defined handlers via a C-level dispatch table.
 
-### architecture
+### Architecture
 
-- **tein_reader_dispatch[128]** (`tein_shim.c`): thread-local table mapping ASCII chars → scheme procs
+- **tein_reader_dispatch[128]** (`tein_shim.c`): thread-local table mapping ASCII chars → Scheme procs
 - **sexp.c patch**: reader checks dispatch table before hardcoded `#` switch — `tein_reader_dispatch_get(c1)` → `sexp_apply1` if handler found
 - **register_reader_protocol** (`context.rs`): registers `set-reader!`/`unset-reader!`/`reader-dispatch-chars` as native fns, always called in `build()` for standard env contexts
 - **(tein reader)** VFS module: re-exports native fns for idiomatic `(import (tein reader))` usage
 
-### usage
+### Usage
 
 ```rust
 // from rust
@@ -375,25 +375,25 @@ assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
 ;; #j(1 2 3) → (json (1 2 3))
 ```
 
-### design notes
+### Design notes
 
-- reserved r7rs chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden
-- dispatch table is thread-local, matching chibi's !Send context model
-- table cleared on `Context::drop()` so next context on the thread starts clean
-- handler return value becomes the reader result — gets evaluated by `evaluate()`, so return self-evaluating datums (numbers, strings, lists) or use `read()` for raw datum access
+- Reserved R7RS chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden
+- Dispatch table is thread-local, matching Chibi's !Send context model
+- Table cleared on `Context::drop()` so next context on the thread starts clean
+- Handler return value becomes the reader result — gets evaluated by `evaluate()`, so return self-evaluating datums (numbers, strings, lists) or use `read()` for raw datum access
 
-## macro expansion hook protocol
+## Macro expansion hook protocol
 
-intercepts chibi's macro expansion at analysis time — replace-and-reanalyse semantics.
+Intercepts Chibi's macro expansion at analysis time — replace-and-reanalyse semantics.
 
-### architecture
+### Architecture
 
-- **tein_macro_expand_hook** (`tein_shim.c`): thread-local slot for a scheme proc, with GC preservation
+- **tein_macro_expand_hook** (`tein_shim.c`): thread-local slot for a Scheme proc, with GC preservation
 - **tein_macro_expand_hook_active** (`tein_shim.c`): thread-local recursion guard (prevents hook from triggering on its own macro usage)
 - **eval.c patch D**: in `analyze_macro_once()`, after macro expansion, checks hook → if set and not active, calls `sexp_apply(ctx, hook, (name unexpanded expanded env))` → hook return value replaces expanded form → `goto loop` reanalyses
 - **(tein macro)** VFS module: re-exports `set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`
 
-### usage
+### Usage
 
 ```rust
 // from rust
@@ -409,9 +409,9 @@ ctx.set_macro_expand_hook(&hook)?;
     expanded))  ; observe or transform
 ```
 
-### design notes
+### Design notes
 
-- hook receives 4 args: macro name (symbol), unexpanded form, expanded form, syntactic environment
-- return value replaces the expansion — returning the expanded form unchanged is a no-op observation
-- recursion guard prevents infinite loops when the hook itself uses macros
-- hook cleared on `Context::drop()`
+- Hook receives 4 args: macro name (symbol), unexpanded form, expanded form, syntactic environment
+- Return value replaces the expansion — returning the expanded form unchanged is a no-op observation
+- Recursion guard prevents infinite loops when the hook itself uses macros
+- Hook cleared on `Context::drop()`

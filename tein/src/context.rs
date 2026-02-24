@@ -1,11 +1,11 @@
-//! scheme evaluation context
+//! Scheme evaluation context
 //!
-//! [`Context`] is a single-threaded scheme evaluation environment backed
-//! by a chibi-scheme heap. create one directly with [`Context::new()`] or
+//! [`Context`] is a single-threaded Scheme evaluation environment backed
+//! by a Chibi-Scheme heap. Create one directly with [`Context::new()`] or
 //! configure via [`ContextBuilder`] for sandboxing, step limits, and
 //! environment control.
 //!
-//! # builder pattern
+//! # Builder pattern
 //!
 //! ```
 //! use tein::Context;
@@ -20,23 +20,23 @@
 //! # }
 //! ```
 //!
-//! # evaluation
+//! # Evaluation
 //!
-//! - [`Context::evaluate()`] — evaluate a scheme expression string
-//! - [`Context::call()`] — call a scheme procedure with rust arguments
+//! - [`Context::evaluate()`] — evaluate a Scheme expression string
+//! - [`Context::call()`] — call a Scheme procedure with Rust arguments
 //! - [`Context::load_file()`] — load and evaluate a `.scm` file
 //!
-//! # sandboxing
+//! # Sandboxing
 //!
-//! four independent layers of control:
+//! Four independent layers of control:
 //!
-//! 1. **environment restriction** — [`ContextBuilder::preset()`] / [`.allow()`](ContextBuilder::allow) /
+//! 1. **Environment restriction** — [`ContextBuilder::preset()`] / [`.allow()`](ContextBuilder::allow) /
 //!    [`.pure_computation()`](ContextBuilder::pure_computation) / [`.safe()`](ContextBuilder::safe)
-//! 2. **step limits** — [`ContextBuilder::step_limit()`]
-//! 3. **file IO policy** — [`ContextBuilder::file_read()`] / [`.file_write()`](ContextBuilder::file_write)
-//! 4. **module policy** — automatic VFS-only when using standard env + presets
+//! 2. **Step limits** — [`ContextBuilder::step_limit()`]
+//! 3. **File IO policy** — [`ContextBuilder::file_read()`] / [`.file_write()`](ContextBuilder::file_write)
+//! 4. **Module policy** — automatic VFS-only when using standard env + presets
 //!
-//! see the [`sandbox`](crate::sandbox) module for preset details.
+//! See the [`sandbox`](crate::sandbox) module for preset details.
 
 use crate::{
     Value,
@@ -53,7 +53,7 @@ use std::path::Path;
 
 /// RAII guard that clears the FOREIGN_STORE_PTR thread-local on drop.
 ///
-/// ensures the pointer is nulled on all exit paths (early returns, `?`, panic).
+/// Ensures the pointer is nulled on all exit paths (early returns, `?`, panic).
 struct ForeignStoreGuard;
 
 impl Drop for ForeignStoreGuard {
@@ -112,7 +112,7 @@ thread_local! {
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
 
-/// dispatch a method call: (foreign-call obj 'method arg ...)
+/// Dispatch a method call: (foreign-call obj 'method arg ...)
 unsafe extern "C" fn foreign_call_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -137,7 +137,7 @@ unsafe extern "C" fn foreign_call_wrapper(
     }
 }
 
-/// list methods of the foreign object in the first arg: (foreign-methods obj)
+/// List methods of the foreign object in the first arg: (foreign-methods obj)
 unsafe extern "C" fn foreign_methods_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -179,7 +179,7 @@ unsafe extern "C" fn foreign_methods_wrapper(
     }
 }
 
-/// list all registered type names: (foreign-types)
+/// List all registered type names: (foreign-types)
 unsafe extern "C" fn foreign_types_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -208,7 +208,7 @@ unsafe extern "C" fn foreign_types_wrapper(
     }
 }
 
-/// list method names for a named type: (foreign-type-methods "type-name")
+/// List method names for a named type: (foreign-type-methods "type-name")
 unsafe extern "C" fn foreign_type_methods_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -255,11 +255,11 @@ unsafe extern "C" fn foreign_type_methods_wrapper(
 
 // --- custom port trampolines ---
 
-/// extern "C" trampoline for custom input port reads.
+/// Extern "C" trampoline for custom input port reads.
 ///
-/// called by chibi via sexp_apply when the custom port's buffer needs refilling.
-/// args from scheme: (port-id buffer start end).
-/// reads from the rust Read object in PortStore, copies bytes into the scheme
+/// Called by Chibi via sexp_apply when the custom port's buffer needs refilling.
+/// Args from Scheme: (port-id buffer start end).
+/// Reads from the Rust Read object in PortStore, copies bytes into the Scheme
 /// string buffer, returns fixnum byte count.
 unsafe extern "C" fn port_read_trampoline(
     _ctx: ffi::sexp,
@@ -307,11 +307,11 @@ unsafe extern "C" fn port_read_trampoline(
     }
 }
 
-/// extern "C" trampoline for custom output port writes.
+/// Extern "C" trampoline for custom output port writes.
 ///
-/// called by chibi via sexp_apply when data needs flushing to the port.
-/// args from scheme: (port-id buffer start end).
-/// writes bytes from the scheme string buffer to the rust Write object
+/// Called by Chibi via sexp_apply when data needs flushing to the port.
+/// Args from Scheme: (port-id buffer start end).
+/// Writes bytes from the Scheme string buffer to the Rust Write object
 /// in PortStore, returns fixnum byte count.
 unsafe extern "C" fn port_write_trampoline(
     _ctx: ffi::sexp,
@@ -353,10 +353,10 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
-/// extern "C" wrapper for `(tein-reader-set! char proc)`.
+/// Extern "C" wrapper for `(tein-reader-set! char proc)`.
 ///
-/// registers a reader dispatch handler for `#char` syntax. rejects reserved
-/// r7rs characters with a descriptive error.
+/// Registers a reader dispatch handler for `#char` syntax. Rejects reserved
+/// R7RS characters with a descriptive error.
 unsafe extern "C" fn reader_set_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -407,9 +407,9 @@ unsafe extern "C" fn reader_set_wrapper(
     }
 }
 
-/// extern "C" wrapper for `(tein-reader-unset! char)`.
+/// Extern "C" wrapper for `(tein-reader-unset! char)`.
 ///
-/// removes a reader dispatch handler for `#char` syntax.
+/// Removes a reader dispatch handler for `#char` syntax.
 unsafe extern "C" fn reader_unset_wrapper(
     _ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -427,9 +427,9 @@ unsafe extern "C" fn reader_unset_wrapper(
     }
 }
 
-/// extern "C" wrapper for `(tein-reader-dispatch-chars)`.
+/// Extern "C" wrapper for `(tein-reader-dispatch-chars)`.
 ///
-/// returns a list of characters with active dispatch handlers.
+/// Returns a list of characters with active dispatch handlers.
 unsafe extern "C" fn reader_chars_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -439,9 +439,9 @@ unsafe extern "C" fn reader_chars_wrapper(
     unsafe { ffi::reader_dispatch_chars(ctx) }
 }
 
-/// extern "C" wrapper for `(set-macro-expand-hook! proc)`.
+/// Extern "C" wrapper for `(set-macro-expand-hook! proc)`.
 ///
-/// sets the thread-local macro expansion hook. the hook receives
+/// Sets the thread-local macro expansion hook. The hook receives
 /// `(name unexpanded expanded env)` after each macro expansion and
 /// returns the form to use (return `expanded` unchanged for observation).
 unsafe extern "C" fn macro_expand_hook_set_wrapper(
@@ -467,9 +467,9 @@ unsafe extern "C" fn macro_expand_hook_set_wrapper(
     }
 }
 
-/// extern "C" wrapper for `(unset-macro-expand-hook!)`.
+/// Extern "C" wrapper for `(unset-macro-expand-hook!)`.
 ///
-/// clears the thread-local macro expansion hook.
+/// Clears the thread-local macro expansion hook.
 unsafe extern "C" fn macro_expand_hook_unset_wrapper(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -482,9 +482,9 @@ unsafe extern "C" fn macro_expand_hook_unset_wrapper(
     }
 }
 
-/// extern "C" wrapper for `(macro-expand-hook)`.
+/// Extern "C" wrapper for `(macro-expand-hook)`.
 ///
-/// returns the current hook procedure or `#f` if none is set.
+/// Returns the current hook procedure or `#f` if none is set.
 unsafe extern "C" fn macro_expand_hook_get_wrapper(
     _ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -494,11 +494,11 @@ unsafe extern "C" fn macro_expand_hook_get_wrapper(
     unsafe { ffi::macro_expand_hook_get() }
 }
 
-/// register protocol native fns into the context's current env.
+/// Register protocol native fns into the context's current env.
 ///
-/// called during `build()` for standard env contexts, *before* sandbox
-/// restriction. defines native functions that back the `(tein reader)`
-/// and `(tein macro)` VFS modules. by registering into the source env
+/// Called during `build()` for standard env contexts, *before* sandbox
+/// restriction. Defines native functions that back the `(tein reader)`
+/// and `(tein macro)` VFS modules. By registering into the source env
 /// before sandboxing, these are available via `(import ...)` even in
 /// restricted contexts.
 unsafe fn register_protocol_fns(ctx: ffi::sexp) {
@@ -539,7 +539,7 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
     }
 }
 
-/// the 4 file-opening primitives we wrap with policy checks
+/// The 4 file-opening primitives we wrap with policy checks.
 #[derive(Clone, Copy)]
 #[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
 enum IoOp {
@@ -550,7 +550,7 @@ enum IoOp {
 }
 
 impl IoOp {
-    /// scheme primitive name for this operation
+    /// Scheme primitive name for this operation.
     const fn name(self) -> &'static str {
         match self {
             IoOp::InputFile => "open-input-file",
@@ -560,12 +560,12 @@ impl IoOp {
         }
     }
 
-    /// whether this is a read or write operation
+    /// Whether this is a read or write operation.
     const fn is_read(self) -> bool {
         matches!(self, IoOp::InputFile | IoOp::BinaryInputFile)
     }
 
-    /// all operations as a slice for iteration
+    /// All operations as a slice for iteration.
     const ALL: [IoOp; 4] = [
         IoOp::InputFile,
         IoOp::BinaryInputFile,
@@ -574,14 +574,14 @@ impl IoOp {
     ];
 }
 
-/// sandbox stub for disallowed bindings
+/// Sandbox stub for disallowed bindings.
 ///
-/// registered under the name of each known preset primitive that wasn't
-/// included in the context's allowlist. when called, raises a scheme exception
+/// Registered under the name of each known preset primitive that wasn't
+/// included in the context's allowlist. When called, raises a Scheme exception
 /// with a `[sandbox:binding]` sentinel that `extract_exception_error` converts
 /// to `Error::SandboxViolation`.
 ///
-/// the stub extracts its own name from the opcode's name slot (set by
+/// The stub extracts its own name from the opcode's name slot (set by
 /// `sexp_define_foreign_proc` at registration time), so one function serves
 /// all stubbed bindings.
 unsafe extern "C" fn sandbox_stub(
@@ -609,9 +609,9 @@ unsafe extern "C" fn sandbox_stub(
     }
 }
 
-/// shared policy check + delegation for all file-open wrappers
+/// Shared policy check + delegation for all file-open wrappers.
 ///
-/// extracts the filename from the first arg, checks against FsPolicy,
+/// Extracts the filename from the first arg, checks against FsPolicy,
 /// and either delegates to the original primitive or returns a policy error.
 unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::sexp {
     unsafe {
@@ -695,7 +695,7 @@ unsafe extern "C" fn wrapper_open_binary_output_file(
     unsafe { check_and_delegate(ctx, args, IoOp::BinaryOutputFile) }
 }
 
-/// get the wrapper function pointer for a given IoOp
+/// Get the wrapper function pointer for a given IoOp.
 fn wrapper_fn_for(
     op: IoOp,
 ) -> unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp {
@@ -712,11 +712,11 @@ fn wrapper_fn_for(
 const DEFAULT_HEAP_SIZE: usize = 8 * 1024 * 1024;
 const DEFAULT_HEAP_MAX: usize = 128 * 1024 * 1024;
 
-/// builder for configuring a scheme context before creation
+/// Builder for configuring a Scheme context before creation.
 ///
-/// provides a fluent api for setting heap sizes, step limits,
+/// Provides a fluent API for setting heap sizes, step limits,
 /// environment restrictions (sandboxing), file IO policies, and
-/// standard library loading. finish with [`build()`](Self::build),
+/// standard library loading. Finish with [`build()`](Self::build),
 /// [`build_managed()`](Self::build_managed), or
 /// [`build_timeout()`](crate::TimeoutContext) depending on your
 /// threading needs.
@@ -750,46 +750,46 @@ pub struct ContextBuilder {
 }
 
 impl ContextBuilder {
-    /// set the initial heap size in bytes (default: 8mb)
+    /// Set the initial heap size in bytes (default: 8mb).
     pub fn heap_size(mut self, size: usize) -> Self {
         self.heap_size = size;
         self
     }
 
-    /// set the maximum heap size in bytes (default: 128mb)
+    /// Set the maximum heap size in bytes (default: 128mb).
     pub fn heap_max(mut self, size: usize) -> Self {
         self.heap_max = size;
         self
     }
 
-    /// set the maximum number of vm steps per evaluation call
+    /// Set the maximum number of VM steps per evaluation call.
     ///
-    /// when the limit is reached, evaluation returns `Error::StepLimitExceeded`.
-    /// fuel resets before each `evaluate()` or `call()` invocation.
+    /// When the limit is reached, evaluation returns `Error::StepLimitExceeded`.
+    /// Fuel resets before each `evaluate()` or `call()` invocation.
     pub fn step_limit(mut self, limit: u64) -> Self {
         self.step_limit = Some(limit);
         self
     }
 
-    /// enable the r7rs standard environment
+    /// Enable the R7RS standard environment.
     ///
-    /// loads `(scheme base)` and supporting modules via the embedded VFS,
+    /// Loads `(scheme base)` and supporting modules via the embedded VFS,
     /// providing `define-record-type`, `import`, `map`, `for-each`, etc.
-    /// standard ports (stdin/stdout/stderr) are also initialised.
+    /// Standard ports (stdin/stdout/stderr) are also initialised.
     ///
-    /// when combined with presets, the standard env is loaded first, then
-    /// the sandbox restricts it — so sandboxed code can use allowed r7rs
+    /// When combined with presets, the standard env is loaded first, then
+    /// the sandbox restricts it — so sandboxed code can use allowed R7RS
     /// procedures that aren't bare primitives.
     pub fn standard_env(mut self) -> Self {
         self.standard_env = true;
         self
     }
 
-    /// add all primitives from a preset to the allowlist
+    /// Add all primitives from a preset to the allowlist.
     ///
-    /// activating any preset switches the context to restricted mode:
+    /// Activating any preset switches the context to restricted mode:
     /// only explicitly allowed primitives (plus core syntax) are available.
-    /// presets are additive — calling this multiple times combines them.
+    /// Presets are additive — calling this multiple times combines them.
     pub fn preset(mut self, preset: &Preset) -> Self {
         let list = self.allowed_primitives.get_or_insert_with(Vec::new);
         for name in preset.primitives {
@@ -800,9 +800,9 @@ impl ContextBuilder {
         self
     }
 
-    /// add individual primitives to the allowlist
+    /// Add individual primitives to the allowlist.
     ///
-    /// like `preset()`, activates restricted mode. additive with presets.
+    /// Like `preset()`, activates restricted mode. Additive with presets.
     pub fn allow(mut self, names: &[&'static str]) -> Self {
         let list = self.allowed_primitives.get_or_insert_with(Vec::new);
         for name in names {
@@ -813,9 +813,9 @@ impl ContextBuilder {
         self
     }
 
-    /// convenience: allow arithmetic + math + lists + vectors + strings + characters + type predicates
+    /// Convenience: allow arithmetic + math + lists + vectors + strings + characters + type predicates.
     ///
-    /// suitable for pure computation with no side effects or mutation.
+    /// Suitable for pure computation with no side effects or mutation.
     pub fn pure_computation(self) -> Self {
         use crate::sandbox::*;
         self.preset(&ARITHMETIC)
@@ -827,9 +827,9 @@ impl ContextBuilder {
             .preset(&TYPE_PREDICATES)
     }
 
-    /// convenience: pure_computation + mutation + string_ports + stdout_only + exceptions
+    /// Convenience: pure_computation + mutation + string_ports + stdout_only + exceptions.
     ///
-    /// suitable for most sandboxed use cases that don't need file/network io.
+    /// Suitable for most sandboxed use cases that don't need file/network IO.
     pub fn safe(self) -> Self {
         use crate::sandbox::*;
         self.pure_computation()
@@ -839,14 +839,14 @@ impl ContextBuilder {
             .preset(&EXCEPTIONS)
     }
 
-    /// allow file reading from paths under the given prefixes
+    /// Allow file reading from paths under the given prefixes.
     ///
-    /// activates restricted mode and registers policy-checked wrapper
+    /// Activates restricted mode and registers policy-checked wrapper
     /// functions for `open-input-file` and `open-binary-input-file`.
-    /// also adds port-reading support primitives (read, read-char, etc.).
+    /// Also adds port-reading support primitives (read, read-char, etc.).
     ///
-    /// prefixes should be absolute paths (e.g. "/config/", "/data/").
-    /// paths are canonicalised before checking, so symlinks and `..`
+    /// Prefixes should be absolute paths (e.g. "/config/", "/data/").
+    /// Paths are canonicalised before checking, so symlinks and `..`
     /// traversals are resolved.
     pub fn file_read(mut self, prefixes: &[&str]) -> Self {
         let list = self.file_read_prefixes.get_or_insert_with(Vec::new);
@@ -860,14 +860,14 @@ impl ContextBuilder {
         self
     }
 
-    /// allow file writing to paths under the given prefixes
+    /// Allow file writing to paths under the given prefixes.
     ///
-    /// activates restricted mode and registers policy-checked wrapper
+    /// Activates restricted mode and registers policy-checked wrapper
     /// functions for `open-output-file` and `open-binary-output-file`.
-    /// also adds port-writing support primitives (write, write-char, etc.).
+    /// Also adds port-writing support primitives (write, write-char, etc.).
     ///
-    /// parent directories must exist; files will be created as needed (r7rs).
-    /// prefixes should be absolute paths (e.g. "/tmp/", "/output/").
+    /// Parent directories must exist; files will be created as needed (R7RS).
+    /// Prefixes should be absolute paths (e.g. "/tmp/", "/output/").
     pub fn file_write(mut self, prefixes: &[&str]) -> Self {
         let list = self.file_write_prefixes.get_or_insert_with(Vec::new);
         for p in prefixes {
@@ -880,12 +880,12 @@ impl ContextBuilder {
         self
     }
 
-    /// check if a step limit has been configured
+    /// Check if a step limit has been configured.
     pub(crate) fn has_step_limit(&self) -> bool {
         self.step_limit.is_some()
     }
 
-    /// build the configured context
+    /// Build the configured context.
     pub fn build(mut self) -> Result<Context> {
         unsafe {
             let ctx = ffi::sexp_make_eval_context(
@@ -1095,10 +1095,10 @@ impl ContextBuilder {
         }
     }
 
-    /// build a managed context on a dedicated thread (persistent mode)
+    /// Build a managed context on a dedicated thread (persistent mode).
     ///
-    /// the init closure runs once after context creation. state accumulates
-    /// across evaluations. use `reset()` to tear down and rebuild.
+    /// The init closure runs once after context creation. State accumulates
+    /// across evaluations. Use `reset()` to tear down and rebuild.
     pub fn build_managed(
         self,
         init: impl Fn(&Context) -> Result<()> + Send + 'static,
@@ -1106,10 +1106,10 @@ impl ContextBuilder {
         crate::managed::ThreadLocalContext::new(self, crate::managed::Mode::Persistent, init)
     }
 
-    /// build a managed context on a dedicated thread (fresh mode)
+    /// Build a managed context on a dedicated thread (fresh mode).
     ///
-    /// the init closure runs before every evaluation — context is rebuilt
-    /// each time. no state persists between calls. `reset()` is a no-op.
+    /// The init closure runs before every evaluation — context is rebuilt
+    /// each time. No state persists between calls. `reset()` is a no-op.
     pub fn build_managed_fresh(
         self,
         init: impl Fn(&Context) -> Result<()> + Send + 'static,
@@ -1118,13 +1118,13 @@ impl ContextBuilder {
     }
 }
 
-/// a scheme evaluation context
+/// A Scheme evaluation context.
 ///
-/// the main entry point for evaluating scheme code. each context owns a
-/// chibi-scheme heap and environment. intentionally `!Send + !Sync` — for
+/// The main entry point for evaluating Scheme code. Each context owns a
+/// Chibi-Scheme heap and environment. Intentionally `!Send + !Sync` — for
 /// cross-thread use, see [`crate::ThreadLocalContext`] or [`crate::TimeoutContext`].
 ///
-/// use [`Context::new()`] for a quick primitive environment, or
+/// Use [`Context::new()`] for a quick primitive environment, or
 /// [`Context::builder()`] to configure sandboxing, step limits, file IO
 /// policies, and the standard library.
 ///
@@ -1156,9 +1156,9 @@ pub struct Context {
 }
 
 impl Context {
-    /// create a new scheme context with default settings
+    /// Create a new Scheme context with default settings.
     ///
-    /// initializes a chibi-scheme context with:
+    /// Initialises a Chibi-Scheme context with:
     /// - 8mb initial heap
     /// - 128mb max heap
     /// - full primitive environment (no restrictions)
@@ -1167,16 +1167,16 @@ impl Context {
         Self::builder().build()
     }
 
-    /// create a new context with the r7rs standard environment
+    /// Create a new context with the R7RS standard environment.
     ///
-    /// equivalent to `Context::builder().standard_env().build()`.
-    /// provides `(scheme base)` and supporting modules — `map`, `for-each`,
+    /// Equivalent to `Context::builder().standard_env().build()`.
+    /// Provides `(scheme base)` and supporting modules — `map`, `for-each`,
     /// `import`, `define-record-type`, etc.
     pub fn new_standard() -> Result<Self> {
         Self::builder().standard_env().build()
     }
 
-    /// create a builder for configuring a context
+    /// Create a builder for configuring a context.
     pub fn builder() -> ContextBuilder {
         ContextBuilder {
             heap_size: DEFAULT_HEAP_SIZE,
@@ -1189,7 +1189,7 @@ impl Context {
         }
     }
 
-    /// set fuel before an evaluation call (if step limit is configured)
+    /// Set fuel before an evaluation call (if step limit is configured).
     fn arm_fuel(&self) {
         if let Some(limit) = self.step_limit {
             unsafe {
@@ -1198,7 +1198,7 @@ impl Context {
         }
     }
 
-    /// check if fuel was exhausted after an evaluation call, then disarm
+    /// Check if fuel was exhausted after an evaluation call, then disarm.
     fn check_fuel(&self) -> Result<()> {
         if self.step_limit.is_some() {
             unsafe {
@@ -1212,10 +1212,10 @@ impl Context {
         Ok(())
     }
 
-    /// evaluate one or more scheme expressions
+    /// Evaluate one or more Scheme expressions.
     ///
-    /// evaluates all expressions in the string sequentially, returning the
-    /// result of the last expression. this enables natural scripting patterns
+    /// Evaluates all expressions in the string sequentially, returning the
+    /// result of the last expression. This enables natural scripting patterns
     /// like defining values and then using them.
     ///
     /// # examples
@@ -1301,10 +1301,10 @@ impl Context {
         }
     }
 
-    /// load and evaluate a scheme file
+    /// Load and evaluate a Scheme file.
     ///
-    /// reads the file contents and evaluates all expressions sequentially,
-    /// returning the result of the last expression. this is the file-based
+    /// Reads the file contents and evaluates all expressions sequentially,
+    /// returning the result of the last expression. This is the file-based
     /// equivalent of [`evaluate`](Self::evaluate).
     ///
     /// # examples
@@ -1324,26 +1324,26 @@ impl Context {
     /// # }
     /// ```
     ///
-    /// # errors
+    /// # Errors
     ///
-    /// returns [`Error::IoError`] if the file cannot be read, or evaluation
-    /// errors if the scheme code is invalid.
+    /// Returns [`Error::IoError`] if the file cannot be read, or evaluation
+    /// errors if the Scheme code is invalid.
     pub fn load_file<P: AsRef<Path>>(&self, path: P) -> Result<Value> {
         let contents = std::fs::read_to_string(path.as_ref())?;
         self.evaluate(&contents)
     }
 
-    /// register a foreign function as a scheme primitive
+    /// Register a foreign function as a Scheme primitive.
     ///
-    /// all arguments are passed as a single scheme list via the `args` parameter.
-    /// this is the universal registration method — use `#[scheme_fn]` for ergonomic
+    /// All arguments are passed as a single Scheme list via the `args` parameter.
+    /// This is the universal registration method — use `#[scheme_fn]` for ergonomic
     /// wrappers that handle argument extraction and return conversion automatically.
     ///
-    /// the function receives all arguments as a single scheme list in the `args`
-    /// parameter. chibi passes `(ctx, self, nargs, args)` where args is a proper
+    /// The function receives all arguments as a single Scheme list in the `args`
+    /// parameter. Chibi passes `(ctx, self, nargs, args)` where args is a proper
     /// list of all actual arguments.
     ///
-    /// this uses `sexp_define_foreign_proc_aux` with `SEXP_PROC_VARIADIC`,
+    /// This uses `sexp_define_foreign_proc_aux` with `SEXP_PROC_VARIADIC`,
     /// which wraps the opcode in a real procedure object.
     ///
     /// # examples
@@ -1408,15 +1408,15 @@ impl Context {
         Ok(())
     }
 
-    /// raw context pointer for internal use (tests, examples, proc macros)
+    /// Raw context pointer for internal use (tests, examples, proc macros).
     #[cfg(test)]
     pub(crate) fn ctx_ptr(&self) -> ffi::sexp {
         self.ctx
     }
 
-    /// register a rust type with the foreign object protocol.
+    /// Register a Rust type with the foreign object protocol.
     ///
-    /// makes the type's methods callable from scheme. auto-registers:
+    /// Makes the type's methods callable from Scheme. Auto-registers:
     /// - `foreign-call`, `foreign-methods`, `foreign-types`, `foreign-type-methods`
     ///   (on first call, via `register_foreign_protocol`)
     /// - `type-name?` — predicate proc
@@ -1464,12 +1464,12 @@ impl Context {
         Ok(())
     }
 
-    /// wrap a rust value as a scheme foreign object.
+    /// Wrap a Rust value as a Scheme foreign object.
     ///
-    /// stores it in the ForeignStore and returns a `Value::Foreign`
-    /// that scheme code can pass around, inspect, and use with `foreign-call`.
+    /// Stores it in the ForeignStore and returns a `Value::Foreign`
+    /// that Scheme code can pass around, inspect, and use with `foreign-call`.
     ///
-    /// the value lives until the Context is dropped.
+    /// The value lives until the Context is dropped.
     pub fn foreign_value<T: ForeignType>(&self, value: T) -> Result<Value> {
         let id = self.foreign_store.borrow_mut().insert(value);
         Ok(Value::Foreign {
@@ -1478,9 +1478,9 @@ impl Context {
         })
     }
 
-    /// borrow a foreign object immutably.
+    /// Borrow a foreign object immutably.
     ///
-    /// returns an error if the value isn't `Foreign`, the handle is stale,
+    /// Returns an error if the value isn't `Foreign`, the handle is stale,
     /// or the type doesn't match `T`.
     pub fn foreign_ref<T: ForeignType + 'static>(
         &self,
@@ -1509,19 +1509,19 @@ impl Context {
         }))
     }
 
-    /// register the custom port protocol dispatch functions.
+    /// Register the custom port protocol dispatch functions.
     ///
-    /// called automatically by `open_input_port`/`open_output_port` on first use.
+    /// Called automatically by `open_input_port`/`open_output_port` on first use.
     fn register_port_protocol(&self) -> Result<()> {
         self.define_fn_variadic("tein-port-read", port_read_trampoline)?;
         self.define_fn_variadic("tein-port-write", port_write_trampoline)?;
         Ok(())
     }
 
-    /// register a reader dispatch handler for `#ch` syntax.
+    /// Register a reader dispatch handler for `#ch` syntax.
     ///
-    /// the handler must be a scheme procedure taking one argument (the input
-    /// port) and returning a datum. reserved r7rs characters (`#t`, `#f`,
+    /// The handler must be a Scheme procedure taking one argument (the input
+    /// port) and returning a datum. Reserved R7RS characters (`#t`, `#f`,
     /// `#\\`, `#(`, numeric prefixes, etc.) cannot be overridden.
     ///
     /// # examples
@@ -1555,11 +1555,11 @@ impl Context {
         }
     }
 
-    /// set a scheme procedure as the macro expansion hook.
+    /// Set a Scheme procedure as the macro expansion hook.
     ///
-    /// the hook receives `(name unexpanded expanded env)` after each macro
+    /// The hook receives `(name unexpanded expanded env)` after each macro
     /// expansion and returns the form to use (replace-and-reanalyze semantics).
-    /// return `expanded` unchanged for observation-only mode.
+    /// Return `expanded` unchanged for observation-only mode.
     ///
     /// # examples
     ///
@@ -1582,12 +1582,12 @@ impl Context {
         Ok(())
     }
 
-    /// clear the macro expansion hook.
+    /// Clear the macro expansion hook.
     pub fn unset_macro_expand_hook(&self) {
         unsafe { ffi::macro_expand_hook_clear(self.ctx) };
     }
 
-    /// return the current macro expansion hook, or `None` if not set.
+    /// Return the current macro expansion hook, or `None` if not set.
     pub fn macro_expand_hook(&self) -> Option<Value> {
         let raw = unsafe { ffi::macro_expand_hook_get() };
         if unsafe { ffi::sexp_booleanp(raw) != 0 } {
@@ -1597,10 +1597,10 @@ impl Context {
         }
     }
 
-    /// wrap a rust `Read` as a scheme input port.
+    /// Wrap a Rust `Read` as a Scheme input port.
     ///
-    /// returns a `Value::Port` that scheme code can pass to `read`,
-    /// `read-char`, `read-line`, etc. the backing `Read` lives in the
+    /// Returns a `Value::Port` that Scheme code can pass to `read`,
+    /// `read-char`, `read-line`, etc. The backing `Read` lives in the
     /// per-context `PortStore` until the context is dropped.
     ///
     /// # examples
@@ -1649,10 +1649,10 @@ impl Context {
         }
     }
 
-    /// wrap a rust `Write` as a scheme output port.
+    /// Wrap a Rust `Write` as a Scheme output port.
     ///
-    /// returns a `Value::Port` that scheme code can pass to `write`,
-    /// `display`, `write-char`, etc. the backing `Write` lives in the
+    /// Returns a `Value::Port` that Scheme code can pass to `write`,
+    /// `display`, `write-char`, etc. The backing `Write` lives in the
     /// per-context `PortStore` until the context is dropped.
     ///
     /// # examples
@@ -1710,10 +1710,10 @@ impl Context {
         }
     }
 
-    /// read one s-expression from a port.
+    /// Read one s-expression from a port.
     ///
-    /// returns the parsed but unevaluated expression.
-    /// returns `Value::Unspecified` at end-of-input (EOF).
+    /// Returns the parsed but unevaluated expression.
+    /// Returns `Value::Unspecified` at end-of-input (EOF).
     ///
     /// # examples
     ///
@@ -1750,10 +1750,10 @@ impl Context {
         }
     }
 
-    /// read and evaluate all expressions from a port.
+    /// Read and evaluate all expressions from a port.
     ///
-    /// reads s-expressions one at a time, evaluating each in sequence.
-    /// returns the result of the last expression evaluated, or
+    /// Reads s-expressions one at a time, evaluating each in sequence.
+    /// Returns the result of the last expression evaluated, or
     /// `Value::Unspecified` if the port was empty.
     ///
     /// # examples
@@ -1803,10 +1803,10 @@ impl Context {
         }
     }
 
-    /// register the foreign object protocol dispatch functions.
+    /// Register the foreign object protocol dispatch functions.
     ///
-    /// called automatically by `register_foreign_type` on first use.
-    /// registers both the rust-side dispatch functions and the pure-scheme
+    /// Called automatically by `register_foreign_type` on first use.
+    /// Registers both the Rust-side dispatch functions and the pure-Scheme
     /// predicates/accessors from `(tein foreign)`, making them available in
     /// the current env without requiring an explicit `(import (tein foreign))`.
     fn register_foreign_protocol(&self) -> Result<()> {
@@ -1840,9 +1840,9 @@ impl Context {
         Ok(())
     }
 
-    /// call a scheme procedure from rust
+    /// Call a Scheme procedure from Rust.
     ///
-    /// invokes a `Value::Procedure` (lambda, named function, or builtin)
+    /// Invokes a `Value::Procedure` (lambda, named function, or builtin)
     /// with the given arguments and returns the result.
     ///
     /// # examples
@@ -1859,10 +1859,10 @@ impl Context {
     /// # }
     /// ```
     ///
-    /// # errors
+    /// # Errors
     ///
-    /// returns [`Error::TypeError`] if `proc` is not a `Value::Procedure`,
-    /// or [`Error::EvalError`] if the scheme call raises an exception.
+    /// Returns [`Error::TypeError`] if `proc` is not a `Value::Procedure`,
+    /// or [`Error::EvalError`] if the Scheme call raises an exception.
     pub fn call(&self, proc: &Value, args: &[Value]) -> Result<Value> {
         let raw_proc = proc
             .as_procedure()
@@ -1901,11 +1901,11 @@ impl Context {
         }
     }
 
-    /// get the raw context pointer for advanced ffi use
+    /// Get the raw context pointer for advanced FFI use.
     ///
-    /// # safety
-    /// the returned pointer is only valid for the lifetime of this context.
-    /// do not call `sexp_destroy_context` on it.
+    /// # Safety
+    /// The returned pointer is only valid for the lifetime of this context.
+    /// Do not call `sexp_destroy_context` on it.
     pub fn raw_ctx(&self) -> ffi::sexp {
         self.ctx
     }
@@ -3282,7 +3282,7 @@ mod tests {
 
     static IO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// helper: create a temp directory with a known prefix for IO tests
+    /// Helper: create a temp directory with a known prefix for IO tests.
     fn io_test_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("tein-io-test").join(name);
         std::fs::create_dir_all(&dir).expect("create test dir");
@@ -4193,7 +4193,7 @@ mod tests {
         }
     }
 
-    /// register TestCounter and a scheme-callable constructor (make-test-counter)
+    /// Register TestCounter and a Scheme-callable constructor (make-test-counter).
     fn setup_test_counter(ctx: &Context) {
         ctx.register_foreign_type::<TestCounter>()
             .expect("register TestCounter");

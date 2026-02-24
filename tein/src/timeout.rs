@@ -1,20 +1,20 @@
-//! wall-clock timeout wrapper for scheme contexts
+//! Wall-clock timeout wrapper for Scheme contexts.
 //!
 //! [`TimeoutContext`] runs a [`crate::Context`] on a dedicated thread and enforces
-//! wall-clock deadlines on evaluation calls. the underlying context never
+//! wall-clock deadlines on evaluation calls. The underlying context never
 //! crosses thread boundaries (satisfying `!Send`).
 //!
-//! requires `step_limit` to be set on the builder so the context thread
+//! Requires `step_limit` to be set on the builder so the context thread
 //! is guaranteed to eventually terminate after a timeout fires.
 //!
-//! # when to use
+//! # When to use
 //!
 //! - **`TimeoutContext`** — single-owner, wall-clock deadlines, state persists
 //! - **[`crate::managed::ThreadLocalContext`]** — `Send + Sync`, persistent or
 //!   fresh modes, no built-in timeout
 //! - **[`crate::Context`]** — single-threaded, no timeout, maximum control
 //!
-//! # example
+//! # Example
 //!
 //! ```
 //! use tein::{Context, Value, Error};
@@ -44,12 +44,12 @@ use crate::context::ContextBuilder;
 use crate::error::{Error, Result};
 use crate::thread::{ForeignFnPtr, Request, Response, SendableValue};
 
-/// a scheme context with wall-clock timeout enforcement
+/// A Scheme context with wall-clock timeout enforcement.
 ///
-/// wraps a [`crate::Context`] running on a dedicated thread. each evaluation
+/// Wraps a [`crate::Context`] running on a dedicated thread. Each evaluation
 /// call has a wall-clock deadline; if exceeded, `Error::Timeout` is returned.
 ///
-/// the context thread is bounded by the step limit — after timeout fires,
+/// The context thread is bounded by the step limit — after timeout fires,
 /// the thread will eventually halt when fuel runs out.
 ///
 /// # examples
@@ -76,10 +76,10 @@ pub struct TimeoutContext {
 }
 
 impl ContextBuilder {
-    /// build a timeout-wrapped context on a dedicated thread
+    /// Build a timeout-wrapped context on a dedicated thread.
     ///
-    /// requires `step_limit` to be set (ensures the context thread terminates
-    /// after a timeout). returns `Error::InitError` if step_limit is missing.
+    /// Requires `step_limit` to be set (ensures the context thread terminates
+    /// after a timeout). Returns `Error::InitError` if step_limit is missing.
     pub fn build_timeout(self, timeout: Duration) -> Result<TimeoutContext> {
         if !self.has_step_limit() {
             return Err(Error::InitError(
@@ -157,7 +157,7 @@ impl ContextBuilder {
 }
 
 impl TimeoutContext {
-    /// evaluate scheme code with wall-clock timeout
+    /// Evaluate Scheme code with wall-clock timeout.
     pub fn evaluate(&self, code: &str) -> Result<Value> {
         self.tx
             .send(Request::Evaluate(code.to_string()))
@@ -173,7 +173,7 @@ impl TimeoutContext {
         }
     }
 
-    /// call a scheme procedure with wall-clock timeout
+    /// Call a Scheme procedure with wall-clock timeout.
     pub fn call(&self, proc: &Value, args: &[Value]) -> Result<Value> {
         self.tx
             .send(Request::Call(
@@ -192,7 +192,7 @@ impl TimeoutContext {
         }
     }
 
-    /// register a variadic foreign function (with timeout on response)
+    /// Register a variadic foreign function (with timeout on response).
     pub fn define_fn_variadic(&self, name: &str, f: ForeignFnPtr) -> Result<()> {
         self.tx
             .send(Request::DefineFnVariadic {

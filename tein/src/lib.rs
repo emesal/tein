@@ -2,12 +2,12 @@
 //!
 //! > *branch and rune-stick*
 //!
-//! embeddable r7rs scheme interpreter for rust, built on
-//! [chibi-scheme](https://github.com/ashinn/chibi-scheme). safe rust API
+//! Embeddable R7RS Scheme interpreter for Rust, built on
+//! [chibi-scheme](https://github.com/ashinn/chibi-scheme). Safe Rust API
 //! wrapping unsafe C FFI — zero runtime dependencies, full r7rs-small
 //! compliance, ~200kb footprint.
 //!
-//! ## quick start
+//! ## Quick start
 //!
 //! ```
 //! use tein::{Context, Value};
@@ -20,26 +20,26 @@
 //! # }
 //! ```
 //!
-//! ## features
+//! ## Features
 //!
-//! - **sandboxing** — restrict environments with composable [`sandbox`] presets,
+//! - **Sandboxing** — Restrict environments with composable [`sandbox`] presets,
 //!   step limits, wall-clock timeouts, and file IO policies via [`ContextBuilder`]
-//! - **`#[scheme_fn]`** — define scheme-callable functions in rust with automatic
+//! - **`#[scheme_fn]`** — Define Scheme-callable functions in Rust with automatic
 //!   type conversion (see [`scheme_fn`])
-//! - **foreign types** — expose rust types as scheme objects with method dispatch
+//! - **Foreign types** — Expose Rust types as Scheme objects with method dispatch
 //!   and introspection (see [`foreign`])
-//! - **custom ports** — bridge rust `Read`/`Write` into scheme's port system
-//! - **reader extensions** — register custom `#` dispatch characters
-//! - **macro expansion hooks** — intercept and transform macro expansions
-//! - **managed contexts** — thread-safe evaluation via [`ThreadLocalContext`]
+//! - **Custom ports** — Bridge Rust `Read`/`Write` into Scheme's port system
+//! - **Reader extensions** — Register custom `#` dispatch characters
+//! - **Macro expansion hooks** — Intercept and transform macro expansions
+//! - **Managed contexts** — Thread-safe evaluation via [`ThreadLocalContext`]
 //!   with persistent or fresh-per-evaluation modes (see [`managed`])
-//! - **timeouts** — wall-clock deadlines via [`TimeoutContext`]
+//! - **Timeouts** — Wall-clock deadlines via [`TimeoutContext`]
 //!
-//! ## safety model
+//! ## Safety model
 //!
-//! [`Context`] is intentionally `!Send + !Sync`. chibi-scheme contexts are not
-//! thread-safe — one context per thread. for cross-thread use, wrap in
-//! [`ThreadLocalContext`] or [`TimeoutContext`], which run scheme on a dedicated
+//! [`Context`] is intentionally `!Send + !Sync`. Chibi-Scheme contexts are not
+//! thread-safe — one context per thread. For cross-thread use, wrap in
+//! [`ThreadLocalContext`] or [`TimeoutContext`], which run Scheme on a dedicated
 //! thread and proxy requests over channels.
 
 #![warn(missing_docs)]
@@ -62,12 +62,12 @@ pub use managed::{Mode, ThreadLocalContext};
 pub use timeout::TimeoutContext;
 pub use value::Value;
 
-/// re-export the `#[scheme_fn]` proc macro for ergonomic foreign function definition
+/// Re-export the `#[scheme_fn]` proc macro for ergonomic foreign function definition.
 pub use tein_macros::scheme_fn;
 
-/// raw ffi types for advanced use (foreign functions, proc macro generated code, etc.)
+/// Raw FFI types for advanced use (foreign functions, proc macro generated code, etc.)
 ///
-/// these are thin wrappers over chibi's c api. the `#[scheme_fn]` proc macro
+/// These are thin wrappers over Chibi's C API. The `#[scheme_fn]` proc macro
 /// generates code that references these symbols, so they must remain public.
 #[allow(missing_docs)]
 pub mod raw {

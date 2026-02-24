@@ -1,18 +1,18 @@
-//! foreign type protocol — typed rust objects accessible from scheme
+//! Foreign type protocol — typed Rust objects accessible from Scheme.
 //!
-//! enables rust types to be exposed as first-class scheme objects with
+//! Enables Rust types to be exposed as first-class Scheme objects with
 //! method dispatch, introspection, and clear error messages.
 //!
-//! # architecture
+//! # Architecture
 //!
-//! foreign objects are stored in a per-context `ForeignStore` keyed by
-//! monotonically increasing `u64` handle IDs. scheme sees them as
-//! tagged lists `(__tein-foreign "type-name" handle-id)`. the actual data
-//! lives rust-side — scheme never touches it directly.
+//! Foreign objects are stored in a per-context `ForeignStore` keyed by
+//! monotonically increasing `u64` handle IDs. Scheme sees them as
+//! tagged lists `(__tein-foreign "type-name" handle-id)`. The actual data
+//! lives Rust-side — Scheme never touches it directly.
 //!
-//! # dispatch chain
+//! # Dispatch chain
 //!
-//! when scheme calls e.g. `(counter-get obj)`:
+//! When Scheme calls e.g. `(counter-get obj)`:
 //!
 //! 1. auto-generated convenience proc calls `(apply foreign-call obj 'get args)`
 //! 2. `foreign-call` (native fn) reads `FOREIGN_STORE_PTR` from thread-local storage
@@ -24,7 +24,7 @@
 //! [`crate::Context::call()`] via an RAII guard and cleared on return,
 //! so foreign dispatch is only active during evaluation.
 //!
-//! # complete example
+//! # Complete example
 //!
 //! ```
 //! use tein::{Context, ForeignType, MethodFn, Value};
@@ -73,9 +73,9 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// a method on a foreign type, callable from scheme.
+/// A method on a foreign type, callable from Scheme.
 ///
-/// receives a mutable reference to the object (downcast inside the body),
+/// Receives a mutable reference to the object (downcast inside the body),
 /// a limited context for creating return values, and the remaining arguments.
 ///
 /// # example
@@ -89,10 +89,10 @@ use std::collections::HashMap;
 /// ```
 pub type MethodFn = fn(&mut dyn Any, &MethodContext, &[Value]) -> Result<Value>;
 
-/// limited context passed to foreign methods.
+/// Limited context passed to foreign methods.
 ///
-/// provides only what methods need: creating foreign values and
-/// evaluating scheme. prevents methods from accessing ForeignStore
+/// Provides only what methods need: creating foreign values and
+/// evaluating Scheme. Prevents methods from accessing ForeignStore
 /// internals directly (which would cause borrow conflicts).
 pub struct MethodContext {
     /// raw chibi context pointer — for Value::to_raw/from_raw
@@ -100,43 +100,43 @@ pub struct MethodContext {
     pub(crate) ctx: crate::ffi::sexp,
 }
 
-/// a rust type that can be exposed to scheme as a foreign object.
+/// A Rust type that can be exposed to Scheme as a foreign object.
 ///
-/// implement this on your types, then register with
-/// `ctx.register_foreign_type::<T>()`. the type name appears in
-/// scheme as the tagged list's type-name field and in error messages.
+/// Implement this on your types, then register with
+/// `ctx.register_foreign_type::<T>()`. The type name appears in
+/// Scheme as the tagged list's type-name field and in error messages.
 ///
-/// # naming
+/// # Naming
 ///
 /// `type_name()` should be a kebab-case identifier suitable for
-/// scheme: `"http-client"`, `"counter"`, `"file-writer"`.
-/// auto-generated convenience procs use this name:
+/// Scheme: `"http-client"`, `"counter"`, `"file-writer"`.
+/// Auto-generated convenience procs use this name:
 /// `http-client?`, `http-client-get`, etc.
 pub trait ForeignType: Any + 'static {
-    /// scheme-visible type name (kebab-case)
+    /// Scheme-visible type name (kebab-case).
     fn type_name() -> &'static str;
 
-    /// method table — maps scheme symbol names to handler functions
+    /// Method table — maps Scheme symbol names to handler functions.
     fn methods() -> &'static [(&'static str, MethodFn)];
 }
 
-/// a live foreign object instance
+/// A live foreign object instance.
 struct ForeignObject {
-    /// the actual rust value
+    /// The actual Rust value.
     data: Box<dyn Any>,
-    /// type name (from ForeignType::type_name)
+    /// Type name (from ForeignType::type_name).
     type_name: &'static str,
 }
 
-/// type registration entry
+/// Type registration entry.
 struct TypeEntry {
-    /// method table for this type
+    /// Method table for this type.
     methods: &'static [(&'static str, MethodFn)],
 }
 
-/// per-context storage for foreign type registrations and live instances.
+/// Per-context storage for foreign type registrations and live instances.
 ///
-/// lives inside `Context` as `RefCell<ForeignStore>`. drops all instances
+/// Lives inside `Context` as `RefCell<ForeignStore>`. Drops all instances
 /// when the context drops — no GC integration needed.
 pub(crate) struct ForeignStore {
     /// registered types: name → method table
@@ -233,9 +233,9 @@ impl ForeignStore {
     }
 }
 
-/// dispatch a method call on a foreign object.
+/// Dispatch a method call on a foreign object.
 ///
-/// called from the `foreign-call` native function. args is the raw sexp argument list:
+/// Called from the `foreign-call` native function. args is the raw sexp argument list:
 /// `(obj method-symbol arg1 arg2 ...)`
 pub(crate) unsafe fn dispatch_foreign_call(
     store: &RefCell<ForeignStore>,

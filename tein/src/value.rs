@@ -1,11 +1,11 @@
-//! scheme value representation
+//! Scheme value representation.
 //!
-//! [`Value`] is the safe rust representation of a chibi-scheme sexp.
-//! most variants own their data; `Procedure`, `Port`, and `HashTable`
+//! [`Value`] is the safe Rust representation of a Chibi-Scheme sexp.
+//! Most variants own their data; `Procedure`, `Port`, and `HashTable`
 //! hold raw sexp pointers valid only within the originating
 //! [`crate::Context`].
 //!
-//! # variants
+//! # Variants
 //!
 //! | variant | scheme type | rust extraction |
 //! |---------|------------|-----------------|
@@ -27,13 +27,13 @@
 //! | `Foreign { .. }` | foreign object | `ctx.foreign_ref::<T>()` |
 //! | `Other(String)` | unhandled type | — |
 //!
-//! # conversion
+//! # Conversion
 //!
-//! `Value::from_raw()` converts chibi sexps to safe values. type checking
-//! order matters: flonum is checked *before* integer because chibi's
+//! `Value::from_raw()` converts Chibi sexps to safe values. Type checking
+//! order matters: flonum is checked *before* integer because Chibi's
 //! integer predicate matches flonums like `4.0`.
 //!
-//! `Value::to_raw()` converts back to chibi sexps for calling into scheme.
+//! `Value::to_raw()` converts back to Chibi sexps for calling into Scheme.
 
 use crate::{
     error::{Error, Result},
@@ -42,8 +42,8 @@ use crate::{
 use std::fmt;
 use std::os::raw::c_int;
 
-/// maximum nesting depth for recursive value conversion.
-/// prevents stack overflow on deeply nested or (theoretically) circular structures.
+/// Maximum nesting depth for recursive value conversion.
+/// Prevents stack overflow on deeply nested or (theoretically) circular structures.
 const MAX_DEPTH: usize = 10_000;
 
 // gc safety:
@@ -77,92 +77,92 @@ const MAX_DEPTH: usize = 10_000;
 // this is fine for typical values but exponential for deeply nested shared structures.
 // a visited-set could fix this but would require representing sharing in Value.
 
-/// a scheme value
+/// A Scheme value.
 ///
-/// represents the result of evaluating scheme code.
-/// this is a safe wrapper around chibi's internal sexp type.
+/// Represents the result of evaluating Scheme code.
+/// This is a safe wrapper around Chibi's internal sexp type.
 ///
-/// most variants own their data, but `Procedure` holds a raw sexp pointer
+/// Most variants own their data, but `Procedure` holds a raw sexp pointer
 /// that is only valid within the originating `Context` (enforced by !Send/!Sync).
 #[derive(Debug, Clone)]
 pub enum Value {
-    /// integer value
+    /// Integer value.
     Integer(i64),
 
-    /// floating point value
+    /// Floating point value.
     Float(f64),
 
-    /// string value
+    /// String value.
     String(String),
 
-    /// symbol value
+    /// Symbol value.
     Symbol(String),
 
-    /// boolean value
+    /// Boolean value.
     Boolean(bool),
 
-    /// proper list (converted to vec)
+    /// Proper list (converted to vec).
     List(Vec<Value>),
 
-    /// pair (improper list or dotted pair)
+    /// Pair (improper list or dotted pair).
     Pair(Box<Value>, Box<Value>),
 
-    /// vector (scheme `#(...)`)
+    /// Vector (Scheme `#(...)`).
     Vector(Vec<Value>),
 
-    /// character value (unicode scalar value)
+    /// Character value (unicode scalar value).
     Char(char),
 
-    /// bytevector (scheme `#u8(...)`)
+    /// Bytevector (Scheme `#u8(...)`).
     Bytevector(Vec<u8>),
 
-    /// an opaque input or output port
+    /// An opaque input or output port.
     ///
-    /// holds a raw sexp pointer — only valid within the originating Context.
+    /// Holds a raw sexp pointer — only valid within the originating Context.
     Port(ffi::sexp),
 
-    /// an opaque hash table (srfi-69)
+    /// An opaque hash table (SRFI-69).
     ///
-    /// holds a raw sexp pointer — only valid within the originating Context.
+    /// Holds a raw sexp pointer — only valid within the originating Context.
     HashTable(ffi::sexp),
 
-    /// nil/empty list
+    /// Nil/empty list.
     Nil,
 
-    /// unspecified value (like void in c)
+    /// Unspecified value (like void in C).
     Unspecified,
 
-    /// a callable scheme procedure or opcode (builtin like `+`)
+    /// A callable Scheme procedure or opcode (builtin like `+`).
     ///
-    /// holds a raw sexp pointer — only valid within the originating Context.
-    /// thread safety is enforced by Context being !Send + !Sync.
+    /// Holds a raw sexp pointer — only valid within the originating Context.
+    /// Thread safety is enforced by Context being !Send + !Sync.
     Procedure(ffi::sexp),
 
-    /// other scheme values we don't yet handle
+    /// Other Scheme values we don't yet handle.
     Other(String),
 
-    /// a foreign object managed by the Context's ForeignStore
+    /// A foreign object managed by the Context's ForeignStore.
     ///
-    /// holds the handle ID and type name. the actual data lives rust-side
+    /// Holds the handle ID and type name. The actual data lives Rust-side
     /// in the ForeignStore — use `ctx.foreign_ref::<T>(value)` to access.
     Foreign {
-        /// handle ID in the ForeignStore
+        /// Handle ID in the ForeignStore.
         handle_id: u64,
-        /// type name (from ForeignType::type_name)
+        /// Type name (from ForeignType::type_name).
         type_name: String,
     },
 }
 
 impl Value {
-    /// convert from raw chibi sexp to safe value
+    /// Convert from raw Chibi sexp to safe value.
     ///
-    /// # safety
-    /// ctx and raw must be valid pointers from chibi-scheme
+    /// # Safety
+    /// ctx and raw must be valid pointers from Chibi-Scheme.
     pub(crate) unsafe fn from_raw(ctx: ffi::sexp, raw: ffi::sexp) -> Result<Self> {
         unsafe { Self::from_raw_depth(ctx, raw, 0) }
     }
 
-    /// recursive inner conversion with depth tracking to prevent stack overflow
+    /// Recursive inner conversion with depth tracking to prevent stack overflow.
     unsafe fn from_raw_depth(ctx: ffi::sexp, raw: ffi::sexp, depth: usize) -> Result<Self> {
         if depth > MAX_DEPTH {
             return Err(Error::EvalError(
@@ -319,9 +319,9 @@ impl Value {
         }
     }
 
-    /// check if a sexp is a proper list (ends in nil)
+    /// Check if a sexp is a proper list (ends in nil).
     ///
-    /// uses tortoise-and-hare cycle detection to avoid infinite loops
+    /// Uses tortoise-and-hare cycle detection to avoid infinite loops
     /// on circular lists constructed via set-cdr!.
     unsafe fn is_proper_list(sexp: ffi::sexp) -> bool {
         unsafe {
@@ -348,9 +348,9 @@ impl Value {
         }
     }
 
-    /// extract a structured error from a chibi exception
+    /// Extract a structured error from a Chibi exception.
     ///
-    /// detects sandbox sentinel prefixes (`[sandbox:file]`, `[sandbox:binding]`)
+    /// Detects sandbox sentinel prefixes (`[sandbox:file]`, `[sandbox:binding]`)
     /// and module policy violations, returning `SandboxViolation` for those cases
     /// and `EvalError` for everything else.
     unsafe fn extract_exception_error(ctx: ffi::sexp, exn: ffi::sexp) -> Error {
@@ -412,21 +412,21 @@ impl Value {
         }
     }
 
-    /// convert a rust value to a raw chibi sexp
+    /// Convert a Rust value to a raw Chibi sexp.
     ///
-    /// useful for returning values from foreign functions registered
+    /// Useful for returning values from foreign functions registered
     /// with [`crate::Context::define_fn_variadic`] or `#[scheme_fn]`.
     ///
-    /// supports all value types except `Other`.
+    /// Supports all value types except `Other`.
     ///
     /// # Safety
     ///
-    /// `ctx` must be a valid, live chibi-scheme context pointer.
+    /// `ctx` must be a valid, live Chibi-Scheme context pointer.
     pub unsafe fn to_raw(&self, ctx: ffi::sexp) -> Result<ffi::sexp> {
         unsafe { self.to_raw_depth(ctx, 0) }
     }
 
-    /// recursive inner conversion with depth tracking to prevent stack overflow
+    /// Recursive inner conversion with depth tracking to prevent stack overflow.
     unsafe fn to_raw_depth(&self, ctx: ffi::sexp, depth: usize) -> Result<ffi::sexp> {
         if depth > MAX_DEPTH {
             return Err(Error::EvalError(
@@ -539,7 +539,7 @@ impl Value {
 // --- typed extraction helpers ---
 
 impl Value {
-    /// extract as integer, if this value is an `Integer`
+    /// Extract as integer, if this value is an `Integer`.
     pub fn as_integer(&self) -> Option<i64> {
         match self {
             Value::Integer(n) => Some(*n),
@@ -547,7 +547,7 @@ impl Value {
         }
     }
 
-    /// extract as float, if this value is a `Float`
+    /// Extract as float, if this value is a `Float`.
     pub fn as_float(&self) -> Option<f64> {
         match self {
             Value::Float(f) => Some(*f),
@@ -555,7 +555,7 @@ impl Value {
         }
     }
 
-    /// extract as string slice, if this value is a `String`
+    /// Extract as string slice, if this value is a `String`.
     pub fn as_string(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s.as_str()),
@@ -563,7 +563,7 @@ impl Value {
         }
     }
 
-    /// extract as symbol name, if this value is a `Symbol`
+    /// Extract as symbol name, if this value is a `Symbol`.
     pub fn as_symbol(&self) -> Option<&str> {
         match self {
             Value::Symbol(s) => Some(s.as_str()),
@@ -571,7 +571,7 @@ impl Value {
         }
     }
 
-    /// extract as boolean, if this value is a `Boolean`
+    /// Extract as boolean, if this value is a `Boolean`.
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Boolean(b) => Some(*b),
@@ -579,7 +579,7 @@ impl Value {
         }
     }
 
-    /// extract as list slice, if this value is a `List`
+    /// Extract as list slice, if this value is a `List`.
     pub fn as_list(&self) -> Option<&[Value]> {
         match self {
             Value::List(items) => Some(items.as_slice()),
@@ -587,7 +587,7 @@ impl Value {
         }
     }
 
-    /// extract as pair references, if this value is a `Pair`
+    /// Extract as pair references, if this value is a `Pair`.
     pub fn as_pair(&self) -> Option<(&Value, &Value)> {
         match self {
             Value::Pair(car, cdr) => Some((car.as_ref(), cdr.as_ref())),
@@ -595,7 +595,7 @@ impl Value {
         }
     }
 
-    /// extract as vector slice, if this value is a `Vector`
+    /// Extract as vector slice, if this value is a `Vector`.
     pub fn as_vector(&self) -> Option<&[Value]> {
         match self {
             Value::Vector(items) => Some(items.as_slice()),
@@ -603,9 +603,9 @@ impl Value {
         }
     }
 
-    /// extract the raw sexp pointer, if this value is a `Procedure`
+    /// Extract the raw sexp pointer, if this value is a `Procedure`.
     ///
-    /// the returned pointer is opaque — pass it to [`crate::Context::call`] to invoke.
+    /// The returned pointer is opaque — pass it to [`crate::Context::call`] to invoke.
     pub fn as_procedure(&self) -> Option<ffi::sexp> {
         match self {
             Value::Procedure(raw) => Some(*raw),
@@ -613,7 +613,7 @@ impl Value {
         }
     }
 
-    /// extract as char, if this value is a `Char`
+    /// Extract as char, if this value is a `Char`.
     pub fn as_char(&self) -> Option<char> {
         match self {
             Value::Char(c) => Some(*c),
@@ -621,7 +621,7 @@ impl Value {
         }
     }
 
-    /// extract as byte slice, if this value is a `Bytevector`
+    /// Extract as byte slice, if this value is a `Bytevector`.
     pub fn as_bytevector(&self) -> Option<&[u8]> {
         match self {
             Value::Bytevector(bytes) => Some(bytes.as_slice()),
@@ -629,9 +629,9 @@ impl Value {
         }
     }
 
-    /// extract the raw sexp pointer, if this value is a `Port`
+    /// Extract the raw sexp pointer, if this value is a `Port`.
     ///
-    /// the returned pointer is opaque — pass it back to scheme via [`crate::Context::call`].
+    /// The returned pointer is opaque — pass it back to Scheme via [`crate::Context::call`].
     pub fn as_port(&self) -> Option<ffi::sexp> {
         match self {
             Value::Port(raw) => Some(*raw),
@@ -639,9 +639,9 @@ impl Value {
         }
     }
 
-    /// extract the raw sexp pointer, if this value is a `HashTable`
+    /// Extract the raw sexp pointer, if this value is a `HashTable`.
     ///
-    /// the returned pointer is opaque — pass it back to scheme via [`crate::Context::call`].
+    /// The returned pointer is opaque — pass it back to Scheme via [`crate::Context::call`].
     pub fn as_hash_table(&self) -> Option<ffi::sexp> {
         match self {
             Value::HashTable(raw) => Some(*raw),
@@ -649,7 +649,7 @@ impl Value {
         }
     }
 
-    /// extract foreign object handle ID and type name
+    /// Extract foreign object handle ID and type name.
     pub fn as_foreign(&self) -> Option<(u64, &str)> {
         match self {
             Value::Foreign {
@@ -660,7 +660,7 @@ impl Value {
         }
     }
 
-    /// returns the type name if this value is a `Foreign` object
+    /// Returns the type name if this value is a `Foreign` object.
     pub fn foreign_type_name(&self) -> Option<&str> {
         match self {
             Value::Foreign { type_name, .. } => Some(type_name.as_str()),
@@ -668,42 +668,42 @@ impl Value {
         }
     }
 
-    /// returns true if this value is a `Foreign` object
+    /// Returns true if this value is a `Foreign` object.
     pub fn is_foreign(&self) -> bool {
         matches!(self, Value::Foreign { .. })
     }
 
-    /// returns true if this value is a `Procedure`
+    /// Returns true if this value is a `Procedure`.
     pub fn is_procedure(&self) -> bool {
         matches!(self, Value::Procedure(_))
     }
 
-    /// returns true if this value is `Nil`
+    /// Returns true if this value is `Nil`.
     pub fn is_nil(&self) -> bool {
         matches!(self, Value::Nil)
     }
 
-    /// returns true if this value is `Unspecified`
+    /// Returns true if this value is `Unspecified`.
     pub fn is_unspecified(&self) -> bool {
         matches!(self, Value::Unspecified)
     }
 
-    /// returns true if this value is a `Char`
+    /// Returns true if this value is a `Char`.
     pub fn is_char(&self) -> bool {
         matches!(self, Value::Char(_))
     }
 
-    /// returns true if this value is a `Bytevector`
+    /// Returns true if this value is a `Bytevector`.
     pub fn is_bytevector(&self) -> bool {
         matches!(self, Value::Bytevector(_))
     }
 
-    /// returns true if this value is a `Port`
+    /// Returns true if this value is a `Port`.
     pub fn is_port(&self) -> bool {
         matches!(self, Value::Port(_))
     }
 
-    /// returns true if this value is a `HashTable`
+    /// Returns true if this value is a `HashTable`.
     pub fn is_hash_table(&self) -> bool {
         matches!(self, Value::HashTable(_))
     }

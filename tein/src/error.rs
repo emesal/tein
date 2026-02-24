@@ -1,10 +1,10 @@
-//! error types for tein
+//! Error types for tein.
 //!
-//! all fallible operations in tein return [`Result<T>`](Result), which uses
+//! All fallible operations in tein return [`Result<T>`](Result), which uses
 //! [`Error`] as the error type. [`Error`] implements `std::error::Error`
 //! and converts from `std::io::Error` and utf-8 errors.
 //!
-//! # when each variant occurs
+//! # When each variant occurs
 //!
 //! | variant | cause |
 //! |---------|-------|
@@ -17,7 +17,7 @@
 //! | [`Error::Timeout`] | evaluation exceeded [`TimeoutContext`](crate::TimeoutContext) deadline |
 //! | [`Error::SandboxViolation`] | blocked module import, denied file access, or missing preset |
 //!
-//! # example
+//! # Example
 //!
 //! ```
 //! use tein::{Context, Error};
@@ -35,36 +35,36 @@
 
 use std::fmt;
 
-/// result type alias for tein operations
+/// Result type alias for tein operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// errors that can occur when working with scheme contexts
+/// Errors that can occur when working with Scheme contexts.
 #[derive(Debug, Clone)]
 pub enum Error {
-    /// scheme evaluation error
+    /// Scheme evaluation error.
     EvalError(String),
 
-    /// type conversion error
+    /// Type conversion error.
     TypeError(String),
 
-    /// context initialization error
+    /// Context initialization error.
     InitError(String),
 
-    /// utf-8 conversion error
+    /// UTF-8 conversion error.
     Utf8Error(String),
 
-    /// file io error
+    /// File IO error.
     IoError(String),
 
-    /// evaluation exceeded the configured step limit
+    /// Evaluation exceeded the configured step limit.
     StepLimitExceeded,
 
-    /// evaluation exceeded the configured wall-clock timeout
+    /// Evaluation exceeded the configured wall-clock timeout.
     Timeout,
 
-    /// evaluation was blocked by sandbox policy (not a code bug)
+    /// Evaluation was blocked by sandbox policy (not a code bug).
     ///
-    /// indicates the scheme code attempted something explicitly restricted
+    /// Indicates the Scheme code attempted something explicitly restricted
     /// by the context's configuration: a blocked module import, denied
     /// file access, or use of a primitive not included in the active presets.
     SandboxViolation(String),

@@ -1,10 +1,10 @@
-//! managed context on a dedicated thread
+//! Managed context on a dedicated thread.
 //!
 //! [`ThreadLocalContext`] runs a [`crate::Context`] on a dedicated thread and
-//! proxies evaluation requests over channels. the type is `Send + Sync`,
+//! proxies evaluation requests over channels. The type is `Send + Sync`,
 //! safe to share across threads via `Arc`.
 //!
-//! # modes
+//! # Modes
 //!
 //! | | persistent | fresh |
 //! |---|---|---|
@@ -13,13 +13,13 @@
 //! | **`reset()`** | tears down + rebuilds | no-op |
 //! | **use case** | REPL, stateful scripting | deterministic evaluation |
 //!
-//! # when to use
+//! # When to use
 //!
-//! - need `Send + Sync` for scheme evaluation → [`ThreadLocalContext`]
-//! - need wall-clock timeouts → [`crate::TimeoutContext`]
-//! - single-threaded use → [`crate::Context`] directly
+//! - Need `Send + Sync` for Scheme evaluation → [`ThreadLocalContext`]
+//! - Need wall-clock timeouts → [`crate::TimeoutContext`]
+//! - Single-threaded use → [`crate::Context`] directly
 //!
-//! # example
+//! # Example
 //!
 //! ```
 //! use tein::{Context, Value};
@@ -52,28 +52,28 @@ use crate::context::ContextBuilder;
 use crate::error::{Error, Result};
 use crate::thread::{ForeignFnPtr, Request, Response, SendableValue};
 
-/// operating mode for a [`ThreadLocalContext`]
+/// Operating mode for a [`ThreadLocalContext`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// context persists across evaluations, accumulating state.
+    /// Context persists across evaluations, accumulating state.
     /// `reset()` tears down and rebuilds from the init closure.
     Persistent,
-    /// context is rebuilt from the init closure before every evaluation.
+    /// Context is rebuilt from the init closure before every evaluation.
     /// `reset()` is a no-op.
     Fresh,
 }
 
-/// a managed scheme context on a dedicated thread
+/// A managed Scheme context on a dedicated thread.
 ///
-/// wraps a [`Context`](crate::Context) running on a dedicated thread.
-/// requests are proxied over channels, making this type `Send + Sync`
+/// Wraps a [`Context`](crate::Context) running on a dedicated thread.
+/// Requests are proxied over channels, making this type `Send + Sync`
 /// and safe to share across threads via `Arc`.
 ///
-/// # modes
+/// # Modes
 ///
-/// - **persistent**: context lives across evaluations. state accumulates.
+/// - **Persistent**: context lives across evaluations. State accumulates.
 ///   `reset()` tears down and rebuilds from the init closure.
-/// - **fresh**: context is rebuilt before every evaluation. no state leakage.
+/// - **Fresh**: context is rebuilt before every evaluation. No state leakage.
 ///   `reset()` is a no-op.
 ///
 /// # examples
@@ -109,9 +109,9 @@ unsafe impl Send for ThreadLocalContext {}
 unsafe impl Sync for ThreadLocalContext {}
 
 impl ThreadLocalContext {
-    /// create a managed context on a dedicated thread
+    /// Create a managed context on a dedicated thread.
     ///
-    /// the init closure runs once after context creation. in fresh mode,
+    /// The init closure runs once after context creation. In fresh mode,
     /// it also runs before every evaluation.
     pub(crate) fn new(
         builder: ContextBuilder,
@@ -228,7 +228,7 @@ impl ThreadLocalContext {
         })
     }
 
-    /// build a context from a builder clone and run the init closure
+    /// Build a context from a builder clone and run the init closure.
     fn build_and_init(
         builder: &ContextBuilder,
         init: &impl Fn(&crate::Context) -> Result<()>,
@@ -238,7 +238,7 @@ impl ThreadLocalContext {
         Ok(ctx)
     }
 
-    /// evaluate scheme code
+    /// Evaluate Scheme code.
     pub fn evaluate(&self, code: &str) -> Result<Value> {
         self.tx
             .send(Request::Evaluate(code.to_string()))
@@ -252,7 +252,7 @@ impl ThreadLocalContext {
         }
     }
 
-    /// call a scheme procedure with arguments
+    /// Call a Scheme procedure with arguments.
     pub fn call(&self, proc: &Value, args: &[Value]) -> Result<Value> {
         self.tx
             .send(Request::Call(
@@ -269,7 +269,7 @@ impl ThreadLocalContext {
         }
     }
 
-    /// register a variadic foreign function
+    /// Register a variadic foreign function.
     pub fn define_fn_variadic(&self, name: &str, f: ForeignFnPtr) -> Result<()> {
         self.tx
             .send(Request::DefineFnVariadic {
@@ -286,11 +286,11 @@ impl ThreadLocalContext {
         }
     }
 
-    /// rebuild the context from the init closure
+    /// Rebuild the context from the init closure.
     ///
-    /// in persistent mode, tears down the current context and rebuilds
-    /// from the stored builder config + init closure. live foreign objects
-    /// are dropped. in fresh mode, this is a no-op (already rebuilds each call).
+    /// In persistent mode, tears down the current context and rebuilds
+    /// from the stored builder config + init closure. Live foreign objects
+    /// are dropped. In fresh mode, this is a no-op (already rebuilds each call).
     pub fn reset(&self) -> Result<()> {
         self.tx
             .send(Request::Reset)
@@ -304,7 +304,7 @@ impl ThreadLocalContext {
         }
     }
 
-    /// which mode this context is running in
+    /// Which mode this context is running in.
     pub fn mode(&self) -> Mode {
         self.mode
     }

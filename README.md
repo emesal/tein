@@ -1,10 +1,10 @@
 # tein
 
-> embeddable r7rs scheme interpreter for rust
+> Embeddable R7RS Scheme interpreter for Rust
 
-**tein** wraps [chibi-scheme](https://github.com/ashinn/chibi-scheme) in a safe rust API. zero runtime dependencies, full r7rs-small compliance, ~200kb footprint. evaluate scheme from rust, call rust from scheme, sandbox everything.
+**tein** wraps [chibi-scheme](https://github.com/ashinn/chibi-scheme) in a safe Rust API. Zero runtime dependencies, full r7rs-small compliance, ~200kb footprint. Evaluate Scheme from Rust, call Rust from Scheme, sandbox everything.
 
-## quick start
+## Quick start
 
 ```toml
 [dependencies]
@@ -19,11 +19,11 @@ let result = ctx.evaluate("(+ 1 2 3)")?;
 assert_eq!(result, Value::Integer(6));
 ```
 
-## features
+## Features
 
-### sandboxing & resource limits
+### Sandboxing & resource limits
 
-restrict the environment to exactly the primitives you need. combine presets, step limits, wall-clock timeouts, and file IO policies.
+Restrict the environment to exactly the primitives you need. Combine presets, step limits, wall-clock timeouts, and file IO policies.
 
 ```rust
 use tein::Context;
@@ -40,11 +40,11 @@ assert_eq!(result, tein::Value::Integer(3));
 assert!(ctx.evaluate(r#"(open-input-file "/etc/passwd")"#).is_err());
 ```
 
-16 composable presets (`ARITHMETIC`, `LISTS`, `STRINGS`, `IO`, ...) plus convenience builders (`.pure_computation()`, `.safe()`). see the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module.
+16 composable presets (`ARITHMETIC`, `LISTS`, `STRINGS`, `IO`, ...) plus convenience builders (`.pure_computation()`, `.safe()`). See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module.
 
 ### `#[scheme_fn]` proc macro
 
-define scheme-callable functions in pure rust with automatic type conversion and error handling.
+Define Scheme-callable functions in pure Rust with automatic type conversion and error handling.
 
 ```rust
 use tein::{Context, scheme_fn};
@@ -61,9 +61,9 @@ let result = ctx.evaluate("(square 7)")?;
 assert_eq!(result, tein::Value::Integer(49));
 ```
 
-### foreign type protocol
+### Foreign type protocol
 
-expose rust types as first-class scheme objects with method dispatch, predicates, and introspection.
+Expose Rust types as first-class Scheme objects with method dispatch, predicates, and introspection.
 
 ```rust
 use tein::{Context, ForeignType, MethodFn, Value};
@@ -92,9 +92,9 @@ ctx.register_foreign_type::<Counter>()?;
 // auto-generates: counter?, counter-increment, counter-get
 ```
 
-### custom ports
+### Custom ports
 
-bridge rust `Read`/`Write` into scheme's port system for streaming IO.
+Bridge Rust `Read`/`Write` into Scheme's port system for streaming IO.
 
 ```rust
 use tein::Context;
@@ -105,9 +105,9 @@ let port = ctx.open_input_port(std::io::Cursor::new(json))?;
 let datum = ctx.read(&port)?;
 ```
 
-### reader extensions
+### Reader extensions
 
-register custom `#` dispatch characters to extend scheme's reader at the syntax level.
+Register custom `#` dispatch characters to extend Scheme's reader at the syntax level.
 
 ```rust
 let ctx = Context::new_standard()?;
@@ -116,16 +116,16 @@ ctx.register_reader('j', &ctx.evaluate(
 )?)?;
 ```
 
-or from scheme via `(import (tein reader))`:
+Or from Scheme via `(import (tein reader))`:
 
 ```scheme
 (import (tein reader))
 (set-reader! #\j (lambda (port) (read port)))
 ```
 
-### macro expansion hooks
+### Macro expansion hooks
 
-intercept and transform macro expansions at analysis time — replace-and-reanalyse semantics.
+Intercept and transform macro expansions at analysis time — replace-and-reanalyse semantics.
 
 ```scheme
 (import (tein macro))
@@ -134,9 +134,9 @@ intercept and transform macro expansions at analysis time — replace-and-reanal
     expanded))  ; observe or transform
 ```
 
-### managed contexts
+### Managed contexts
 
-thread-safe scheme evaluation via `ThreadLocalContext` — persistent state or fresh-per-evaluation.
+Thread-safe Scheme evaluation via `ThreadLocalContext` — persistent state or fresh-per-evaluation.
 
 ```rust
 use tein::Context;
@@ -157,30 +157,30 @@ assert_eq!(result, tein::Value::Integer(2));
 ctx.reset()?; // rebuild context, re-run init
 ```
 
-## examples
+## Examples
 
 | example | description |
 |---------|-------------|
-| `basic` | evaluate expressions, pattern-match on values |
-| `floats` | floating-point arithmetic |
-| `ffi` | `#[scheme_fn]` proc macro, calling rust from scheme and vice versa |
-| `debug` | float/integer type inspection |
-| `sandbox` | step limits, restricted environments, timeouts, file IO policies |
-| `foreign_types` | foreign type protocol — registration, dispatch, introspection |
+| `basic` | Evaluate expressions, pattern-match on values |
+| `floats` | Floating-point arithmetic |
+| `ffi` | `#[scheme_fn]` proc macro, calling Rust from Scheme and vice versa |
+| `debug` | Float/integer type inspection |
+| `sandbox` | Step limits, restricted environments, timeouts, file IO policies |
+| `foreign_types` | Foreign type protocol — registration, dispatch, introspection |
 | `managed` | `ThreadLocalContext` persistent and fresh modes |
-| `repl` | interactive scheme REPL with readline |
+| `repl` | Interactive Scheme REPL with readline |
 
 ```bash
 cargo run --example sandbox
 ```
 
-## about
+## About
 
-from old norse *tein* (teinn): **branch** — like the branches of an abstract syntax tree; **rune-stick** — carved wood for writing magical symbols. code as data, data as runes.
+From Old Norse *tein* (teinn): **branch** — like the branches of an abstract syntax tree; **rune-stick** — carved wood for writing magical symbols. Code as data, data as runes.
 
-**why scheme?** homoiconic syntax, proper tail calls, hygienic macros, minimalist elegance. **why chibi?** tiny (~200kb), zero external deps, full r7rs-small, designed for embedding.
+**Why Scheme?** Homoiconic syntax, proper tail calls, hygienic macros, minimalist elegance. **Why Chibi?** Tiny (~200kb), zero external deps, full r7rs-small, designed for embedding.
 
-**why tein?** because embedding scheme in rust shouldn't require wrestling with raw FFI.
+**Why tein?** Because embedding Scheme in Rust shouldn't require wrestling with raw FFI.
 
 ---
 
