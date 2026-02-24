@@ -71,6 +71,9 @@ const VFS_FILES: &[&str] = &[
     // tein reader dispatch protocol
     "lib/tein/reader.sld",
     "lib/tein/reader.scm",
+    // tein macro expansion hook
+    "lib/tein/macro.sld",
+    "lib/tein/macro.scm",
 ];
 
 /// C-backed modules that need static linking.
