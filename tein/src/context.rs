@@ -417,6 +417,9 @@ unsafe extern "C" fn reader_unset_wrapper(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            return ffi::get_void();
+        }
         let ch_sexp = ffi::sexp_car(args);
         if ffi::sexp_charp(ch_sexp) == 0 {
             return ffi::get_void();

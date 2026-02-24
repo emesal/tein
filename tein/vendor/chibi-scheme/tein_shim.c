@@ -177,9 +177,10 @@ sexp_sint_t tein_fuel_consume_slice(sexp_sint_t slice_used) {
         ? tein_fuel_budget : SEXP_DEFAULT_QUANTUM;
 }
 
-// error construction (for policy violation exceptions)
+// error construction (for policy violation exceptions).
+// len is unused; sexp_user_exception copies msg as a nul-terminated c string.
 sexp tein_make_error(sexp ctx, const char* msg, sexp_sint_t len) {
-    sexp s = sexp_c_string(ctx, msg, len);
+    (void)len;
     return sexp_user_exception(ctx, SEXP_FALSE, msg, SEXP_NULL);
 }
 
