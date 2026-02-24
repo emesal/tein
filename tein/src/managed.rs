@@ -19,7 +19,7 @@
 //! - Need wall-clock timeouts → [`crate::TimeoutContext`]
 //! - Single-threaded use → [`crate::Context`] directly
 //!
-//! # Example
+//! # examples
 //!
 //! ```
 //! use tein::{Context, Value};

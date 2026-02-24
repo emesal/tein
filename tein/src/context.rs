@@ -526,6 +526,11 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
             // would corrupt the binding list.
             let env = ffi::sexp_context_env(ctx);
             let c_name = CString::new(*name).unwrap();
+            // transmute from the 4-arg variadic handler signature to the 3-arg
+            // form that sexp_define_foreign_proc expects. safe because chibi
+            // dispatches these via the variadic calling convention regardless —
+            // the rest-args list arrives as the 4th argument at runtime. this
+            // mirrors the same pattern used in define_fn_variadic.
             let f_typed: Option<
                 unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
             > = std::mem::transmute::<*const std::ffi::c_void, _>(*f as *const std::ffi::c_void);
@@ -1485,6 +1490,13 @@ impl Context {
     ///
     /// Returns an error if the value isn't `Foreign`, the handle is stale,
     /// or the type doesn't match `T`.
+    ///
+    /// # panics
+    ///
+    /// Panics if the returned `Ref` is held across any call that re-enters the
+    /// foreign dispatch (e.g. `ctx.evaluate()`, `ctx.call()`). Those paths
+    /// take a `borrow_mut()` on the same `ForeignStore`, which conflicts with
+    /// the outstanding immutable borrow. Drop the `Ref` before evaluating.
     pub fn foreign_ref<T: ForeignType + 'static>(
         &self,
         value: &Value,
@@ -4750,6 +4762,32 @@ mod tests {
             .unwrap();
         drop(ctx);
         // no panic, no leaked thread — success
+    }
+
+    #[test]
+    fn test_managed_concurrent_evaluate() {
+        // ThreadLocalContext is Send + Sync; concurrent callers are serialised
+        // by the Mutex<Receiver<Response>> on the receive side.
+        use std::sync::Arc;
+        let ctx = Arc::new(
+            Context::builder()
+                .step_limit(1_000_000)
+                .build_managed(|_| Ok(()))
+                .unwrap(),
+        );
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let ctx = Arc::clone(&ctx);
+                std::thread::spawn(move || {
+                    let expr = format!("(+ {} {})", i, i);
+                    let result = ctx.evaluate(&expr).expect("evaluate");
+                    assert_eq!(result, Value::Integer(i * 2));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
     }
 
     // --- custom ports ---

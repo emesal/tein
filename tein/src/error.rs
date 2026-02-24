@@ -17,7 +17,7 @@
 //! | [`Error::Timeout`] | evaluation exceeded [`TimeoutContext`](crate::TimeoutContext) deadline |
 //! | [`Error::SandboxViolation`] | blocked module import, denied file access, or missing preset |
 //!
-//! # Example
+//! # examples
 //!
 //! ```
 //! use tein::{Context, Error};

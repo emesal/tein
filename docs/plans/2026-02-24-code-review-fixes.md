@@ -125,7 +125,7 @@ something that preserves the length invariant (e.g. `unwrap_or_else(|_| CString:
 
 ## suggestions
 
-### 8. `ForeignStore` two-phase borrow — future split opportunity
+### 8. `ForeignStore` two-phase borrow — future split opportunity (noted, no action needed)
 
 **file:** `src/foreign.rs:297`
 
@@ -135,7 +135,7 @@ correct, and the comment helps. a future refactor splitting `ForeignStore` into 
 
 ---
 
-### 9. no concurrent `ThreadLocalContext` test
+### 9. no concurrent `ThreadLocalContext` test ✓
 
 **file:** `src/context.rs`
 
@@ -148,7 +148,7 @@ multiple threads.
 
 ---
 
-### 10. `# Example` capitalisation — style violation (critical per project principles)
+### 10. `# Example` capitalisation — style violation (critical per project principles) ✓
 
 **files:** `src/managed.rs:22`, `src/error.rs:20`, `src/timeout.rs:17`
 
@@ -160,7 +160,7 @@ three module-level doc blocks use `# Example` (title case). the rest of the code
 
 ---
 
-### 11. `transmute` in `register_protocol_fns` missing safety comment
+### 11. `transmute` in `register_protocol_fns` missing safety comment ✓
 
 **file:** `src/context.rs:528`
 
@@ -172,7 +172,7 @@ is less explicit than in the sandbox path.
 
 ---
 
-### 12. `foreign_ref` borrow conflict with mutable dispatch not documented
+### 12. `foreign_ref` borrow conflict with mutable dispatch not documented ✓
 
 **file:** `src/context.rs:1485`
 

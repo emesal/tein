@@ -14,7 +14,7 @@
 //!   fresh modes, no built-in timeout
 //! - **[`crate::Context`]** — single-threaded, no timeout, maximum control
 //!
-//! # Example
+//! # examples
 //!
 //! ```
 //! use tein::{Context, Value, Error};
