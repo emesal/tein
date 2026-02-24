@@ -6,9 +6,9 @@ reviewed range: 14c8839..9b12749
 
 ---
 
-## critical
+## critical ✓ fixed in 4a623c0
 
-### 1. `reader_unset_wrapper` missing null check — UB
+### 1. `reader_unset_wrapper` missing null check — UB ✓
 
 **file:** `src/context.rs:420`
 
@@ -20,7 +20,7 @@ list. `reader_set_wrapper` (line 368) has the guard; `unset` is missing it. call
 
 ---
 
-### 2. `tein_make_error` discards allocation and ignores `len` — tein_shim.c
+### 2. `tein_make_error` discards allocation and ignores `len` — tein_shim.c ✓
 
 **file:** `vendor/chibi-scheme/tein_shim.c:181`
 
