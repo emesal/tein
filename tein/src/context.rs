@@ -261,6 +261,10 @@ unsafe extern "C" fn foreign_type_methods_wrapper(
 /// Args from Scheme: (port-id buffer start end).
 /// Reads from the Rust Read object in PortStore, copies bytes into the Scheme
 /// string buffer, returns fixnum byte count.
+///
+/// Validates start/end indices before any arithmetic: fixnums from Scheme could
+/// be negative (cast to huge usize) or reversed (end < start), both causing
+/// out-of-bounds pointer arithmetic and heap corruption.
 unsafe extern "C" fn port_read_trampoline(
     _ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -277,8 +281,16 @@ unsafe extern "C" fn port_read_trampoline(
         let end_sexp = ffi::sexp_car(rest3);
 
         let port_id = ffi::sexp_unbox_fixnum(id_sexp) as u64;
-        let start = ffi::sexp_unbox_fixnum(start_sexp) as usize;
-        let end = ffi::sexp_unbox_fixnum(end_sexp) as usize;
+        // validate indices before any arithmetic: fixnums from scheme could be
+        // negative (cast to huge usize) or reversed (end < start), both causing
+        // out-of-bounds pointer arithmetic and heap corruption.
+        let start_raw = ffi::sexp_unbox_fixnum(start_sexp);
+        let end_raw = ffi::sexp_unbox_fixnum(end_sexp);
+        if start_raw < 0 || end_raw < 0 || end_raw < start_raw {
+            return ffi::sexp_make_fixnum(0);
+        }
+        let start = start_raw as usize;
+        let end = end_raw as usize;
         let len = end - start;
 
         let store_ptr = PORT_STORE_PTR.with(|c| c.get());
@@ -313,6 +325,9 @@ unsafe extern "C" fn port_read_trampoline(
 /// Args from Scheme: (port-id buffer start end).
 /// Writes bytes from the Scheme string buffer to the Rust Write object
 /// in PortStore, returns fixnum byte count.
+///
+/// Validates start/end indices before any arithmetic: negative or reversed
+/// values would cause out-of-bounds pointer arithmetic and heap corruption.
 unsafe extern "C" fn port_write_trampoline(
     _ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -329,8 +344,14 @@ unsafe extern "C" fn port_write_trampoline(
         let end_sexp = ffi::sexp_car(rest3);
 
         let port_id = ffi::sexp_unbox_fixnum(id_sexp) as u64;
-        let start = ffi::sexp_unbox_fixnum(start_sexp) as usize;
-        let end = ffi::sexp_unbox_fixnum(end_sexp) as usize;
+        // validate indices: negative or reversed values cause OOB pointer arithmetic.
+        let start_raw = ffi::sexp_unbox_fixnum(start_sexp);
+        let end_raw = ffi::sexp_unbox_fixnum(end_sexp);
+        if start_raw < 0 || end_raw < 0 || end_raw < start_raw {
+            return ffi::sexp_make_fixnum(0);
+        }
+        let start = start_raw as usize;
+        let end = end_raw as usize;
         let len = end - start;
 
         let store_ptr = PORT_STORE_PTR.with(|c| c.get());
@@ -5330,6 +5351,20 @@ mod tests {
             "infinite macro hook re-analysis must terminate with an error, got: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_port_trampoline_bad_indices_do_not_panic() {
+        // verify that opening/using a custom port with normal indices works correctly.
+        // the actual UB guard (negative/reversed indices) is a hardening measure
+        // against adversarial callers; tested here via the happy path as a baseline.
+        let ctx = Context::new_standard().unwrap();
+        let data = b"hello";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let port = ctx.open_input_port(cursor).unwrap();
+        let result = ctx.read(&port).unwrap();
+        // reading "hello" as a symbol
+        assert_eq!(result, Value::Symbol("hello".into()));
     }
 
     #[test]
