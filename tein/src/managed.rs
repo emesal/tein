@@ -95,7 +95,7 @@ pub enum Mode {
 /// # }
 /// ```
 pub struct ThreadLocalContext {
-    tx: mpsc::Sender<Request>,
+    tx: mpsc::SyncSender<Request>,
     rx: Mutex<mpsc::Receiver<Response>>,
     mode: Mode,
     handle: Option<thread::JoinHandle<()>>,
@@ -118,8 +118,11 @@ impl ThreadLocalContext {
         mode: Mode,
         init: impl Fn(&crate::Context) -> Result<()> + Send + 'static,
     ) -> Result<Self> {
-        let (req_tx, req_rx) = mpsc::channel::<Request>();
-        let (resp_tx, resp_rx) = mpsc::channel::<Response>();
+        // bounded channels: prevents unbounded memory growth if evaluate()
+        // calls pile up faster than the thread processes them. capacity 64
+        // is generous for any realistic use; callers block naturally when full.
+        let (req_tx, req_rx) = mpsc::sync_channel::<Request>(64);
+        let (resp_tx, resp_rx) = mpsc::sync_channel::<Response>(64);
 
         let handle = thread::spawn(move || {
             // build and init the context on this thread
