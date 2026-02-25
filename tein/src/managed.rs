@@ -251,7 +251,10 @@ impl ThreadLocalContext {
             .send(Request::Evaluate(code.to_string()))
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
+        let rx = self
+            .rx
+            .lock()
+            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Value(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
@@ -268,7 +271,10 @@ impl ThreadLocalContext {
             ))
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
+        let rx = self
+            .rx
+            .lock()
+            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Value(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
@@ -285,7 +291,10 @@ impl ThreadLocalContext {
             })
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
+        let rx = self
+            .rx
+            .lock()
+            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Defined(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
@@ -303,7 +312,10 @@ impl ThreadLocalContext {
             .send(Request::Reset)
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
+        let rx = self
+            .rx
+            .lock()
+            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Reset(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),

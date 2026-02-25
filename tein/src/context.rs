@@ -5423,10 +5423,8 @@ mod tests {
 
         // now register a hook that always returns the unexpanded form —
         // any subsequent macro call will loop indefinitely without our fix.
-        ctx.evaluate(
-            "(set-macro-expand-hook! (lambda (name unexpanded expanded env) unexpanded))",
-        )
-        .unwrap();
+        ctx.evaluate("(set-macro-expand-hook! (lambda (name unexpanded expanded env) unexpanded))")
+            .unwrap();
 
         let err = ctx.evaluate("(my-id 42)").unwrap_err();
         // must be an error (compile error or step limit), not a hang.

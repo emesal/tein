@@ -366,9 +366,7 @@ impl Value {
                 match std::string::String::from_utf8(bytes.to_vec()) {
                     Ok(s) => s,
                     Err(_) => {
-                        return Error::EvalError(
-                            "exception with non-UTF-8 message".to_string(),
-                        );
+                        return Error::EvalError("exception with non-UTF-8 message".to_string());
                     }
                 }
             } else {

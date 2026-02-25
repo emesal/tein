@@ -113,23 +113,21 @@ impl ContextBuilder {
                     break;
                 }
 
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match req {
-                        Request::Evaluate(code) => {
-                            let result = ctx.evaluate(&code);
-                            let _ = resp_tx.send(Response::Value(result));
-                        }
-                        Request::Call(proc, args) => {
-                            let args: Vec<Value> = args.into_iter().map(|s| s.0).collect();
-                            let result = ctx.call(&proc.0, &args);
-                            let _ = resp_tx.send(Response::Value(result));
-                        }
-                        Request::DefineFnVariadic { name, f } => {
-                            let result = ctx.define_fn_variadic(&name, f);
-                            let _ = resp_tx.send(Response::Defined(result));
-                        }
-                        Request::Reset | Request::Shutdown => unreachable!("handled above"),
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match req {
+                    Request::Evaluate(code) => {
+                        let result = ctx.evaluate(&code);
+                        let _ = resp_tx.send(Response::Value(result));
                     }
+                    Request::Call(proc, args) => {
+                        let args: Vec<Value> = args.into_iter().map(|s| s.0).collect();
+                        let result = ctx.call(&proc.0, &args);
+                        let _ = resp_tx.send(Response::Value(result));
+                    }
+                    Request::DefineFnVariadic { name, f } => {
+                        let result = ctx.define_fn_variadic(&name, f);
+                        let _ = resp_tx.send(Response::Defined(result));
+                    }
+                    Request::Reset | Request::Shutdown => unreachable!("handled above"),
                 }));
 
                 if result.is_err() {
