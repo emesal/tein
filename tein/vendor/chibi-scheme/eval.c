@@ -1110,6 +1110,12 @@ static sexp analyze_letrec_syntax (sexp ctx, sexp x, int depth) {
 
 static sexp analyze (sexp ctx, sexp object, int depth, int defok) {
   sexp op;
+  /* tein: per-loop-iteration counter to cap macro re-analysis from goto loop.
+   * SEXP_MAX_ANALYZE_DEPTH only increments on recursive analyze() entry and
+   * is never triggered within a single call's goto loop path. a macro hook
+   * (or cyclic macro chain) that always returns the unexpanded form causes
+   * infinite re-analysis. this counter provides an independent hard stop. */
+  int loop_count = 0;
   sexp_gc_var4(res, tmp, x, cell);
   sexp_gc_preserve4(ctx, res, tmp, x, cell);
   x = object;
@@ -1120,6 +1126,13 @@ static sexp analyze (sexp ctx, sexp object, int depth, int defok) {
   }
 
  loop:
+  if (++loop_count > SEXP_MAX_ANALYZE_DEPTH) {
+    res = sexp_compile_error(ctx,
+      "macro re-analysis limit exceeded: macro hook or cyclic macro returned "
+      "a form that re-expands indefinitely (set-macro-expand-hook! / define-syntax cycle)",
+      x);
+    goto error;
+  }
   if (sexp_pairp(x)) {
     cell = sexp_idp(sexp_car(x)) ? sexp_env_cell(ctx, sexp_context_env(ctx), sexp_car(x), 0) : NULL;
     if (sexp_not(sexp_listp(ctx, x))

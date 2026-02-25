@@ -5304,6 +5304,35 @@ mod tests {
     }
 
     #[test]
+    fn test_macro_hook_infinite_loop_halts() {
+        // a hook that always returns the unexpanded form causes unbounded re-analysis.
+        // it must terminate with an error, not hang.
+        // requires standard_env since set-macro-expand-hook! is registered there.
+        let ctx = Context::builder().standard_env().build().unwrap();
+
+        // define the macro BEFORE registering the looping hook, so define-syntax
+        // itself compiles cleanly using the real expansion.
+        ctx.evaluate("(define-syntax my-id (syntax-rules () ((my-id x) x)))")
+            .unwrap();
+
+        // now register a hook that always returns the unexpanded form —
+        // any subsequent macro call will loop indefinitely without our fix.
+        ctx.evaluate(
+            "(set-macro-expand-hook! (lambda (name unexpanded expanded env) unexpanded))",
+        )
+        .unwrap();
+
+        let err = ctx.evaluate("(my-id 42)").unwrap_err();
+        // must be an error (compile error or step limit), not a hang.
+        // our loop_count guard terminates with EvalError before any fuel limit.
+        assert!(
+            matches!(err, Error::EvalError(_) | Error::StepLimitExceeded),
+            "infinite macro hook re-analysis must terminate with an error, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn test_sandbox_eval_escape_blocked() {
         // eval + interaction-environment must be stubbed even when not in any preset.
         // we call each one (with no args or a dummy arg) to trigger the stub.
