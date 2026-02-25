@@ -87,6 +87,7 @@ use std::path::Path;
 ///
 /// Controls which paths Scheme code can read from and write to.
 /// Uses prefix matching against canonicalised paths.
+#[derive(Clone)]
 pub(crate) struct FsPolicy {
     /// allowed path prefixes for reading
     pub read_prefixes: Vec<String>,

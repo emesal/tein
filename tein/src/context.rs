@@ -970,6 +970,12 @@ impl ContextBuilder {
             // set early so it's active during sandbox setup (which may
             // trigger transitive module loads).
             let has_module_policy = self.standard_env && self.allowed_primitives.is_some();
+
+            // save current policy values before overwriting — restored on drop so that
+            // a second context on the same thread (sequential or nested) is not affected.
+            let prev_module_policy = MODULE_POLICY.with(|cell| cell.get());
+            let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
+
             if has_module_policy {
                 MODULE_POLICY.with(|cell| cell.set(ModulePolicy::VfsOnly));
                 ffi::module_policy_set(ModulePolicy::VfsOnly as i32);
@@ -1133,6 +1139,8 @@ impl ContextBuilder {
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
                 has_module_policy,
+                prev_module_policy,
+                prev_fs_policy,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
@@ -1193,6 +1201,10 @@ pub struct Context {
     step_limit: Option<u64>,
     has_io_wrappers: bool,
     has_module_policy: bool,
+    /// previous MODULE_POLICY value, restored on drop (save/restore RAII for sequential contexts)
+    prev_module_policy: ModulePolicy,
+    /// previous FS_POLICY value, restored on drop (save/restore RAII for sequential contexts)
+    prev_fs_policy: Option<FsPolicy>,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -1982,16 +1994,17 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // clean up module policy if active
+        // restore previous module policy rather than unconditionally clearing —
+        // a second context on the same thread may still be active and depends on its policy.
         if self.has_module_policy {
-            MODULE_POLICY.with(|cell| cell.set(ModulePolicy::Unrestricted));
-            unsafe { ffi::module_policy_set(ModulePolicy::Unrestricted as i32) };
+            MODULE_POLICY.with(|cell| cell.set(self.prev_module_policy));
+            unsafe { ffi::module_policy_set(self.prev_module_policy as i32) };
         }
 
-        // clean up IO wrapper state if active
+        // restore previous FS_POLICY (typically None, unless sequential sandboxed contexts)
         if self.has_io_wrappers {
             FS_POLICY.with(|cell| {
-                *cell.borrow_mut() = None;
+                *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
             });
             ORIGINAL_PROCS.with(|procs| {
                 for p in procs {
@@ -3933,6 +3946,34 @@ mod tests {
         assert!(r.is_ok(), "(import (scheme base)) failed: {:?}", r.err());
 
         drop(ctx);
+    }
+
+    #[test]
+    fn test_sequential_context_policy_isolation() {
+        // ctx1 sets VfsOnly module policy; after drop, ctx2 must still have VfsOnly.
+        // this tests the save/restore RAII pattern on Context::drop().
+        use crate::sandbox::ARITHMETIC;
+        let ctx1 = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .build()
+            .unwrap();
+        let ctx2 = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .build()
+            .unwrap();
+
+        // drop ctx1 — must NOT clear ctx2's module policy
+        drop(ctx1);
+
+        // ctx2 must still block filesystem modules
+        let err = ctx2.evaluate("(import (chibi process))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "ctx2 module policy must still be VfsOnly after ctx1 dropped, got: {:?}",
+            err
+        );
     }
 
     #[test]
