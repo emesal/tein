@@ -3,6 +3,8 @@
 > **scope:** upstream chibi-scheme C code (not tein patches). focus: memory safety,
 > GC correctness, buffer handling, integer overflow, undefined behaviour, error propagation.
 
+> **methodology:** verify the bug → verify the solution → implement → update plan → commit.
+
 **date:** 2026-02-25
 **branch:** bugfix/mvp-code-review-2602
 **source:** ~/forks/chibi-scheme (emesal/chibi-scheme, branch emesal-tein)
@@ -56,7 +58,7 @@ fork when we next rebase.
 |----------|-------|----------|------------|
 | critical | 2 | **2** | evaluator |
 | high | 6 | **6** | evaluator(2), reader(2), bignum(1), config(1) |
-| medium | 25 | **8** | all subsystems |
+| medium | 25 | **11** | all subsystems |
 | low | 17 | 0 | all subsystems |
 
 ---
@@ -265,20 +267,32 @@ this also strengthens the mitigation for M22 (heap growth overflow).
 
 ## medium
 
-### M1. reader: UTF-8 escape writes before buffer expansion check (sexp.c:2623)
+### M1. reader: UTF-8 escape writes before buffer expansion check (sexp.c:2623) — **fixed**
 
 `sexp_utf8_encode_char` writes up to 4 bytes into `buf + i` *before* `maybe_expand` checks
 buffer space. heap overflow of up to 3 bytes at buffer boundary.
 
-### M2. reader: `sexp_push_char` unsigned underflow (sexp.h:1662)
+**fix:** inline buffer expansion check (`i + len >= size`) before `sexp_utf8_encode_char` call,
+using the exact `len` from `sexp_utf8_char_byte_count`. the post-encode `goto maybe_expand`
+is retained for the next iteration's headroom.
+
+### M2. reader: `sexp_push_char` unsigned underflow (sexp.h:1662) — **fixed**
 
 `--sexp_port_offset(p)` when offset is 0 wraps to `SIZE_MAX`. subsequent `buf[SIZE_MAX] = c`
-is a wild write. latent — callers currently read before pushing back.
+is a wild write. latent — all 32 callers read before pushing back.
 
-### M3. reader: label lookup uses raw `c2` without range check (sexp.c:3622)
+**fix:** added `sexp_port_offset(p) > 0` guard in the macro. silently drops the push on
+underflow (returns 0 like the EOF case). defensive — no current caller triggers it.
+
+### M3. reader: label lookup uses raw `c2` without range check (sexp.c:3622) — **fixed**
 
 even when the shares vector exists, `sexp_vector_data(*shares)[c2]` uses the raw (potentially
-overflowed) `c2` without checking `0 <= c2 < vector_length - 1`.
+overflowed) `c2` without checking `0 <= c2 < vector_length - 1`. the out-of-order check (+16
+max gap) and vector doubling indirectly prevent OOB in practice, but the invariant is fragile.
+
+**fix:** added explicit `c2 >= vector_length - 1` bounds check in the reference path (`#N#`).
+changed definition path (`#N=`) vector growth from single `if` to `while` loop (doubles until
+`c2` fits), with OOM check on each allocation and max-label slot preservation.
 
 ### M4. evaluator: `res` not GC-rooted across hook arg construction (eval.c:792)
 
