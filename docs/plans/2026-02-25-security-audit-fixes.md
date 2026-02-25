@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> **Progress:** Tasks 1–6 complete (commits 9565414, 6c0b6a0, da36d24, aab2f30, 2f8d252, 6f24097). Resume at Task 7.
+> **Progress:** ALL TASKS COMPLETE (2026-02-25 session 2). Commits: 9565414, 6c0b6a0, da36d24, aab2f30, 2f8d252, 6f24097, 271d7f7, 1643f37, 3bbb0f3, c319731, ef65526, 7e8f5ec, fe6b339, a18342d. Issue #13 (fn pointer transmute) deferred — low severity, no safe API exposure, tracked in TODO.md.
 
 **Goal:** Fix all 15 issues from the 2026-02-24 security audit, from critical sandbox escapes down to low-severity hardening items.
 
@@ -888,7 +888,7 @@ git commit -m "fix: use strict from_utf8 in extract_exception_error to prevent l
 
 ---
 
-### Task 7: Issue #8 — port/foreign handle IDs are forgeable
+### ~~Task 7: Issue #8 — port/foreign handle IDs are forgeable~~ ✅ DONE (271d7f7)
 
 **Files:**
 - Modify: `tein/src/port.rs`
@@ -988,7 +988,7 @@ git commit -m "fix: use xorshift64 PRNG for unpredictable port/foreign handle ID
 
 ---
 
-### Task 8: Issue #9 — env_copy_named parent-chain walk has no cycle detection
+### ~~Task 8: Issue #9 — env_copy_named parent-chain walk has no cycle detection~~ ✅ DONE (1643f37)
 
 **Files:**
 - Modify: `tein/vendor/chibi-scheme/tein_shim.c` (~line 284)
@@ -1035,7 +1035,7 @@ git commit -m "fix: add iteration limit to env_copy_named parent-chain walk (cyc
 
 ---
 
-### Task 9: Issue #11 — u64 ID overflow in ForeignStore/PortStore
+### ~~Task 9: Issue #11 — u64 ID overflow in ForeignStore/PortStore~~ ✅ DONE (3bbb0f3)
 
 **(Only applies if xorshift64 was NOT used in Task 7. Since Task 7 replaces the counter entirely, this issue is resolved automatically. Verify and close.)**
 
@@ -1057,7 +1057,7 @@ git commit --allow-empty -m "docs: issue #11 (u64 ID overflow) resolved by xorsh
 
 ---
 
-### Task 10: Issue #14 — CString inconsistency in sandbox error path
+### ~~Task 10: Issue #14 — CString inconsistency in sandbox error path~~ ✅ DONE (c319731)
 
 **Files:**
 - Modify: `tein/src/context.rs` (~line 630)
@@ -1095,7 +1095,7 @@ git commit -m "fix: use CString consistently in sandbox error path (was bare str
 
 ---
 
-### Task 11: Issue #15 — unbounded channel in ThreadLocalContext
+### ~~Task 11: Issue #15 — unbounded channel in ThreadLocalContext~~ ✅ DONE (ef65526)
 
 **Files:**
 - Modify: `tein/src/managed.rs`
@@ -1138,7 +1138,7 @@ git commit -m "fix: use bounded sync_channel(64) in ThreadLocalContext to preven
 
 ---
 
-### Task 12: Issue #12 — reader dispatch ASCII-only limitation undocumented
+### ~~Task 12: Issue #12 — reader dispatch ASCII-only limitation undocumented~~ ✅ DONE (7e8f5ec)
 
 **Files:**
 - Modify: `tein/src/context.rs` (`register_reader` docstring, ~line 1536)
@@ -1174,7 +1174,7 @@ git commit -m "docs: document ASCII-only limitation of reader dispatch table"
 
 ---
 
-### Task 13: Issue #10 — sexp_vector_set has no bounds check
+### ~~Task 13: Issue #10 — sexp_vector_set has no bounds check~~ ✅ DONE (fe6b339)
 
 **Files:**
 - Modify: `tein/vendor/chibi-scheme/tein_shim.c` (~line 94)
@@ -1212,7 +1212,7 @@ git commit -m "fix: add bounds assertion to tein_sexp_vector_set"
 
 ---
 
-### Task 14: Issue #6 — missing stubs for dangerous chibi primitives (medium)
+### ~~Task 14: Issue #6 — missing stubs for dangerous chibi primitives (medium)~~ ✅ DONE (a18342d)
 
 **Files:**
 - Modify: `tein/src/sandbox.rs` (extend `ALWAYS_STUB` from Task 1)
@@ -1237,7 +1237,7 @@ git commit -m "fix: extend ALWAYS_STUB with additional dangerous chibi primitive
 
 ---
 
-### Task 15: Final verification
+### ~~Task 15: Final verification~~ ✅ DONE
 
 **Step 1: Run the full test suite one last time**
 

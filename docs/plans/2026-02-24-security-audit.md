@@ -227,3 +227,25 @@ causes unbounded memory growth. consider `sync_channel(N)`.
 | 13 | fn pointer transmute not compile-time enforced | low |
 | 14 | `CString` inconsistency in error path | low |
 | 15 | unbounded channel in `ThreadLocalContext` | low |
+
+---
+
+## resolution status (2026-02-25)
+
+| issue | description | status | commit |
+|-------|-------------|--------|--------|
+| 1 | sandbox escape via eval/interaction-environment | resolved | 9565414 |
+| 2 | macro hook unbounded re-analysis loop | resolved | 6c0b6a0 |
+| 3 | port trampoline buffer bounds not validated | resolved | da36d24 |
+| 4 | context thread death silently hangs caller | resolved | aab2f30 |
+| 5 | thread-local policy state race between sequential contexts | resolved | 2f8d252 |
+| 6 | missing stubs for dangerous chibi primitives | resolved | a18342d |
+| 7 | non-UTF8 exception messages mangled in policy detection | resolved | 6f24097 |
+| 8 | port/foreign handle IDs are forgeable | resolved | 271d7f7 |
+| 9 | env_copy_named no cycle detection | resolved | 1643f37 |
+| 10 | sexp_vector_set no bounds check | resolved | fe6b339 |
+| 11 | u64 ID overflow, no saturation | resolved | 3bbb0f3 (counter replaced by PRNG in 271d7f7) |
+| 12 | reader dispatch ASCII-only, undocumented | resolved | 7e8f5ec |
+| 13 | fn pointer transmute not compile-time enforced | deferred | low severity; no safe API exposure; tracked in TODO.md |
+| 14 | CString inconsistency in error path | resolved | c319731 |
+| 15 | unbounded channel in ThreadLocalContext | resolved | ef65526 |
