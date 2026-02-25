@@ -58,7 +58,7 @@ fork when we next rebase.
 |----------|-------|----------|------------|
 | critical | 2 | **2** | evaluator |
 | high | 6 | **6** | evaluator(2), reader(2), bignum(1), config(1) |
-| medium | 25 | **11** | all subsystems |
+| medium | 25 | **16** | all subsystems |
 | low | 17 | 0 | all subsystems |
 
 ---
@@ -294,32 +294,48 @@ max gap) and vector doubling indirectly prevent OOB in practice, but the invaria
 changed definition path (`#N=`) vector growth from single `if` to `while` loop (doubles until
 `c2` fits), with OOM check on each allocation and max-label slot preservation.
 
-### M4. evaluator: `res` not GC-rooted across hook arg construction (eval.c:792)
+### M4. evaluator: `res` not GC-rooted across hook arg construction (eval.c:792) — **fixed**
 
 in `analyze_macro_once`, between macro application and hook argument construction, `res`
 holds the expansion result as a raw local. the `sexp_cons` calls for hook_args can trigger GC.
 upstream `res` was never rooted — safe pre-patch because no allocation happened, but the hook
 changes the allocation pattern.
 
-### M5. evaluator: `sexp_env_cell_define` — key/value not rooted (eval.c:153)
+**fix:** changed `sexp_gc_var2(tmp, hook_args)` → `sexp_gc_var3(res, tmp, hook_args)` with
+matching preserve3/release3. this is our bug — introduced by the macro hook patch (D).
+
+### M5. evaluator: `sexp_env_cell_define` — key/value not rooted (eval.c:153) — **mitigated**
 
 `sexp_env_push` → `sexp_cons(key, value)` can GC. neither `key` nor `value` is in the root
 set. callers usually hold roots, but the function's own contract is fragile.
 
-### M6. evaluator: `sexp_env_define` — no GC preservation at all (eval.c:190)
+**mitigation:** safe in practice — all callers root their arguments, and common values
+(symbols, SEXP_VOID, SEXP_UNDEF) are immediates. added defensive comment documenting the
+caller-rooting convention.
+
+### M6. evaluator: `sexp_env_define` — no GC preservation at all (eval.c:190) — **fixed**
 
 same pattern as M5 but worse — no `sexp_gc_var` / `sexp_gc_preserve` at all. `key`, `value`,
-`env` can all be moved.
+`env` can all be moved. additionally, `sexp_env_push` can return an exception on OOM via
+`tmp`, which was never checked — the exception gets spliced into the binding chain.
 
-### M7. evaluator: unsafe env binding splice (eval.c:2657)
+**fix:** added `sexp_exceptionp(tmp)` checks after both `sexp_env_push` calls. propagates
+OOM instead of corrupting the env binding chain.
+
+### M7. evaluator: unsafe env binding splice (eval.c:2657) — **fixed**
 
 manually inserts cons cell into env binding chain. assumes `sexp_env_bindings(e)` is non-null.
-if empty (possible after module loading), writes to `NULL + offset`.
+`SEXP_NULL` is an immediate (0x2e), not a valid pointer — dereferencing it as a pair is UB.
 
-### M8. evaluator: `to == from` aliasing in import (eval.c:2697)
+**fix:** added `sexp_pairp(sexp_env_bindings(e))` guard. if bindings are empty, sets `tmp`
+as the first binding with `SEXP_NULL` next pointer.
+
+### M8. evaluator: `to == from` aliasing in import (eval.c:2697) — **fixed**
 
 self-import destructively empties `to`'s bindings into a new frame, then looks up names in
 `from` (= the now-empty `to`). silently imports nothing.
+
+**fix:** added `if (to == from) return SEXP_VOID;` early return after parameter validation.
 
 ### M9. GC: image version check bug (gc_heap.c:586)
 
