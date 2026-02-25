@@ -184,7 +184,7 @@ an exception, that exception is spliced into the env parent chain, permanently c
 **fix:** add `sexp_exceptionp` checks after both `sexp_make_env` calls. on OOM, release GC
 roots and return the exception immediately before mutating the env chain.
 
-**resolved:** in emesal/chibi-scheme (emesal-tein branch), pending commit.
+**resolved:** `c373db43` in emesal/chibi-scheme (emesal-tein branch).
 
 ### H8. duplicate parameter check silently disabled for >= 100 params (eval.c:887) — **fixed**
 
@@ -198,7 +198,7 @@ bytecode accesses wrong stack slot.
 the check O(n²), but nobody has 100+ params in scheme — the performance hack was a
 correctness trap.
 
-**resolved:** in emesal/chibi-scheme (emesal-tein branch), pending commit.
+**resolved:** `c373db43` in emesal/chibi-scheme (emesal-tein branch).
 
 ### ~~H9.~~ → M25. `sexp_load_standard_env` — stack buffer + unchecked version (eval.c:2612) — **mitigated**
 
