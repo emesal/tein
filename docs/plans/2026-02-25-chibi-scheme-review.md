@@ -55,7 +55,7 @@ fork when we next rebase.
 | severity | count | resolved | subsystems |
 |----------|-------|----------|------------|
 | critical | 2 | **2** | evaluator |
-| high | 5 | **4** | evaluator(2), bignum(1), config(1) |
+| high | 6 | **6** | evaluator(2), reader(2), bignum(1), config(1) |
 | medium | 25 | **7** | all subsystems |
 | low | 17 | 0 | all subsystems |
 
@@ -238,19 +238,28 @@ buggy decode produces U+0DC0, correct decode produces U+1F600.
 
 **resolved:** `9d722d26` in emesal/chibi-scheme (emesal-tein branch).
 
-### H12. `sexp_bignum_fxdiv` — no divide-by-zero guard (bignum.c:268)
+### H12. `sexp_bignum_fxdiv` — no divide-by-zero guard (bignum.c:268) — **fixed**
 
 public API function divides by `b` unconditionally. `b == 0` → integer division UB on native
 path, silent wrong result on custom-long-longs path. callers check before calling, but the API
 itself is a trap.
 
-### H13. config: no heap size limit by default (features.h)
+**fix:** add `if (b == 0) return 0;` guard before the division loop.
+
+**resolved:** `051abfc1` in emesal/chibi-scheme (emesal-tein branch).
+
+### H13. config: no heap size limit by default (features.h) — **already resolved**
 
 `SEXP_MAXIMUM_HEAP_SIZE=0` — heap grows without bound. a scheme program can exhaust host
 process memory. `TimeoutContext` limits wall-clock time but not memory.
 
 **recommendation:** expose `heap_limit(usize)` on `ContextBuilder`, threading through to
 `sexp_make_context`'s `max_size` parameter. (runtime, not compile-time.)
+
+**resolved:** `ContextBuilder::heap_max(usize)` already exists with a default of 128 MiB,
+passed through to `sexp_make_eval_context`'s `max_size` parameter. chibi's `sexp_alloc`
+(gc.c:728) checks `(!h->max_size) || (total_size < h->max_size)` before growing the heap.
+this also strengthens the mitigation for M22 (heap growth overflow).
 
 ---
 
