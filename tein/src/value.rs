@@ -360,7 +360,17 @@ impl Value {
                 let ptr = ffi::sexp_string_data(msg_sexp);
                 let len = ffi::sexp_string_size(msg_sexp) as usize;
                 let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-                std::string::String::from_utf8_lossy(bytes).into_owned()
+                // use strict from_utf8 rather than lossy — lossy replacement could
+                // corrupt sentinel prefix matching ([sandbox:file], [sandbox:binding]),
+                // allowing an attacker to bypass sandbox detection via invalid UTF-8.
+                match std::string::String::from_utf8(bytes.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        return Error::EvalError(
+                            "exception with non-UTF-8 message".to_string(),
+                        );
+                    }
+                }
             } else {
                 "unknown error".to_owned()
             };
