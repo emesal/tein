@@ -330,8 +330,11 @@ sexp tein_make_custom_output_port(sexp ctx, sexp write_proc) {
 }
 
 // --- reader dispatch table ---
-// maps ASCII chars to scheme procedures for custom #x syntax.
-// thread-local so each context thread has independent dispatch state.
+/* reader dispatch table — 128 entries, ASCII-only.
+ * maps ASCII chars (byte value 0–127) to scheme procedures for custom #x syntax.
+ * characters with codepoint >= 128 are not dispatchable; the Rust API
+ * documents this limitation in register_reader().
+ * thread-local so each context thread has independent dispatch state. */
 
 #define TEIN_READER_DISPATCH_SIZE 128
 

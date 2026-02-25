@@ -1586,10 +1586,12 @@ impl Context {
 
     /// Register a reader dispatch handler for `#ch` syntax.
     ///
-    /// `ch` must be a printable ASCII byte (< 128). The handler must be a
-    /// Scheme procedure taking one argument (the input port) and returning a
-    /// datum. Reserved R7RS characters (`#t`, `#f`, `#\\`, `#(`, numeric
-    /// prefixes, etc.) cannot be overridden.
+    /// `ch` must be an ASCII byte (value < 128). The underlying C dispatch
+    /// table has 128 entries; characters with byte values ≥ 128 are silently
+    /// ignored by the dispatch layer and cannot be used as reader dispatch
+    /// characters. The handler must be a Scheme procedure taking one argument
+    /// (the input port) and returning a datum. Reserved R7RS characters
+    /// (`#t`, `#f`, `#\\`, `#(`, numeric prefixes, etc.) cannot be overridden.
     ///
     /// # examples
     ///
