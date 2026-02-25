@@ -134,73 +134,77 @@ impl ThreadLocalContext {
             // signal successful init
             let _ = resp_tx.send(Response::Value(Ok(Value::Unspecified)));
 
-            // message loop
-            for req in req_rx {
-                match req {
-                    Request::Evaluate(code) => {
-                        if mode == Mode::Fresh {
-                            match Self::build_and_init(&builder, &init) {
-                                Ok(new_ctx) => ctx = new_ctx,
-                                Err(e) => {
-                                    if resp_tx.send(Response::Value(Err(e))).is_err() {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        let result = ctx.evaluate(&code);
-                        if resp_tx.send(Response::Value(result)).is_err() {
-                            break;
-                        }
-                    }
-                    Request::Call(proc, args) => {
-                        if mode == Mode::Fresh {
-                            match Self::build_and_init(&builder, &init) {
-                                Ok(new_ctx) => ctx = new_ctx,
-                                Err(e) => {
-                                    if resp_tx.send(Response::Value(Err(e))).is_err() {
-                                        break;
-                                    }
-                                    continue;
-                                }
-                            }
-                        }
-                        let args: Vec<Value> = args.into_iter().map(|s| s.0).collect();
-                        let result = ctx.call(&proc.0, &args);
-                        if resp_tx.send(Response::Value(result)).is_err() {
-                            break;
-                        }
-                    }
-                    Request::DefineFnVariadic { name, f } => {
-                        let result = ctx.define_fn_variadic(&name, f);
-                        if resp_tx.send(Response::Defined(result)).is_err() {
-                            break;
-                        }
-                    }
-                    Request::Reset => {
-                        if mode == Mode::Fresh {
-                            // fresh mode already rebuilds each call — reset is a no-op
-                            if resp_tx.send(Response::Reset(Ok(()))).is_err() {
-                                break;
-                            }
-                        } else {
-                            match Self::build_and_init(&builder, &init) {
-                                Ok(new_ctx) => {
-                                    ctx = new_ctx;
-                                    if resp_tx.send(Response::Reset(Ok(()))).is_err() {
-                                        break;
+            // message loop — catch_unwind guards against panics in registered
+            // foreign fns or init closures. on panic, we send an InitError response
+            // so the caller gets an error rather than blocking forever on recv().
+            // after a panic, the loop exits and the thread terminates cleanly.
+            'outer: for req in req_rx {
+                if matches!(req, Request::Shutdown) {
+                    break;
+                }
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match req {
+                        Request::Evaluate(code) => {
+                            if mode == Mode::Fresh {
+                                match Self::build_and_init(&builder, &init) {
+                                    Ok(new_ctx) => ctx = new_ctx,
+                                    Err(e) => {
+                                        let _ = resp_tx.send(Response::Value(Err(e)));
+                                        return;
                                     }
                                 }
-                                Err(e) => {
-                                    if resp_tx.send(Response::Reset(Err(e))).is_err() {
-                                        break;
+                            }
+                            let result = ctx.evaluate(&code);
+                            let _ = resp_tx.send(Response::Value(result));
+                        }
+                        Request::Call(proc, args) => {
+                            if mode == Mode::Fresh {
+                                match Self::build_and_init(&builder, &init) {
+                                    Ok(new_ctx) => ctx = new_ctx,
+                                    Err(e) => {
+                                        let _ = resp_tx.send(Response::Value(Err(e)));
+                                        return;
+                                    }
+                                }
+                            }
+                            let args: Vec<Value> = args.into_iter().map(|s| s.0).collect();
+                            let result = ctx.call(&proc.0, &args);
+                            let _ = resp_tx.send(Response::Value(result));
+                        }
+                        Request::DefineFnVariadic { name, f } => {
+                            let result = ctx.define_fn_variadic(&name, f);
+                            let _ = resp_tx.send(Response::Defined(result));
+                        }
+                        Request::Reset => {
+                            if mode == Mode::Fresh {
+                                // fresh mode already rebuilds each call — reset is a no-op
+                                let _ = resp_tx.send(Response::Reset(Ok(())));
+                            } else {
+                                match Self::build_and_init(&builder, &init) {
+                                    Ok(new_ctx) => {
+                                        ctx = new_ctx;
+                                        let _ = resp_tx.send(Response::Reset(Ok(())));
+                                    }
+                                    Err(e) => {
+                                        let _ = resp_tx.send(Response::Reset(Err(e)));
                                     }
                                 }
                             }
                         }
+                        Request::Shutdown => unreachable!("handled above"),
                     }
-                    Request::Shutdown => break,
+                }));
+
+                if result.is_err() {
+                    // thread panicked — notify caller and exit the loop so the
+                    // thread terminates and its JoinHandle becomes joinable.
+                    // subsequent send() calls by the caller will fail, returning
+                    // InitError("context thread is dead") naturally.
+                    let _ = resp_tx.send(Response::Value(Err(Error::InitError(
+                        "context thread panicked".to_string(),
+                    ))));
+                    break 'outer;
                 }
             }
         });
@@ -244,7 +248,7 @@ impl ThreadLocalContext {
             .send(Request::Evaluate(code.to_string()))
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().unwrap();
+        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Value(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
@@ -261,7 +265,7 @@ impl ThreadLocalContext {
             ))
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().unwrap();
+        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Value(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
@@ -278,7 +282,7 @@ impl ThreadLocalContext {
             })
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().unwrap();
+        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Defined(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
@@ -296,7 +300,7 @@ impl ThreadLocalContext {
             .send(Request::Reset)
             .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
 
-        let rx = self.rx.lock().unwrap();
+        let rx = self.rx.lock().map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
         match rx.recv() {
             Ok(Response::Reset(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),

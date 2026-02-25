@@ -4830,6 +4830,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_managed_thread_panic_in_init_returns_error() {
+        // a panicking init closure causes the thread to die before sending the
+        // success response; recv() returns Err → InitError, not a hang.
+        let result = Context::builder()
+            .step_limit(100_000)
+            .build_managed(|_| -> Result<()> { panic!("intentional test panic") });
+        assert!(
+            result.is_err(),
+            "panicking init closure must return Err, got Ok"
+        );
+    }
+
+    #[test]
+    fn test_managed_thread_panic_in_loop_returns_init_error() {
+        // after a panic caught by catch_unwind in the message loop, the thread
+        // exits cleanly. subsequent calls must return InitError (channel dead), not hang.
+        // we simulate this by having a fresh-mode context whose rebuild-init panics
+        // on the second invocation (i.e., during evaluate(), not build_managed()).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+        let ctx = Context::builder()
+            .step_limit(100_000)
+            .build_managed_fresh(|_| -> Result<()> {
+                // first call succeeds (build_managed_fresh init), subsequent calls panic
+                let n = CALL_COUNT.fetch_add(1, Ordering::SeqCst);
+                if n >= 1 {
+                    panic!("intentional panic on evaluate");
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        // first evaluate() triggers fresh-mode rebuild which panics → caught by catch_unwind
+        // → sends InitError response → evaluate() returns Err
+        let err = ctx.evaluate("42").unwrap_err();
+        assert!(
+            matches!(err, Error::InitError(_)),
+            "caught panic must return InitError, got {:?}",
+            err
+        );
+    }
+
     // --- custom ports ---
 
     #[test]
