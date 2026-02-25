@@ -931,6 +931,9 @@ impl ContextBuilder {
             // restricted env can copy from the full standard env.
             if self.standard_env {
                 let env = ffi::sexp_context_env(ctx);
+                // H9: chibi uses a char[128] stack buffer for the init file path
+                // and does `version + '0'` without range check. version MUST be a
+                // single digit (we hardcode 7 for r7rs). do not change this to >= 10.
                 let version = ffi::sexp_make_fixnum(7);
 
                 let result = ffi::load_standard_env(ctx, env, version);

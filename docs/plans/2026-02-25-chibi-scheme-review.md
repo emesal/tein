@@ -55,8 +55,8 @@ fork when we next rebase.
 | severity | count | resolved | subsystems |
 |----------|-------|----------|------------|
 | critical | 2 | **2** | evaluator |
-| high | 6 | **2** | evaluator(3), bignum(1), config(1) |
-| medium | 24 | **6** | all subsystems |
+| high | 5 | **4** | evaluator(2), bignum(1), config(1) |
+| medium | 25 | **7** | all subsystems |
 | low | 17 | 0 | all subsystems |
 
 ---
@@ -176,12 +176,17 @@ check. overflow wraps to tiny allocation, subsequent copy writes past it.
 **mitigation:** same as M23 — image loading compiled out via `SEXP_USE_DL=0`. downgraded
 from high.
 
-### H7. `sexp_env_import_op` — env chain corruption on OOM (eval.c:2697)
+### H7. `sexp_env_import_op` — env chain corruption on OOM (eval.c:2697) — **fixed**
 
 env chain is mutated in-place *before* allocations that can fail. if `sexp_make_env` returns
 an exception, that exception is spliced into the env parent chain, permanently corrupting it.
 
-### H8. duplicate parameter check silently disabled for >= 100 params (eval.c:887)
+**fix:** add `sexp_exceptionp` checks after both `sexp_make_env` calls. on OOM, release GC
+roots and return the exception immediately before mutating the env chain.
+
+**resolved:** in emesal/chibi-scheme (emesal-tein branch), pending commit.
+
+### H8. duplicate parameter check silently disabled for >= 100 params (eval.c:887) — **fixed**
 
 `verify_duplicates_p = sexp_length_unboxed(sexp_cadr(x)) < 100` — lambdas with 100+ params
 skip duplicate checking entirely. both params get env entries; second shadows first; generated
@@ -189,10 +194,20 @@ bytecode accesses wrong stack slot.
 
 **impact:** incorrect code generation, spec violation.
 
-### H9. `sexp_load_standard_env` — stack buffer + unchecked version (eval.c:2612)
+**fix:** removed the 100-param threshold entirely. `sexp_memq` is O(n) per param making
+the check O(n²), but nobody has 100+ params in scheme — the performance hack was a
+correctness trap.
+
+**resolved:** in emesal/chibi-scheme (emesal-tein branch), pending commit.
+
+### ~~H9.~~ → M25. `sexp_load_standard_env` — stack buffer + unchecked version (eval.c:2612) — **mitigated**
 
 `init_file[128]` — version byte written without range check (`version + '0'` overflows for
 version >= 10). no check that path fits in buffer.
+
+**mitigation:** tein hardcodes `sexp_make_fixnum(7)` as the version parameter (r7rs).
+the resulting path `"init-7.scm"` is 11 bytes, well under the 128-byte buffer. defensive
+comment added at the call site in `context.rs`. downgraded from high.
 
 ### H10. reader label `c2` integer overflow — OOB array access (sexp.c:3617) — **fixed**
 
