@@ -1,5 +1,6 @@
 // tein shim layer - exports chibi macros as actual functions for ffi
 
+#include <assert.h>
 #include "include/chibi/sexp.h"
 #include "include/chibi/eval.h"
 
@@ -91,8 +92,11 @@ sexp tein_sexp_make_vector(sexp ctx, sexp_uint_t len, sexp dflt) {
     return sexp_make_vector(ctx, sexp_make_fixnum(len), dflt);
 }
 
-// vector element setting (direct write, no bounds check)
+// vector element setting with bounds assertion
 void tein_sexp_vector_set(sexp vec, sexp_uint_t i, sexp val) {
+    /* bounds assertion: caller is trusted (Rust), but an incorrect index
+     * would be a heap write OOB. assert catches this in debug builds. */
+    assert(i < (sexp_uint_t)sexp_vector_length(vec));
     sexp_vector_data(vec)[i] = val;
 }
 
