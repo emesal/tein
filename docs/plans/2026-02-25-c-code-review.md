@@ -7,6 +7,25 @@ scope: all tein-owned c code (tein_shim.c, eval.c/sexp.c/vm.c patches) + rust↔
 three parallel review agents examined every tein-owned c file plus the rust↔c boundary.
 deduplicated, verified synthesis below.
 
+### resolution status
+
+| id | severity | status | commit |
+|----|----------|--------|--------|
+| C1 | critical | **resolved** | `5cc4e69` |
+| C2 | critical | **resolved** | `5cc4e69` |
+| C3 | critical | **resolved** | `5cc4e69` |
+| H1 | high | open | |
+| M1 | medium | open | |
+| M2 | medium | open | |
+| M3 | medium | open | |
+| M4 | medium | open | |
+| L1 | low | open | |
+| L2 | low | open | |
+| L3 | low | open | |
+| L4 | low | open | |
+| L5 | low | open | |
+| L6 | low | open | |
+
 ---
 
 ## critical — missing GC roots (conservative scan is OFF)
@@ -15,26 +34,29 @@ chibi is built with `SEXP_USE_CONSERVATIVE_GC=0`, so the GC **cannot see rust lo
 every sexp held only in a rust variable must be explicitly rooted with
 `sexp_preserve_object` / `GcRoot`. three spots violate this:
 
-### C1. `evaluate_port` — unrooted port across allocation loop
+### C1. `evaluate_port` — unrooted port across allocation loop ✓
 
 - **location**: `src/context.rs:1852`
+- **status**: **resolved** in `5cc4e69` — added `GcRoot` for `raw_port` before the loop.
 - **issue**: `raw_port` is a bare sexp used across multiple `sexp_read` + `sexp_evaluate`
   iterations. both allocate. no `GcRoot`. compare with `evaluate()` at line 1313 which
   correctly roots its port. real use-after-free waiting to happen under GC pressure.
-- **fix**: add `let _port_root = ffi::GcRoot::new(self.ctx, raw_port);` before the loop.
 
-### C2. `from_raw_depth` — unrooted pair in foreign object detection
+### C2. `from_raw_depth` — unrooted pair in foreign object detection ✓
 
 - **location**: `src/value.rs:262`
+- **status**: **resolved** in `5cc4e69` — added `GcRoot` for `raw` before the
+  `sexp_symbol_to_string` call.
 - **issue**: `sexp_symbol_to_string(ctx, car)` allocates (calls `sexp_c_string` internally).
   after that allocation, `sexp_cdr(raw)` at line 267 reads from `raw` which is unrooted.
   small window but real.
-- **fix**: root `raw` before the `sexp_symbol_to_string` call:
-  `let _pair_root = ffi::GcRoot::new(ctx, raw);`
 
-### C3. reader dispatch table — stored procs not GC-preserved
+### C3. reader dispatch table — stored procs not GC-preserved ✓
 
 - **location**: `tein_shim.c:384`, `sexp.c:3516-3518`
+- **status**: **resolved** in `5cc4e69` — set/unset/clear now take `ctx` and
+  preserve/release handler procs. `dispatch_chars` uses `sexp_gc_preserve1` for
+  its accumulator. FFI signatures and all rust call sites updated.
 - **issue**: `tein_reader_dispatch[c] = proc` stores a raw sexp without
   `sexp_preserve_object`. contrast with `tein_macro_expand_hook_set` (line 426) which
   correctly preserves/releases. if GC collects the handler between registration and
@@ -42,11 +64,6 @@ every sexp held only in a rust variable must be explicitly rooted with
 - **companion issue**: `tein_reader_dispatch_chars` (`tein_shim.c:401-408`) builds a cons
   list in a loop with the accumulator in a plain C local — also unrooted across `sexp_cons`
   allocation points.
-- **fix**: mirror the macro hook pattern. `tein_reader_dispatch_set` needs to accept `ctx`,
-  call `sexp_preserve_object` on the new proc and `sexp_release_object` on the old one.
-  `tein_reader_dispatch_unset` and `tein_reader_dispatch_clear` need to release each
-  non-SEXP_FALSE entry (also need `ctx`). `tein_reader_dispatch_chars` needs
-  `sexp_gc_var1(result); sexp_gc_preserve1(ctx, result);` around its loop.
 
 ---
 
