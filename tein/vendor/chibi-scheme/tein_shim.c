@@ -281,8 +281,11 @@ int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
     // expression matches our bare symbol.
     // note: sexp_envp(NULL) segfaults because sexp_pointerp(NULL) is true
     // (SEXP_POINTER_TAG == 0), so we guard against NULL explicitly.
+    /* iteration limit guards against corrupted environment with cyclic parent chain.
+     * chibi should never produce cycles, but defence-in-depth warrants a hard stop. */
+    int env_walk_limit = 65536;
     sexp env = src_env;
-    while (env && sexp_envp(env)) {
+    while (env && sexp_envp(env) && env_walk_limit-- > 0) {
 #if SEXP_USE_RENAME_BINDINGS
         sexp ls;
         for (ls = sexp_env_renames(env); sexp_pairp(ls); ls = sexp_env_next_cell(ls)) {
