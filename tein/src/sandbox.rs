@@ -431,12 +431,34 @@ pub(crate) const ALL_PRESETS: &[&Preset] = &[
 /// could theoretically be misused, because chibi uses `compile` internally
 /// during macro expansion. Stubbing it breaks standard library features.
 /// `eval` + environment accessors are sufficient to close the escape hatch.
+///
+/// Note: `%meta-env`, `find-module-file`, `env-exports`, `env-parent`, `%import`
+/// are used by chibi's init-7 / meta-7 *during C-side initialisation*, not at
+/// runtime from Scheme. They are safe to stub once the sandbox env is built.
 pub(crate) const ALWAYS_STUB: &[&str] = &[
+    // environment escape — direct access to unrestricted or meta environments
     "eval",
     "interaction-environment",
     "primitive-environment",
     "scheme-report-environment",
     "current-environment",
     "set-current-environment!",
+    "%meta-env",
+    // environment introspection — allows mapping the env chain from scheme
+    "env-parent",
+    "env-exports",
+    // module system — filesystem module loading and path manipulation
     "%load",
+    "%import",
+    "load-module-file",
+    "find-module-file",
+    "add-module-directory",
+    "current-module-path",
+    // process info — exposes binary path and arguments
+    "command-line",
+    // type/vm system mutation — could enable type confusion or VM side-channels
+    "register-simple-type",
+    "register-optimization!",
+    "print-vm-profile",
+    "reset-vm-profile",
 ];
