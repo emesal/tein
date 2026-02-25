@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 >
-> **Progress:** Tasks 1–3 complete (commits 9565414, 6c0b6a0, da36d24). Resume at Task 4.
+> **Progress:** Tasks 1–6 complete (commits 9565414, 6c0b6a0, da36d24, aab2f30, 2f8d252, 6f24097). Resume at Task 7.
 
 **Goal:** Fix all 15 issues from the 2026-02-24 security audit, from critical sandbox escapes down to low-severity hardening items.
 
@@ -417,7 +417,7 @@ git commit -m "fix: validate port trampoline start/end indices before pointer ar
 
 ---
 
-### Task 4: Issue #4 — context thread death silently hangs caller
+### ~~Task 4: Issue #4 — context thread death silently hangs caller~~ ✅ DONE (aab2f30)
 
 **Files:**
 - Modify: `tein/src/managed.rs`
@@ -639,7 +639,7 @@ git commit -m "fix: catch thread panics in managed/timeout contexts, return Init
 
 ---
 
-### Task 5: Issue #5 — thread-local policy state race between sequential contexts
+### ~~Task 5: Issue #5 — thread-local policy state race between sequential contexts~~ ✅ DONE (2f8d252)
 
 **Files:**
 - Modify: `tein/src/context.rs` (`Context` struct, `ContextBuilder::build()`, `Drop for Context`)
@@ -810,7 +810,7 @@ git commit -m "fix: save/restore thread-local policy on context drop to prevent 
 
 ---
 
-### Task 6: Issue #7 — non-UTF8 exception messages mangled in policy detection
+### ~~Task 6: Issue #7 — non-UTF8 exception messages mangled in policy detection~~ ✅ DONE (6f24097)
 
 **Files:**
 - Modify: `tein/src/context.rs` (`extract_exception_error`, ~line 356)
