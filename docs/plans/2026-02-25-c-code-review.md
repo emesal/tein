@@ -14,17 +14,17 @@ deduplicated, verified synthesis below.
 | C1 | critical | **resolved** | `5cc4e69` |
 | C2 | critical | **resolved** | `5cc4e69` |
 | C3 | critical | **resolved** | `5cc4e69` |
-| H1 | high | **resolved** | pending commit |
-| M1 | medium | **resolved** | pending commit |
-| M2 | medium | **resolved** | pending commit |
-| M3 | medium | **resolved** | pending commit |
-| M4 | medium | **resolved** | pending commit |
-| L1 | low | **resolved** | pending commit |
-| L2 | low | **resolved** | pending commit |
-| L3 | low | **resolved** | pending commit |
-| L4 | low | **resolved** | pending commit |
-| L5 | low | **resolved** | pending commit |
-| L6 | low | **resolved** | pending commit |
+| H1 | high | **resolved** | `ddf0ab2` |
+| M1 | medium | **resolved** | `ddf0ab2` |
+| M2 | medium | **resolved** | `ddf0ab2` |
+| M3 | medium | **resolved** | `ddf0ab2` |
+| M4 | medium | **resolved** | `ddf0ab2` |
+| L1 | low | **resolved** | `ddf0ab2` |
+| L2 | low | **resolved** | `ddf0ab2` |
+| L3 | low | **resolved** | `ddf0ab2` |
+| L4 | low | **resolved** | `ddf0ab2` |
+| L5 | low | **resolved** | `ddf0ab2` |
+| L6 | low | **resolved** | `ddf0ab2` |
 
 ---
 
