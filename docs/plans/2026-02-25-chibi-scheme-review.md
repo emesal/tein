@@ -56,7 +56,7 @@ fork when we next rebase.
 |----------|-------|----------|------------|
 | critical | 2 | **2** | evaluator |
 | high | 6 | **6** | evaluator(2), reader(2), bignum(1), config(1) |
-| medium | 25 | **7** | all subsystems |
+| medium | 25 | **8** | all subsystems |
 | low | 17 | 0 | all subsystems |
 
 ---
