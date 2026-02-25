@@ -75,7 +75,7 @@ tein/
     sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
     thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
     timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
-  vendor/chibi-scheme/
+  target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
     tein_shim.c  — exports chibi C macros as real functions, fuel control,
                    environment manipulation, module import policy,
                    custom port creation, reader dispatch table,
@@ -87,7 +87,8 @@ tein/
     lib/tein/foreign.sld/.scm — (tein foreign) predicates
     lib/tein/reader.sld/.scm  — (tein reader) dispatch fns
     lib/tein/macro.sld/.scm   — (tein macro) expansion hook fns
-  build.rs       — compiles Chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
+  build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h,
+                   tein_clibs.c into OUT_DIR
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs,
                    foreign_types.rs, managed.rs, repl.rs
 tein-macros/     — #[scheme_fn] proc macro crate
@@ -219,7 +220,7 @@ cargo clean && cargo build         # nuclear option if ffi gets weird
 
 ## Adding a new Scheme type
 
-1. Add predicate wrapper to `vendor/chibi-scheme/tein_shim.c`
+1. Add predicate wrapper to `tein_shim.c` in the fork (emesal/chibi-scheme, branch emesal-tein)
 2. Add extern declaration + safe wrapper in `src/ffi.rs`
 3. Add variant to `Value` enum in `src/value.rs`
 4. Add extraction in `Value::from_raw()` (respect type check ordering!)

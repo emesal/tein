@@ -287,9 +287,7 @@ unsafe extern "C" fn port_read_trampoline(
         let start_raw = ffi::sexp_unbox_fixnum(start_sexp);
         let end_raw = ffi::sexp_unbox_fixnum(end_sexp);
         let buf_len = ffi::sexp_string_size(buf_sexp) as usize;
-        if start_raw < 0 || end_raw < 0 || end_raw < start_raw
-            || end_raw as usize > buf_len
-        {
+        if start_raw < 0 || end_raw < 0 || end_raw < start_raw || end_raw as usize > buf_len {
             return ffi::sexp_make_fixnum(0);
         }
         let start = start_raw as usize;
@@ -353,9 +351,7 @@ unsafe extern "C" fn port_write_trampoline(
         let start_raw = ffi::sexp_unbox_fixnum(start_sexp);
         let end_raw = ffi::sexp_unbox_fixnum(end_sexp);
         let buf_len = ffi::sexp_string_size(buf_sexp) as usize;
-        if start_raw < 0 || end_raw < 0 || end_raw < start_raw
-            || end_raw as usize > buf_len
-        {
+        if start_raw < 0 || end_raw < 0 || end_raw < start_raw || end_raw as usize > buf_len {
             return ffi::sexp_make_fixnum(0);
         }
         let start = start_raw as usize;

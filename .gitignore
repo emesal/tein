@@ -7,12 +7,10 @@
 *.pdb
 # Cargo.lock is committed for reproducible builds (library with examples)
 
-# generated files (build.rs)
-tein/vendor/chibi-scheme/include/chibi/install.h
-tein/vendor/chibi-scheme/tein_vfs_data.h
-tein/vendor/chibi-scheme/tein_clibs.c
+# fetched chibi-scheme fork (build.rs clones from emesal/chibi-scheme)
+/target/chibi-scheme/
 
-# stray artefacts at repo root (install.h sometimes lands here)
+# stray artefacts at repo root
 /vendor/
 
 # ide

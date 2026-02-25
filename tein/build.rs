@@ -1,12 +1,17 @@
-// build script for compiling vendored chibi-scheme
+// build script for compiling chibi-scheme from our fork
 //
-// generates:
-//   tein_vfs_data.h — embedded .sld/.scm files for the virtual filesystem
-//   tein_clibs.c    — static C library table for native-backed modules
-//   install.h       — chibi config with VFS module path
+// fetches emesal/chibi-scheme (branch emesal-tein) into target/chibi-scheme/,
+// then generates:
+//   install.h       — chibi config with VFS module path (in OUT_DIR/chibi/)
+//   tein_vfs_data.h — embedded .sld/.scm files for the virtual filesystem (in OUT_DIR)
+//   tein_clibs.c    — static C library table for native-backed modules (in OUT_DIR)
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+
+const CHIBI_REPO: &str = "https://github.com/emesal/chibi-scheme.git";
+const CHIBI_BRANCH: &str = "emesal-tein";
 
 /// files embedded in the VFS for r7rs standard library support.
 ///
@@ -101,18 +106,67 @@ const CLIB_ENTRIES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// fetch or update the chibi-scheme fork into `target/chibi-scheme/`.
+///
+/// clones on first build, then fetches + resets to branch tip on subsequent builds.
+/// uses `target/chibi-scheme/` (two levels up from `tein/`) so it survives `cargo clean`
+/// (which only removes `target/{debug,release,...}`) and is shared across profiles.
+fn fetch_chibi() -> String {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let workspace_root = Path::new(&manifest_dir)
+        .parent()
+        .expect("tein crate must be in a workspace");
+    let chibi_dir = workspace_root.join("target").join("chibi-scheme");
+
+    if chibi_dir.join(".git").exists() {
+        // fetch latest and reset to branch tip
+        let fetch = Command::new("git")
+            .args(["fetch", "origin", CHIBI_BRANCH])
+            .current_dir(&chibi_dir)
+            .status()
+            .expect("failed to run git fetch");
+        assert!(fetch.success(), "git fetch failed");
+
+        let reset = Command::new("git")
+            .args(["reset", "--hard", &format!("origin/{CHIBI_BRANCH}")])
+            .current_dir(&chibi_dir)
+            .status()
+            .expect("failed to run git reset");
+        assert!(reset.success(), "git reset failed");
+    } else {
+        // initial clone — shallow single-branch for speed
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                "--branch",
+                CHIBI_BRANCH,
+                "--single-branch",
+                "--depth",
+                "1",
+                CHIBI_REPO,
+                chibi_dir.to_str().expect("non-utf8 path"),
+            ])
+            .status()
+            .expect("failed to run git clone");
+        assert!(clone.success(), "git clone failed");
+    }
+
+    chibi_dir.to_str().expect("non-utf8 path").to_string()
+}
+
 fn main() {
-    let chibi_dir = "vendor/chibi-scheme";
+    let chibi_dir = fetch_chibi();
     let include_dir = format!("{chibi_dir}/include");
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
-    // generate install.h (with VFS module path)
-    generate_install_h(&include_dir);
+    // generate install.h (with VFS module path) into OUT_DIR/chibi/
+    generate_install_h(&out_dir);
 
-    // generate VFS data header (embedded .sld/.scm files)
-    generate_vfs_data(chibi_dir);
+    // generate VFS data header (embedded .sld/.scm files) into OUT_DIR
+    generate_vfs_data(&chibi_dir, &out_dir);
 
-    // generate static C library table
-    generate_clibs(chibi_dir);
+    // generate static C library table into OUT_DIR
+    generate_clibs(&chibi_dir, &out_dir);
 
     // core chibi-scheme source files (excluding main.c which has main())
     let sources = [
@@ -124,15 +178,15 @@ fn main() {
         "vm.c",
         "eval.c",
         "simplify.c",
-        "tein_shim.c",  // our ffi shim layer
-        "tein_clibs.c", // generated static library table
+        "tein_shim.c", // our ffi shim layer
     ];
 
     let mut build = cc::Build::new();
 
     build
-        .include(&include_dir)
-        .include(chibi_dir)
+        .include(&out_dir) // generated install.h (chibi/install.h) wins over repo's
+        .include(&include_dir) // repo headers (sexp.h, features.h, etc.)
+        .include(&chibi_dir)
         .flag("-DSEXP_USE_DL=0") // disable dynamic loading
         .flag("-DSEXP_STATIC_LIBRARY") // static link (prevents dllimport on win32)
         .flag("-DSEXP_USE_STATIC_LIBS=1") // enable static library lookup in eval.c
@@ -156,10 +210,15 @@ fn main() {
     for src in &sources {
         build.file(format!("{chibi_dir}/{src}"));
     }
+    // generated tein_clibs.c lives in OUT_DIR
+    build.file(format!("{out_dir}/tein_clibs.c"));
 
     build.compile("chibi");
 
     // rerun triggers
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={include_dir}/chibi/sexp.h");
+    println!("cargo:rerun-if-changed={include_dir}/chibi/features.h");
     for src in &sources {
         println!("cargo:rerun-if-changed={chibi_dir}/{src}");
     }
@@ -169,14 +228,16 @@ fn main() {
     for &(c_file, _, _) in CLIB_ENTRIES {
         println!("cargo:rerun-if-changed={chibi_dir}/{c_file}");
     }
-    println!("cargo:rerun-if-changed={include_dir}/chibi/sexp.h");
-    println!("cargo:rerun-if-changed={include_dir}/chibi/features.h");
-    println!("cargo:rerun-if-changed=build.rs");
 }
 
-/// generate install.h with VFS module path sentinel
-fn generate_install_h(include_dir: &str) {
-    let install_h_path = Path::new(include_dir).join("chibi/install.h");
+/// generate install.h with VFS module path sentinel.
+///
+/// written into `OUT_DIR/chibi/install.h` so `#include <chibi/install.h>` resolves
+/// to our version (OUT_DIR is searched before the repo's include/ dir).
+fn generate_install_h(out_dir: &str) {
+    let chibi_out = Path::new(out_dir).join("chibi");
+    fs::create_dir_all(&chibi_out).expect("failed to create chibi/ in OUT_DIR");
+    let install_h_path = chibi_out.join("install.h");
 
     // "/vfs/lib" as the module path — chibi appends "/" + filename to construct
     // paths like "/vfs/lib/init-7.scm", "/vfs/lib/scheme/base.sld" etc.
@@ -196,8 +257,8 @@ fn generate_install_h(include_dir: &str) {
 ///
 /// produces a lookup table mapping `"vfs://lib/..."` keys to file contents.
 /// all bytes are escaped as `\xNN` for safe C embedding (no encoding issues).
-fn generate_vfs_data(chibi_dir: &str) {
-    let out_path = Path::new(chibi_dir).join("tein_vfs_data.h");
+fn generate_vfs_data(chibi_dir: &str, out_dir: &str) {
+    let out_path = Path::new(out_dir).join("tein_vfs_data.h");
     let mut out = String::with_capacity(1024 * 1024);
 
     out.push_str("// generated by build.rs — do not edit\n\n");
@@ -250,8 +311,8 @@ fn generate_vfs_data(chibi_dir: &str) {
 /// uses the `#define sexp_init_library / #include / #undef` pattern to give
 /// each C library a unique init function name, then builds the lookup table
 /// that chibi's `sexp_find_static_library` searches.
-fn generate_clibs(chibi_dir: &str) {
-    let out_path = Path::new(chibi_dir).join("tein_clibs.c");
+fn generate_clibs(chibi_dir: &str, out_dir: &str) {
+    let out_path = Path::new(out_dir).join("tein_clibs.c");
     let mut out = String::with_capacity(4096);
 
     out.push_str("// generated by build.rs — do not edit\n\n");
@@ -262,7 +323,7 @@ fn generate_clibs(chibi_dir: &str) {
         out.push_str(&format!(
             "#define sexp_init_library sexp_init_lib_{suffix}\n"
         ));
-        out.push_str(&format!("#include \"{c_file}\"\n"));
+        out.push_str(&format!("#include \"{chibi_dir}/{c_file}\"\n"));
         out.push_str("#undef sexp_init_library\n\n");
     }
 

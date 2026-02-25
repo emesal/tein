@@ -46,7 +46,7 @@ src/
   thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
   port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
-vendor/chibi-scheme/
+target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
                  env_copy_named (rename-aware binding copy), error construction,
                  module import policy (tein_module_allowed, tein_module_policy_set),
@@ -62,7 +62,7 @@ vendor/chibi-scheme/
   lib/tein/reader.scm — module documentation
   lib/tein/macro.sld — (tein macro) library definition (re-exports native hook fns)
   lib/tein/macro.scm — module documentation
-build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
+build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 ```
 
@@ -96,7 +96,7 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 
 ## adding a new scheme type
 
-1. add predicate wrapper to `vendor/chibi-scheme/tein_shim.c`
+1. add predicate wrapper to `tein_shim.c` in the fork (emesal/chibi-scheme, branch emesal-tein)
 2. add extern declaration + safe wrapper in `src/ffi.rs`
 3. add variant to `Value` enum in `src/value.rs`
 4. add extraction in `Value::from_raw()` (respect type check ordering!)
