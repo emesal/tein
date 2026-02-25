@@ -377,17 +377,28 @@ int tein_reader_char_is_reserved(int c) {
     return tein_reader_char_reserved(c);
 }
 
-int tein_reader_dispatch_set(int c, sexp proc) {
+int tein_reader_dispatch_set(sexp ctx, int c, sexp proc) {
     tein_reader_dispatch_ensure_init();
     if (c < 0 || c >= TEIN_READER_DISPATCH_SIZE) return -2;
     if (tein_reader_char_reserved(c)) return -1;
+    /* GC-preserve the new proc and release the old one, mirroring the
+     * macro hook pattern. without this, a GC cycle between registration
+     * and invocation can collect the handler (conservative scan is off). */
+    sexp old = tein_reader_dispatch[c];
+    if (old != SEXP_FALSE)
+        sexp_release_object(ctx, old);
     tein_reader_dispatch[c] = proc;
+    if (proc != SEXP_FALSE)
+        sexp_preserve_object(ctx, proc);
     return 0;
 }
 
-int tein_reader_dispatch_unset(int c) {
+int tein_reader_dispatch_unset(sexp ctx, int c) {
     tein_reader_dispatch_ensure_init();
     if (c < 0 || c >= TEIN_READER_DISPATCH_SIZE) return -2;
+    sexp old = tein_reader_dispatch[c];
+    if (old != SEXP_FALSE)
+        sexp_release_object(ctx, old);
     tein_reader_dispatch[c] = SEXP_FALSE;
     return 0;
 }
@@ -400,18 +411,25 @@ sexp tein_reader_dispatch_get(int c) {
 
 sexp tein_reader_dispatch_chars(sexp ctx) {
     tein_reader_dispatch_ensure_init();
-    sexp result = SEXP_NULL;
+    sexp_gc_var1(result);
+    sexp_gc_preserve1(ctx, result);
+    result = SEXP_NULL;
     for (int i = TEIN_READER_DISPATCH_SIZE - 1; i >= 0; i--) {
         if (tein_reader_dispatch[i] != SEXP_FALSE)
             result = sexp_cons(ctx, sexp_make_character(i), result);
     }
+    sexp_gc_release1(ctx);
     return result;
 }
 
-void tein_reader_dispatch_clear(void) {
+void tein_reader_dispatch_clear(sexp ctx) {
     tein_reader_dispatch_ensure_init();
-    for (int i = 0; i < TEIN_READER_DISPATCH_SIZE; i++)
-        tein_reader_dispatch[i] = SEXP_FALSE;
+    for (int i = 0; i < TEIN_READER_DISPATCH_SIZE; i++) {
+        if (tein_reader_dispatch[i] != SEXP_FALSE) {
+            sexp_release_object(ctx, tein_reader_dispatch[i]);
+            tein_reader_dispatch[i] = SEXP_FALSE;
+        }
+    }
 }
 
 // ─── macro expansion hook ───────────────────────────────────────────

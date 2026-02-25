@@ -255,10 +255,14 @@ impl Value {
             }
 
             // check for foreign object tagged list: (__tein-foreign "type-name" handle-id)
-            // must run before generic pair/list handling below
+            // must run before generic pair/list handling below.
+            // root `raw` across the sexp_symbol_to_string call — it allocates
+            // (via sexp_c_string) and can trigger GC. without rooting, the pair
+            // accessed by sexp_cdr(raw) below could be collected.
             if ffi::sexp_pairp(raw) != 0 {
                 let car = ffi::sexp_car(raw);
                 if ffi::sexp_symbolp(car) != 0 {
+                    let _pair_root = ffi::GcRoot::new(ctx, raw);
                     let sym_str = ffi::sexp_symbol_to_string(ctx, car);
                     let sym_ptr = ffi::sexp_string_data(sym_str);
                     let sym_len = ffi::sexp_string_size(sym_str) as usize;

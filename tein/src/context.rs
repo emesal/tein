@@ -406,7 +406,7 @@ unsafe extern "C" fn reader_set_wrapper(
         }
 
         let c = ffi::sexp_unbox_character(ch_sexp);
-        let result = ffi::reader_dispatch_set(c, proc_sexp);
+        let result = ffi::reader_dispatch_set(ctx, c, proc_sexp);
         match result {
             0 => ffi::get_void(),
             -1 => {
@@ -445,7 +445,7 @@ unsafe extern "C" fn reader_unset_wrapper(
             return ffi::get_void();
         }
         let c = ffi::sexp_unbox_character(ch_sexp);
-        ffi::reader_dispatch_unset(c);
+        ffi::reader_dispatch_unset(_ctx, c);
         ffi::get_void()
     }
 }
@@ -1594,7 +1594,7 @@ impl Context {
             .ok_or_else(|| Error::TypeError("handler must be a procedure".into()))?;
         let c = ch as std::ffi::c_int;
         unsafe {
-            let result = ffi::reader_dispatch_set(c, raw_proc);
+            let result = ffi::reader_dispatch_set(self.ctx, c, raw_proc);
             match result {
                 0 => Ok(()),
                 -1 => Err(Error::EvalError(format!(
@@ -1845,6 +1845,10 @@ impl Context {
         self.arm_fuel();
 
         unsafe {
+            // root the port sexp across the read/eval loop — both sexp_read and
+            // sexp_evaluate allocate and can trigger GC, and with conservative
+            // scanning disabled the GC cannot see rust locals.
+            let _port_root = ffi::GcRoot::new(self.ctx, raw_port);
             let env = ffi::sexp_context_env(self.ctx);
             let mut last = Value::Unspecified;
 
@@ -1998,7 +2002,7 @@ impl Drop for Context {
 
         // clear reader dispatch table so the next context on this thread
         // starts with a clean slate (dispatch state is thread-local in C)
-        unsafe { ffi::reader_dispatch_clear() };
+        unsafe { ffi::reader_dispatch_clear(self.ctx) };
 
         // clear macro expansion hook (thread-local in C)
         unsafe { ffi::macro_expand_hook_clear(self.ctx) };

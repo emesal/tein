@@ -193,11 +193,11 @@ unsafe extern "C" {
     pub fn tein_make_custom_output_port(ctx: sexp, write_proc: sexp) -> sexp;
 
     // reader dispatch table (# syntax extensions)
-    pub fn tein_reader_dispatch_set(c: c_int, proc: sexp) -> c_int;
-    pub fn tein_reader_dispatch_unset(c: c_int) -> c_int;
+    pub fn tein_reader_dispatch_set(ctx: sexp, c: c_int, proc: sexp) -> c_int;
+    pub fn tein_reader_dispatch_unset(ctx: sexp, c: c_int) -> c_int;
     pub fn tein_reader_dispatch_get(c: c_int) -> sexp;
     pub fn tein_reader_dispatch_chars(ctx: sexp) -> sexp;
-    pub fn tein_reader_dispatch_clear();
+    pub fn tein_reader_dispatch_clear(ctx: sexp);
     pub fn tein_reader_char_is_reserved(c: c_int) -> c_int;
 
     // macro expansion hook
@@ -671,18 +671,20 @@ pub unsafe fn env_copy_named(
 
 /// register a reader dispatch handler for `#c` syntax.
 ///
-/// returns 0 on success, -1 if the character is reserved, -2 if out of range.
+/// the handler proc is GC-preserved in the dispatch table and released
+/// when overwritten, unset, or cleared. returns 0 on success, -1 if the
+/// character is reserved, -2 if out of range.
 #[inline]
-pub unsafe fn reader_dispatch_set(c: c_int, proc: sexp) -> c_int {
-    unsafe { tein_reader_dispatch_set(c, proc) }
+pub unsafe fn reader_dispatch_set(ctx: sexp, c: c_int, proc: sexp) -> c_int {
+    unsafe { tein_reader_dispatch_set(ctx, c, proc) }
 }
 
 /// remove a reader dispatch handler for `#c` syntax.
 ///
-/// returns 0 on success, -2 if out of range.
+/// releases the GC-preserved handler. returns 0 on success, -2 if out of range.
 #[inline]
-pub unsafe fn reader_dispatch_unset(c: c_int) -> c_int {
-    unsafe { tein_reader_dispatch_unset(c) }
+pub unsafe fn reader_dispatch_unset(ctx: sexp, c: c_int) -> c_int {
+    unsafe { tein_reader_dispatch_unset(ctx, c) }
 }
 
 /// get the reader dispatch handler for `#c`, or SEXP_FALSE if none.
@@ -697,10 +699,10 @@ pub unsafe fn reader_dispatch_chars(ctx: sexp) -> sexp {
     unsafe { tein_reader_dispatch_chars(ctx) }
 }
 
-/// clear all reader dispatch handlers.
+/// clear all reader dispatch handlers, releasing GC-preserved procs.
 #[inline]
-pub unsafe fn reader_dispatch_clear() {
-    unsafe { tein_reader_dispatch_clear() }
+pub unsafe fn reader_dispatch_clear(ctx: sexp) {
+    unsafe { tein_reader_dispatch_clear(ctx) }
 }
 
 /// check if a character is reserved by r7rs and cannot be dispatched.
