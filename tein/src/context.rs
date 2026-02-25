@@ -1061,14 +1061,15 @@ impl ContextBuilder {
 
                 // register sandbox stubs for known primitives that weren't allowed.
                 // this gives callers a clear SandboxViolation instead of "undefined variable".
+                // stub_fn is shared across both registration passes below.
+                let stub_fn: Option<
+                    unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
+                > = std::mem::transmute::<*const std::ffi::c_void, _>(
+                    sandbox_stub as *const std::ffi::c_void,
+                );
+
                 {
                     use crate::sandbox::ALL_PRESETS;
-                    let stub_fn: Option<
-                        unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-                    > = std::mem::transmute::<*const std::ffi::c_void, _>(
-                        sandbox_stub as *const std::ffi::c_void,
-                    );
-
                     for preset in ALL_PRESETS {
                         for name in preset.primitives {
                             if !allowed.contains(name) {
@@ -1084,6 +1085,24 @@ impl ContextBuilder {
                                 );
                             }
                         }
+                    }
+                }
+
+                // always stub environment-escape primitives — these are never
+                // allowable in any sandboxed context regardless of preset selection.
+                {
+                    use crate::sandbox::ALWAYS_STUB;
+                    for name in ALWAYS_STUB {
+                        let c_name = CString::new(*name).unwrap();
+                        ffi::sexp_define_foreign_proc(
+                            ctx,
+                            null_env,
+                            c_name.as_ptr(),
+                            0,
+                            ffi::SEXP_PROC_VARIADIC,
+                            c_name.as_ptr(),
+                            stub_fn,
+                        );
                     }
                 }
             }
@@ -5282,5 +5301,53 @@ mod tests {
         .expect("set via import");
         let hook = ctx.evaluate("(macro-expand-hook)").expect("get");
         assert!(matches!(hook, Value::Procedure(_)));
+    }
+
+    #[test]
+    fn test_sandbox_eval_escape_blocked() {
+        // eval + interaction-environment must be stubbed even when not in any preset.
+        // we call each one (with no args or a dummy arg) to trigger the stub.
+        // the stub fires on *call*, not on reference — so we wrap in (apply ... '()).
+        let ctx = Context::builder()
+            .preset(&crate::sandbox::ARITHMETIC)
+            .build()
+            .unwrap();
+
+        for name in [
+            "eval",
+            "interaction-environment",
+            "primitive-environment",
+            "scheme-report-environment",
+            "current-environment",
+            "set-current-environment!",
+            "%load",
+        ] {
+            // call with no args to trigger the stub (SandboxViolation fires on call, not reference)
+            let call = format!("({})", name);
+            let err = ctx.evaluate(&call).unwrap_err();
+            assert!(
+                matches!(err, Error::SandboxViolation(_)),
+                "`{}` should be SandboxViolation in sandboxed env, got: {:?}",
+                name,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_eval_escape_attempt() {
+        // the classic escape: (eval expr (interaction-environment))
+        let ctx = Context::builder()
+            .preset(&crate::sandbox::ARITHMETIC)
+            .build()
+            .unwrap();
+        let err = ctx
+            .evaluate("(eval '(+ 1 2) (interaction-environment))")
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "eval escape attempt should be SandboxViolation, got: {:?}",
+            err
+        );
     }
 }

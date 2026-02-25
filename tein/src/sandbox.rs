@@ -414,3 +414,28 @@ pub(crate) const ALL_PRESETS: &[&Preset] = &[
     &FILE_READ_SUPPORT,
     &FILE_WRITE_SUPPORT,
 ];
+
+/// Primitives that are **always** stubbed out in sandboxed contexts,
+/// regardless of preset configuration.
+///
+/// These provide direct access to unrestricted environments and cannot
+/// be safely exposed in any sandboxed context. Unlike [`ALL_PRESETS`],
+/// these are never allowable — there is no preset that grants them.
+///
+/// A sandboxed scheme program holding any of these can call
+/// `(eval code (interaction-environment))` to execute arbitrary code
+/// in the full unrestricted environment, completely defeating presets.
+///
+/// Note: `compile` and `generate` are NOT listed here even though they
+/// could theoretically be misused, because chibi uses `compile` internally
+/// during macro expansion. Stubbing it breaks standard library features.
+/// `eval` + environment accessors are sufficient to close the escape hatch.
+pub(crate) const ALWAYS_STUB: &[&str] = &[
+    "eval",
+    "interaction-environment",
+    "primitive-environment",
+    "scheme-report-environment",
+    "current-environment",
+    "set-current-environment!",
+    "%load",
+];
