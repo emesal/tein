@@ -11,6 +11,14 @@
 //! `(__tein-foreign "type-name" handle-id)`. The actual data lives
 //! Rust-side — Scheme never touches it directly.
 //!
+//! This Rust-side storage design is also **safety-critical**: it bypasses
+//! chibi's C-level `sexp_register_type` + finaliser system, which has
+//! known GC bugs (resurrection → use-after-free, re-entrant GC from
+//! allocating finalisers, unordered finalisation of referenced objects).
+//! See findings M19-M21 in `docs/plans/2026-02-25-chibi-scheme-review.md`.
+//! Do NOT migrate to chibi-native type registration without first fixing
+//! the upstream GC finaliser model.
+//!
 //! Unpredictable IDs prevent a Scheme program from enumerating sequential
 //! values to access foreign objects it doesn't hold a reference to.
 //!

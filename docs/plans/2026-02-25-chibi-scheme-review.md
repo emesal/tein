@@ -52,18 +52,18 @@ fork when we next rebase.
 
 ## summary
 
-| severity | count | subsystems |
-|----------|-------|------------|
-| critical | 2 | evaluator |
-| high | 12 | GC(4), evaluator(3), reader(2), bignum(2), config(1) |
-| medium | 18 | all subsystems |
-| low | 17 | all subsystems |
+| severity | count | resolved | subsystems |
+|----------|-------|----------|------------|
+| critical | 2 | **2** | evaluator |
+| high | 9 | **2** | GC(1), evaluator(3), reader(2), bignum(2), config(1) |
+| medium | 21 | **3** | all subsystems |
+| low | 17 | 0 | all subsystems |
 
 ---
 
 ## critical
 
-### CR1. `analyze_app` — use-after-exception reads garbage car (eval.c:753)
+### CR1. `analyze_app` — use-after-exception reads garbage car (eval.c:753) — **fixed**
 
 `analyze_list()` can return an exception sexp on OOM. the very next line calls `sexp_car(res)`
 unconditionally. if `res` is an exception, `sexp_car` reads a field at a fixed offset in the
@@ -74,21 +74,34 @@ from user scheme code under memory pressure.
 
 **fix:** add `if (sexp_exceptionp(res)) return res;` before line 756.
 
-### CR2. `sexp_extend_synclo_env` — unrooted `e2` across allocation points (eval.c:250)
+**resolved:** `43d4bb72` in emesal/chibi-scheme (emesal-tein branch).
 
-`e2` is a raw C pointer (not GC-rooted) used to chain newly allocated env frames. each
-`sexp_alloc_type` call can trigger GC. at that point `e2` is live but invisible to the
-collector. additionally, neither allocation checks for OOM — an exception sexp gets written
-into as if it were an env struct.
+### CR2. `sexp_extend_synclo_env` — unchecked OOM in env chain construction (eval.c:250) — **fixed**
 
-**impact:** silent heap corruption in any scheme code using hygienic macros (the normal
-macro expansion path). this is the most dangerous upstream finding.
+~~`e2` is unrooted across allocation points~~ — **correction:** chibi uses mark-sweep (non-moving)
+GC, so the "unrooted" framing is misleading. `e2` is always reachable from the GC-rooted `e`
+through the env parent chain, so the collector will mark it and never sweep it. the GC rooting
+concern does not apply to non-moving collectors.
+
+the **real bug** is unchecked OOM: `sexp_alloc_type` can return the global OOM exception sexp.
+if this happens, the exception is written into as if it were an env struct (via
+`sexp_env_bindings`, `sexp_env_syntactic_p`, `sexp_env_parent`), corrupting the global OOM error
+object and producing a bogus env chain. additionally, the existing early-return on line 265
+(`if (!e2)`) leaks the GC root (missing `sexp_gc_release1`).
+
+**impact:** heap corruption of the global OOM error object under memory pressure during
+hygienic macro expansion. requires OOM to trigger — not reachable in normal operation.
+
+**fix:** add `sexp_exceptionp` checks after both `sexp_alloc_type` calls. break out the
+dense ternary into explicit if/else for clarity. fix the `!e2` early-return to release GC root.
+
+**resolved:** `43d4bb72` in emesal/chibi-scheme (emesal-tein branch).
 
 ---
 
 ## high
 
-### H1. GC finaliser resurrection — swept after finalisation (gc.c:566)
+### ~~H1.~~ → M19. GC finaliser resurrection — swept after finalisation (gc.c:566) — **mitigated**
 
 `sexp_finalize` runs on unmarked objects, then `sexp_sweep` reclaims them. if a finaliser
 saves a reference to the dying object (object resurrection), sweep still reclaims the memory.
@@ -98,7 +111,12 @@ any subsequent access through the saved reference is use-after-free.
 don't resurrect, but user-defined types can. affects tein if foreign type finalisers ever
 reference scheme-managed fields of the dying object.
 
-### H2. GC re-entrancy from allocating finalisers (gc.c:566)
+**mitigation:** not exploitable in tein. `SEXP_USE_DL=0` prevents scheme code from registering
+custom types with finalisers. built-in finalisers (port, fileno) don't resurrect. tein's
+`ForeignType` protocol stores objects rust-side in `ForeignStore`, bypassing chibi finalisers
+entirely. defensive comments added in `build.rs` and `foreign.rs`. downgraded from high.
+
+### ~~H2.~~ → M20. GC re-entrancy from allocating finalisers (gc.c:566) — **mitigated**
 
 a finaliser can call `sexp_apply` or any allocating function, re-entering `sexp_gc`. the inner
 GC runs mark+sweep. the outer finaliser loop has a stale heap cursor `p` and `h` pointer.
@@ -107,13 +125,22 @@ stale positions — heap walk corruption.
 
 **impact:** high if any finaliser allocates, which is common in scheme.
 
-### H3. GC finaliser sees half-collected referenced objects (gc.c:420)
+**mitigation:** not exploitable in tein. built-in finalisers (`sexp_finalize_port`,
+`sexp_finalize_fileno`) only call POSIX `close()`/`fclose()` — no scheme allocations.
+`SEXP_USE_DL=0` prevents user-registered finalisers. downgraded from high.
+
+### ~~H3.~~ → M21. GC finaliser sees half-collected referenced objects (gc.c:420) — **mitigated**
 
 `sexp_finalize` scans all unmarked objects and calls their finaliser. but the dying object's
 slots may point to *other* unmarked objects that have already been finalised or whose memory
 content is no longer valid. no ordering by reachability (except the DL two-pass).
 
 **impact:** finalisers that access fields of the dying object may read garbage.
+
+**mitigation:** not exploitable in tein. `sexp_finalize_port` accesses `sexp_port_fd(port)`
+(a File-Descriptor slot), but only reads primitive integer fields (`sexp_fileno_openp`,
+`sexp_fileno_count`) — valid regardless of the fileno's mark state. the DL two-pass handles
+the DL dependency case (moot with `SEXP_USE_DL=0`). downgraded from high.
 
 ### H4. heap growth integer overflow — `sexp_heap_pad_size` (gc.c:628)
 
@@ -155,7 +182,7 @@ bytecode accesses wrong stack slot.
 `init_file[128]` — version byte written without range check (`version + '0'` overflows for
 version >= 10). no check that path fits in buffer.
 
-### H10. reader label `c2` integer overflow — OOB array access (sexp.c:3617)
+### H10. reader label `c2` integer overflow — OOB array access (sexp.c:3617) — **fixed**
 
 `c2` is `int`, accumulated via `c2 = c2 * 10 + digit_value(c1)` with no overflow check.
 signed overflow is UB in C. after overflow, `c2` is used directly as an array index into
@@ -163,12 +190,26 @@ the shares vector without bounds checking — OOB read/write.
 
 **impact:** heap corruption from crafted reader input like `#2147483648=...`.
 
-### H11. `sexp_decode_utf8_char` — wrong 4-byte decode formula (sexp.c:3104)
+**fix:** add `c2 > (INT_MAX - 9) / 10` guard before the multiply. on overflow, emit
+`sexp_read_error` and break out of the accumulation loop; the exception propagates via
+the existing `sexp_exceptionp(res)` check.
 
-the formula uses mask `0x0F` instead of `0x07` for the leading byte, and shifts byte 2 by
-`<<6` instead of `<<12`. any supplementary-plane character (> U+FFFF) decodes to garbage.
+**resolved:** `9d722d26` in emesal/chibi-scheme (emesal-tein branch).
 
-**impact:** wrong data for 4-byte UTF-8 character literals (`#\` path).
+### H11. `sexp_decode_utf8_char` — wrong 4-byte decode formula (sexp.c:3104) — **fixed**
+
+~~the formula uses mask `0x0F` instead of `0x07` for the leading byte~~ — **correction:** mask
+`0x0F` is incidentally correct because the input range `0xF0-0xF7` constrains bit 3 to always
+be 0, so `0x0F` and `0x07` produce identical results. the actual bugs are the **shifts**: the
+leading byte was shifted `<<16` instead of `<<18`, and byte 1 was shifted `<<6` instead of
+`<<12`. any supplementary-plane character (> U+FFFF) decodes to garbage.
+
+**impact:** wrong data for 4-byte UTF-8 character literals (`#\` path). verified with U+1F600:
+buggy decode produces U+0DC0, correct decode produces U+1F600.
+
+**fix:** change shifts to `<<18` and `<<12` respectively.
+
+**resolved:** `9d722d26` in emesal/chibi-scheme (emesal-tein branch).
 
 ### H12. `sexp_bignum_fxdiv` — no divide-by-zero guard (bignum.c:268)
 

@@ -187,7 +187,14 @@ fn main() {
         .include(&out_dir) // generated install.h (chibi/install.h) wins over repo's
         .include(&include_dir) // repo headers (sexp.h, features.h, etc.)
         .include(&chibi_dir)
-        .flag("-DSEXP_USE_DL=0") // disable dynamic loading
+        // SAFETY-CRITICAL: SEXP_USE_DL=0 disables dynamic loading, which:
+        // 1. eliminates the dlopen attack surface
+        // 2. prevents scheme code from registering types with C-level finalisers
+        //    — this is the ONLY mitigation for chibi GC finaliser bugs (H1-H3 in
+        //    chibi-scheme-review.md): resurrection → use-after-free, re-entrant GC
+        //    from allocating finalisers, and half-collected referenced objects.
+        //    if this flag is ever changed, those bugs become exploitable.
+        .flag("-DSEXP_USE_DL=0")
         .flag("-DSEXP_STATIC_LIBRARY") // static link (prevents dllimport on win32)
         .flag("-DSEXP_USE_STATIC_LIBS=1") // enable static library lookup in eval.c
         .flag("-DSEXP_USE_STATIC_LIBS_NO_INCLUDE=1") // we define sexp_static_libraries ourselves
