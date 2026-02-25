@@ -48,7 +48,6 @@ use crate::{
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
-use std::os::raw::c_char;
 use std::path::Path;
 
 /// RAII guard that clears the FOREIGN_STORE_PTR thread-local on drop.
@@ -648,8 +647,8 @@ unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::
         let first_arg = ffi::sexp_car(args);
         if ffi::sexp_stringp(first_arg) == 0 {
             let msg = "open-file: expected string argument";
-            let c_msg = msg.as_ptr() as *const c_char;
-            return ffi::make_error(ctx, c_msg, msg.len() as ffi::sexp_sint_t);
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
 
         let c_str = ffi::sexp_string_data(first_arg);
