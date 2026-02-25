@@ -55,8 +55,8 @@ fork when we next rebase.
 | severity | count | resolved | subsystems |
 |----------|-------|----------|------------|
 | critical | 2 | **2** | evaluator |
-| high | 9 | **2** | GC(1), evaluator(3), reader(2), bignum(2), config(1) |
-| medium | 21 | **3** | all subsystems |
+| high | 6 | **2** | evaluator(3), bignum(1), config(1) |
+| medium | 24 | **6** | all subsystems |
 | low | 17 | 0 | all subsystems |
 
 ---
@@ -142,7 +142,7 @@ content is no longer valid. no ordering by reachability (except the DL two-pass)
 `sexp_fileno_count`) — valid regardless of the fileno's mark state. the DL two-pass handles
 the DL dependency case (moot with `SEXP_USE_DL=0`). downgraded from high.
 
-### H4. heap growth integer overflow — `sexp_heap_pad_size` (gc.c:628)
+### ~~H4.~~ → M22. heap growth integer overflow — `sexp_heap_pad_size` (gc.c:628) — **mitigated**
 
 `new_size` near `SIZE_MAX` causes `sexp_heap_pad_size(size)` (= `sizeof(heap_t) + size + align`)
 to overflow. `malloc`/`mmap` gets a tiny size, returns success, but the heap is initialised as
@@ -151,7 +151,13 @@ if it were `new_size` bytes — immediate OOB writes.
 **impact:** real integer overflow vulnerability. reachable if heap exhaustion drives many
 growth cycles (unlikely in practice but possible in constrained embedded deployments).
 
-### H5. image loading: unbounded `fread` from untrusted file (gc_heap.c:652)
+**mitigation:** on 64-bit systems (tein's target), `SIZE_MAX` is 16 EiB — unreachable via
+heap growth. `sexp_grow_heap` (gc.c:628) uses `ceil(SEXP_GROW_HEAP_FACTOR * cur_size)`, so
+overflow requires the process to already hold near-`SIZE_MAX` memory. further mitigated once
+H13's `heap_limit()` API is added, which bounds `total_size` via `max_size` check in
+`sexp_alloc` (gc.c:728). downgraded from high.
+
+### ~~H5.~~ → M23. image loading: unbounded `fread` from untrusted file (gc_heap.c:652) — **mitigated**
 
 `header.size` comes from the image file with no upper bound validation. if `header.size +
 heap_free_size` overflows the allocation arithmetic, `fread` writes past the heap buffer.
@@ -159,10 +165,16 @@ heap_free_size` overflows the allocation arithmetic, `fread` writes past the hea
 **impact:** heap buffer overflow from malicious image files. only relevant if
 `SEXP_USE_IMAGE_LOADING=1` and application loads user-provided images.
 
-### H6. image loading: packed heap size overflow (gc_heap.c:256)
+**mitigation:** `SEXP_USE_IMAGE_LOADING` defaults to `SEXP_USE_DL && ...` (features.h:909).
+since tein sets `SEXP_USE_DL=0`, image loading is compiled out entirely. downgraded from high.
+
+### ~~H6.~~ → M24. image loading: packed heap size overflow (gc_heap.c:256) — **mitigated**
 
 `packed_size + free_size + sexp_free_chunk_size + 128` — all `size_t` additions, no overflow
 check. overflow wraps to tiny allocation, subsequent copy writes past it.
+
+**mitigation:** same as M23 — image loading compiled out via `SEXP_USE_DL=0`. downgraded
+from high.
 
 ### H7. `sexp_env_import_op` — env chain corruption on OOM (eval.c:2697)
 
