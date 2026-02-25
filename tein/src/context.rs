@@ -546,14 +546,6 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
             // would corrupt the binding list.
             let env = ffi::sexp_context_env(ctx);
             let c_name = CString::new(*name).unwrap();
-            // transmute from the 4-arg variadic handler signature to the 3-arg
-            // form that sexp_define_foreign_proc expects. safe because chibi
-            // dispatches these via the variadic calling convention regardless —
-            // the rest-args list arrives as the 4th argument at runtime. this
-            // mirrors the same pattern used in define_fn_variadic.
-            let f_typed: Option<
-                unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-            > = std::mem::transmute::<*const std::ffi::c_void, _>(*f as *const std::ffi::c_void);
             ffi::sexp_define_foreign_proc(
                 ctx,
                 env,
@@ -561,7 +553,7 @@ unsafe fn register_protocol_fns(ctx: ffi::sexp) {
                 0,
                 ffi::SEXP_PROC_VARIADIC,
                 c_name.as_ptr(),
-                f_typed,
+                Some(*f),
             );
         }
     }
@@ -1055,16 +1047,6 @@ impl ContextBuilder {
                         let name = op.name();
                         let c_name = CString::new(name).unwrap();
                         let wrapper = wrapper_fn_for(op);
-                        // transmute to match the 3-arg signature ffi expects
-                        let f_typed: Option<
-                            unsafe extern "C" fn(
-                                ffi::sexp,
-                                ffi::sexp,
-                                ffi::sexp_sint_t,
-                            ) -> ffi::sexp,
-                        > = std::mem::transmute::<*const std::ffi::c_void, _>(
-                            wrapper as *const std::ffi::c_void,
-                        );
                         ffi::sexp_define_foreign_proc(
                             ctx,
                             null_env,
@@ -1072,7 +1054,7 @@ impl ContextBuilder {
                             0,
                             ffi::SEXP_PROC_VARIADIC,
                             c_name.as_ptr(),
-                            f_typed,
+                            Some(wrapper),
                         );
                     }
 
@@ -1089,10 +1071,13 @@ impl ContextBuilder {
                 // this gives callers a clear SandboxViolation instead of "undefined variable".
                 // stub_fn is shared across both registration passes below.
                 let stub_fn: Option<
-                    unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-                > = std::mem::transmute::<*const std::ffi::c_void, _>(
-                    sandbox_stub as *const std::ffi::c_void,
-                );
+                    unsafe extern "C" fn(
+                        ffi::sexp,
+                        ffi::sexp,
+                        ffi::sexp_sint_t,
+                        ffi::sexp,
+                    ) -> ffi::sexp,
+                > = Some(sandbox_stub);
 
                 {
                     use crate::sandbox::ALL_PRESETS;
@@ -1443,9 +1428,6 @@ impl Context {
 
         unsafe {
             let env = ffi::sexp_context_env(self.ctx);
-            let f_typed: Option<
-                unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t) -> ffi::sexp,
-            > = std::mem::transmute::<*const std::ffi::c_void, _>(f as *const std::ffi::c_void);
             let result = ffi::sexp_define_foreign_proc(
                 self.ctx,
                 env,
@@ -1453,7 +1435,7 @@ impl Context {
                 0, // num_args = 0 (variadic handles its own arity)
                 ffi::SEXP_PROC_VARIADIC,
                 c_name.as_ptr(),
-                f_typed,
+                Some(f),
             );
 
             if ffi::sexp_exceptionp(result) != 0 {

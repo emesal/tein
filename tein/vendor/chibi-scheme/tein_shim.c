@@ -67,11 +67,15 @@ sexp tein_sexp_define_foreign(sexp ctx, sexp env, const char* name,
     return sexp_define_foreign_aux(ctx, env, name, num_args, 0, fname, f, NULL);
 }
 
-// foreign function registration (procedure-wrapped, supports variadic)
+// foreign function registration (procedure-wrapped, supports variadic).
+// chibi's sexp_proc1 is 3-arg, but the variadic calling convention always
+// passes (ctx, self, nargs, args) — matching sexp_proc2. the cast below is
+// the single intentional shim between the real 4-arg ABI and chibi's type.
 sexp tein_sexp_define_foreign_proc(sexp ctx, sexp env, const char* name,
                                    int num_args, int flags,
-                                   const char* fname, sexp_proc1 f) {
-    return sexp_define_foreign_proc_aux(ctx, env, name, num_args, flags, fname, f, NULL);
+                                   const char* fname, sexp_proc2 f) {
+    return sexp_define_foreign_proc_aux(ctx, env, name, num_args, flags, fname,
+                                        (sexp_proc1)f, NULL);
 }
 
 // interning symbols

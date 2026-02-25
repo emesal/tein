@@ -129,7 +129,7 @@ unsafe extern "C" {
         num_args: c_int,
         flags: c_int,
         fname: *const c_char,
-        f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
+        f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t, sexp) -> sexp>,
     ) -> sexp;
 
     // interning symbols
@@ -438,7 +438,7 @@ pub unsafe fn sexp_define_foreign_proc(
     num_args: c_int,
     flags: c_int,
     fname: *const c_char,
-    f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
+    f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t, sexp) -> sexp>,
 ) -> sexp {
     unsafe { tein_sexp_define_foreign_proc(ctx, env, name, num_args, flags, fname, f) }
 }
