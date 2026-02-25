@@ -6,9 +6,13 @@
 //! # Architecture
 //!
 //! Foreign objects are stored in a per-context `ForeignStore` keyed by
-//! monotonically increasing `u64` handle IDs. Scheme sees them as
-//! tagged lists `(__tein-foreign "type-name" handle-id)`. The actual data
-//! lives Rust-side — Scheme never touches it directly.
+//! unpredictable `u64` handle IDs generated via xorshift64 seeded from
+//! `SystemTime`. Scheme sees them as tagged lists
+//! `(__tein-foreign "type-name" handle-id)`. The actual data lives
+//! Rust-side — Scheme never touches it directly.
+//!
+//! Unpredictable IDs prevent a Scheme program from enumerating sequential
+//! values to access foreign objects it doesn't hold a reference to.
 //!
 //! # Dispatch chain
 //!
@@ -70,8 +74,48 @@
 use crate::Value;
 use crate::error::{Error, Result};
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    /// xorshift64 state for unpredictable handle ID generation.
+    /// seeded from SystemTime on first use to prevent sequential ID guessing.
+    static XOR_STATE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Generate the next unpredictable handle ID via xorshift64.
+///
+/// On first call the state is seeded from `SystemTime` (or a fixed fallback).
+/// IDs are never 0 — if the PRNG produces 0, a fixed non-zero value is used.
+fn next_handle_id() -> u64 {
+    XOR_STATE.with(|state| {
+        let mut s = state.get();
+        if s == 0 {
+            s = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0xdead_beef_cafe_f00d);
+            if s == 0 {
+                s = 0xdead_beef_cafe_f00d;
+            }
+        }
+        // xorshift64 — state must never be 0
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        if s == 0 {
+            s = 1;
+        }
+        state.set(s);
+        // mask to chibi fixnum range: SEXP_MAX_FIXNUM = 2^62 - 1 on 64-bit
+        // (SEXP_FIXNUM_BITS = 1, so max positive fixnum is i64::MAX >> 1).
+        // handle IDs travel through scheme as fixnum literals; values outside
+        // this range would corrupt the encoding. ensure non-zero after masking.
+        let id = s & (i64::MAX as u64 >> 1);
+        if id == 0 { 1 } else { id }
+    })
+}
 
 /// A method on a foreign type, callable from Scheme.
 ///
@@ -143,8 +187,6 @@ pub(crate) struct ForeignStore {
     types: HashMap<&'static str, TypeEntry>,
     /// live instances: handle ID → object
     instances: HashMap<u64, ForeignObject>,
-    /// next handle ID (monotonically increasing, starts at 1)
-    next_id: u64,
 }
 
 impl ForeignStore {
@@ -153,7 +195,6 @@ impl ForeignStore {
         Self {
             types: HashMap::new(),
             instances: HashMap::new(),
-            next_id: 1,
         }
     }
 
@@ -177,8 +218,7 @@ impl ForeignStore {
 
     /// store a value and return its handle ID
     pub(crate) fn insert<T: ForeignType>(&mut self, value: T) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = next_handle_id();
         self.instances.insert(
             id,
             ForeignObject {

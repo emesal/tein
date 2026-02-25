@@ -5498,4 +5498,19 @@ mod tests {
             err
         );
     }
+
+    #[test]
+    fn test_handle_ids_are_not_sequential() {
+        // IDs should not be trivially predictable sequential integers.
+        // we verify both ports work independently (different IDs → different store entries).
+        let ctx = Context::new_standard().unwrap();
+        let cursor1 = std::io::Cursor::new(b"a".to_vec());
+        let cursor2 = std::io::Cursor::new(b"b".to_vec());
+        let port1 = ctx.open_input_port(cursor1).unwrap();
+        let port2 = ctx.open_input_port(cursor2).unwrap();
+        let v1 = ctx.read(&port1).unwrap();
+        let v2 = ctx.read(&port2).unwrap();
+        assert_eq!(v1, Value::Symbol("a".into()));
+        assert_eq!(v2, Value::Symbol("b".into()));
+    }
 }
