@@ -427,7 +427,11 @@ pub unsafe fn get_null() -> sexp {
 }
 
 // foreign function registration (procedure-wrapped, supports variadic)
-/// flag indicating a variadic foreign function (rest-args)
+/// Flag indicating a variadic foreign function (rest-args).
+///
+/// Note: C defines this as `sexp_uint_t` (unsigned) but we use `c_int` (signed)
+/// here. The value 1 is safe for both, and the `flags` field is passed through
+/// `tein_sexp_define_foreign_proc` which takes `int`.
 pub const SEXP_PROC_VARIADIC: c_int = 1;
 
 #[inline]

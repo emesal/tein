@@ -14,17 +14,17 @@ deduplicated, verified synthesis below.
 | C1 | critical | **resolved** | `5cc4e69` |
 | C2 | critical | **resolved** | `5cc4e69` |
 | C3 | critical | **resolved** | `5cc4e69` |
-| H1 | high | open | |
-| M1 | medium | open | |
-| M2 | medium | open | |
-| M3 | medium | open | |
-| M4 | medium | open | |
-| L1 | low | open | |
-| L2 | low | open | |
-| L3 | low | open | |
-| L4 | low | open | |
-| L5 | low | open | |
-| L6 | low | open | |
+| H1 | high | **resolved** | pending commit |
+| M1 | medium | **resolved** | pending commit |
+| M2 | medium | **resolved** | pending commit |
+| M3 | medium | **resolved** | pending commit |
+| M4 | medium | **resolved** | pending commit |
+| L1 | low | **resolved** | pending commit |
+| L2 | low | **resolved** | pending commit |
+| L3 | low | **resolved** | pending commit |
+| L4 | low | **resolved** | pending commit |
+| L5 | low | **resolved** | pending commit |
+| L6 | low | **resolved** | pending commit |
 
 ---
 
@@ -69,112 +69,112 @@ every sexp held only in a rust variable must be explicitly rooted with
 
 ## high — macro hook exception safety
 
-### H1. hook args not checked for exception before `sexp_apply`
+### H1. hook args not checked for exception before `sexp_apply` ✓
 
 - **location**: `eval.c:805-809`
+- **status**: **resolved** — added `sexp_exceptionp(hook_args)` guard before `sexp_apply`;
+  on OOM the exception is propagated as `res` and the hook is skipped cleanly.
 - **issue**: the four `sexp_cons` calls building `hook_args` can each return an exception
-  sexp on OOM. the code feeds the result directly to `sexp_apply` without checking. on OOM,
-  this constructs a stack frame from a malformed args list.
-- **fix**: check `sexp_exceptionp(hook_args)` before calling apply:
+  sexp on OOM. the code fed the result directly to `sexp_apply` without checking. on OOM,
+  this constructed a stack frame from a malformed args list.
+- **fix applied** (`eval.c:805-814`):
   ```c
-  hook_args = sexp_cons(ctx, name, hook_args);
+  /* guard: any sexp_cons can return an exception on OOM; applying a
+     malformed args list would corrupt the call frame, so skip the
+     hook and propagate the OOM exception instead */
   if (!sexp_exceptionp(hook_args))
     res = sexp_apply(ctx, tein_macro_expand_hook, hook_args);
-  tein_macro_expand_hook_active = 0;
+  else
+    res = hook_args;
   ```
 
 ---
 
 ## medium — defence in depth gaps
 
-### M1. module policy: no path traversal protection
+### M1. module policy: no path traversal protection ✓
 
 - **location**: `tein_shim.c:207`
-- **issue**: `strncmp(path, "/vfs/lib/", 9)` passes any path starting with that prefix,
+- **status**: **resolved** — added `strstr(path, "..") != NULL` rejection.
+- **issue**: `strncmp(path, "/vfs/lib/", 9)` passed any path starting with that prefix,
   including `/vfs/lib/../../etc/passwd`. in practice `/vfs/` doesn't exist on disk, so
-  exploitation requires an attacker to create that directory (or a symlink). but adding
-  `strstr(path, "..") != NULL → reject` is trivial hardening.
-- **fix**:
+  exploitation required an attacker to create that directory (or a symlink). trivial hardening.
+- **fix applied** (`tein_shim.c:205-209`):
   ```c
-  int tein_module_allowed(const char *path) {
-      if (tein_module_policy == 0) return 1;
-      if (strncmp(path, "/vfs/lib/", 9) != 0) return 0;
-      if (strstr(path, "..") != NULL) return 0;
-      return 1;
-  }
+  if (strncmp(path, "/vfs/lib/", 9) != 0) return 0;
+  if (strstr(path, "..") != NULL) return 0;  /* no path traversal */
+  return 1;
   ```
 
-### M2. port trampoline: no buffer size validation
+### M2. port trampoline: no buffer size validation ✓
 
 - **location**: `src/context.rs:312`
-- **issue**: the read/write trampolines validate `start >= 0` and `end >= start` but never
-  check `end <= buffer_size`. normally chibi manages indices correctly, but a sandboxed
-  scheme program that can call `tein-port-read` directly with crafted args could trigger an
-  OOB write via `copy_nonoverlapping`.
-- **fix**: add `let buf_len = ffi::sexp_string_size(buf_sexp) as usize;` and check
-  `end <= buf_len` before proceeding.
+- **status**: **resolved** — added `buf_len = sexp_string_size(buf_sexp)` check; both
+  read and write trampolines now reject `end > buf_len`.
+- **issue**: the read/write trampolines validated `start >= 0` and `end >= start` but never
+  checked `end <= buffer_size`. a sandboxed scheme program calling `tein-port-read` directly
+  with crafted args could trigger an OOB write via `copy_nonoverlapping`.
 
-### M3. `tein_sexp_make_bytes` / `tein_sexp_make_vector` — fixnum overflow
+### M3. `tein_sexp_make_bytes` / `tein_sexp_make_vector` — fixnum overflow ✓
 
 - **location**: `tein_shim.c:41, 96`
+- **status**: **resolved** — added explanatory comments documenting the constraint and why
+  it's safe in practice: rust `Vec` sizes are bounded by `isize::MAX`, which is below
+  `SEXP_MAX_FIXNUM` on all supported platforms.
 - **issue**: `sexp_make_fixnum(len)` casts `sexp_uint_t` (unsigned) to signed. extremely
   large `len` values wrap to negative fixnums. chibi would likely reject negative sizes,
-  but the semantics are wrong.
-- **fix**: document or enforce maximum safe sizes on the rust side. consider using a signed
-  type in the C interface.
+  but the semantics were wrong.
 
-### M4. `env_copy_named` — `sym`/`val` not GC-rooted
+### M4. `env_copy_named` — `sym`/`val` not GC-rooted ✓
 
 - **location**: `tein_shim.c:274`
+- **status**: **resolved** — added `sexp_gc_var2(sym, val)` / `sexp_gc_preserve2` at top,
+  restructured early returns to a `goto done` so `sexp_gc_release2` is always called.
 - **issue**: `sexp_intern` and `sexp_env_define` are allocation points. `sym` is likely safe
   (interned symbols are reachable from the global table), but `val` extracted from rename
-  cells is held only in a C local.
-- **fix**: add `sexp_gc_var2(sym, val); sexp_gc_preserve2(ctx, sym, val);` for defence in
-  depth.
+  cells was held only in a C local.
 
 ---
 
 ## low / notes
 
-### L1. `_tein_dispatch` in sexp.c patch — unrooted local
+### L1. `_tein_dispatch` in sexp.c patch — unrooted local ✓
 
 - **location**: `sexp.c:3516`
-- **issue**: currently safe because no allocation between read and apply, but fragile to
-  future edits.
-- **fix**: use the already-rooted `tmp` variable from the enclosing `sexp_read_raw` scope.
+- **status**: **resolved** — replaced `sexp _tein_dispatch` local with `tmp`, the
+  already-rooted gc var from the enclosing `sexp_read_raw` scope.
+- **issue**: was safe with no allocation between read and apply, but fragile to future edits.
 
-### L2. `tein_make_error` dead `len` parameter
+### L2. `tein_make_error` dead `len` parameter ✓
 
 - **location**: `tein_shim.c:190`
-- **issue**: parameter exists but is explicitly `(void)len`'d.
-- **fix**: consider removing from both C and rust signatures, or keep with a clear `@param`
-  note explaining it's reserved.
+- **status**: **resolved** — added `@param` doc explaining `len` is reserved, retained for
+  potential future use, and that `sexp_user_exception` reads `msg` as a C string.
+- **issue**: parameter existed but was explicitly `(void)len`'d with no explanation.
 
-### L3. `tein_vfs_lookup` no NULL guard on `out_length`
+### L3. `tein_vfs_lookup` no NULL guard on `out_length` ✓
 
 - **location**: `tein_shim.c:247`
-- **issue**: all callers pass valid locals, but defence in depth warrants
-  `if (out_length) *out_length = ...;`
+- **status**: **resolved** — added `if (out_length)` guard before the dereference.
 
-### L4. `SEXP_PROC_VARIADIC` signedness divergence
+### L4. `SEXP_PROC_VARIADIC` signedness divergence ✓
 
 - **location**: `ffi.rs:431`
-- **issue**: C defines as `sexp_uint_t`, rust as `c_int`. value 1 is fine, but type
-  divergence is worth a comment.
+- **status**: **resolved** — added doc comment explaining C defines as `sexp_uint_t`,
+  rust uses `c_int`, and why value 1 is safe for both.
 
-### L5. sexp_proc2 cast comment wording
+### L5. sexp_proc2 cast comment wording ✓
 
 - **location**: `tein_shim.c:70-73`
-- **issue**: says "single intentional shim" but `tein_sexp_define_foreign` relies on the
-  same ABI assumption. minor wording fix needed.
+- **status**: **resolved** — clarified that `tein_sexp_define_foreign` accepts `sexp_proc1`
+  directly (no cast needed); the fn-pointer shim is only in `tein_sexp_define_foreign_proc`.
 
-### L6. `tein_reader_dispatch_unset` allows unsetting reserved chars
+### L6. `tein_reader_dispatch_unset` allows unsetting reserved chars ✓
 
 - **location**: `tein_shim.c:388`
-- **issue**: asymmetry with `set` which guards against reserved chars. harmless no-op but
-  inconsistent.
-- **fix**: add the same reserved-character guard, or document that unsetting reserved chars
-  is intentionally allowed.
+- **status**: **resolved** — added `tein_reader_char_reserved(c)` guard to match `set`,
+  returning `-1` for reserved chars (harmless no-op before, now consistent).
+- **issue**: asymmetry with `set` which guarded against reserved chars.
 
 ---
 

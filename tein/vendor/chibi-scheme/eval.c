@@ -806,7 +806,13 @@ static sexp analyze_macro_once (sexp ctx, sexp name, sexp x, sexp op, int depth)
     hook_args = sexp_cons(ctx, res, hook_args);
     hook_args = sexp_cons(ctx, x, hook_args);
     hook_args = sexp_cons(ctx, name, hook_args);
-    res = sexp_apply(ctx, tein_macro_expand_hook, hook_args);
+    /* guard: any sexp_cons can return an exception on OOM; applying a
+       malformed args list would corrupt the call frame, so skip the
+       hook and propagate the OOM exception instead */
+    if (!sexp_exceptionp(hook_args))
+      res = sexp_apply(ctx, tein_macro_expand_hook, hook_args);
+    else
+      res = hook_args;
     tein_macro_expand_hook_active = 0;
   }
   sexp_gc_release2(ctx);

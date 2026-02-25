@@ -3510,12 +3510,13 @@ sexp sexp_read_raw (sexp ctx, sexp in, sexp *shares) {
 #endif
   case '#':
     c1=sexp_read_char(ctx, in);
-    /* tein patch: check user-registered dispatch before built-in # syntax */
+    /* tein patch: check user-registered dispatch before built-in # syntax.
+       use the enclosing sexp_gc_var2(res, tmp) — tmp is already GC-rooted. */
     {
       extern sexp tein_reader_dispatch_get(int c);
-      sexp _tein_dispatch = tein_reader_dispatch_get(c1);
-      if (_tein_dispatch != SEXP_FALSE && sexp_applicablep(_tein_dispatch)) {
-        res = sexp_apply1(ctx, _tein_dispatch, in);
+      tmp = tein_reader_dispatch_get(c1);
+      if (tmp != SEXP_FALSE && sexp_applicablep(tmp)) {
+        res = sexp_apply1(ctx, tmp, in);
         break;
       }
     }

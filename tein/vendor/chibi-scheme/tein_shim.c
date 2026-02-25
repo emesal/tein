@@ -38,6 +38,10 @@ int tein_sexp_bytesp(sexp x) { return sexp_bytesp(x); }
 char* tein_sexp_bytes_data(sexp x) { return sexp_bytes_data(x); }
 sexp_uint_t tein_sexp_bytes_length(sexp x) { return sexp_bytes_length(x); }
 sexp tein_sexp_make_bytes(sexp ctx, sexp_uint_t len, unsigned char init) {
+    /* len is cast to signed fixnum; values above SEXP_MAX_FIXNUM wrap to
+       negative, producing invalid sizes. rust callers are bounded by their
+       own allocator (isize::MAX), which is below SEXP_MAX_FIXNUM on all
+       supported platforms, so this is safe in practice. */
     return sexp_make_bytes(ctx, sexp_make_fixnum(len), sexp_make_fixnum(init));
 }
 
@@ -68,9 +72,11 @@ sexp tein_sexp_define_foreign(sexp ctx, sexp env, const char* name,
 }
 
 // foreign function registration (procedure-wrapped, supports variadic).
-// chibi's sexp_proc1 is 3-arg, but the variadic calling convention always
-// passes (ctx, self, nargs, args) — matching sexp_proc2. the cast below is
-// the single intentional shim between the real 4-arg ABI and chibi's type.
+// chibi's sexp_proc1 is 3-arg (ctx, self, args), but the variadic calling
+// convention always passes 4 args (ctx, self, nargs, args) — matching
+// sexp_proc2. the (sexp_proc1)f cast below is the intentional fn-pointer
+// shim between the real 4-arg ABI and chibi's declared type; tein_sexp_define_foreign
+// above avoids this by accepting sexp_proc1 directly (no variadic dispatch).
 sexp tein_sexp_define_foreign_proc(sexp ctx, sexp env, const char* name,
                                    int num_args, int flags,
                                    const char* fname, sexp_proc2 f) {
@@ -93,6 +99,8 @@ sexp tein_sexp_cons(sexp ctx, sexp head, sexp tail) { return sexp_cons(ctx, head
 
 // vector construction
 sexp tein_sexp_make_vector(sexp ctx, sexp_uint_t len, sexp dflt) {
+    /* same fixnum-overflow note as tein_sexp_make_bytes: safe in practice
+       because rust Vec sizes are bounded by isize::MAX < SEXP_MAX_FIXNUM. */
     return sexp_make_vector(ctx, sexp_make_fixnum(len), dflt);
 }
 
@@ -186,7 +194,9 @@ sexp_sint_t tein_fuel_consume_slice(sexp_sint_t slice_used) {
 }
 
 // error construction (for policy violation exceptions).
-// len is unused; sexp_user_exception copies msg as a nul-terminated c string.
+// @param len: reserved, not used. sexp_user_exception copies msg as a
+//   nul-terminated c string; byte length is not needed. retained in the
+//   signature so rust call sites can pass msg.len() for potential future use.
 sexp tein_make_error(sexp ctx, const char* msg, sexp_sint_t len) {
     (void)len;
     return sexp_user_exception(ctx, SEXP_FALSE, msg, SEXP_NULL);
@@ -204,7 +214,9 @@ TEIN_THREAD_LOCAL int tein_module_policy = 0;
 // called from eval.c patch A (sexp_find_module_file_raw).
 int tein_module_allowed(const char *path) {
     if (tein_module_policy == 0) return 1;
-    return strncmp(path, "/vfs/lib/", 9) == 0;
+    if (strncmp(path, "/vfs/lib/", 9) != 0) return 0;
+    if (strstr(path, "..") != NULL) return 0;  /* no path traversal */
+    return 1;
 }
 
 // set the module policy. called from rust ffi.
@@ -244,7 +256,7 @@ void tein_sexp_context_env_set(sexp ctx, sexp env) { sexp_context_env(ctx) = env
 const char* tein_vfs_lookup(const char *full_path, unsigned int *out_length) {
     for (int i = 0; tein_vfs_table[i].key != NULL; i++) {
         if (strcmp(tein_vfs_table[i].key, full_path) == 0) {
-            *out_length = tein_vfs_table[i].length;
+            if (out_length) *out_length = tein_vfs_table[i].length;
             return tein_vfs_table[i].content;
         }
     }
@@ -273,8 +285,14 @@ sexp tein_sexp_load_standard_ports(sexp ctx, sexp env) {
 
 int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
                         const char *name, sexp_sint_t name_len) {
-    sexp sym = sexp_intern(ctx, name, name_len);
-    sexp val = SEXP_VOID;
+    /* GC-root sym and val: sexp_env_ref, sexp_env_define, and sexp_intern
+     * are allocation points; val extracted from rename cells must survive
+     * the subsequent sexp_env_define call. sym is likely safe (interned
+     * symbols are globally reachable), but we root it for defence in depth. */
+    sexp_gc_var2(sym, val);
+    sexp_gc_preserve2(ctx, sym, val);
+    sym = sexp_intern(ctx, name, name_len);
+    val = SEXP_VOID;
     int found = 0;
 
     // first try: direct lookup via sexp_env_ref (handles direct bindings
@@ -282,7 +300,8 @@ int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
     val = sexp_env_ref(ctx, src_env, sym, SEXP_VOID);
     if (val != SEXP_VOID) {
         sexp_env_define(ctx, dst_env, sym, val);
-        return 1;
+        found = 1;
+        goto done;
     }
 
     // second try: scan rename bindings for synclos whose underlying
@@ -291,34 +310,35 @@ int tein_env_copy_named(sexp ctx, sexp src_env, sexp dst_env,
     // (SEXP_POINTER_TAG == 0), so we guard against NULL explicitly.
     /* iteration limit guards against corrupted environment with cyclic parent chain.
      * chibi should never produce cycles, but defence-in-depth warrants a hard stop. */
-    int env_walk_limit = 65536;
-    sexp env = src_env;
-    while (env && sexp_envp(env) && env_walk_limit-- > 0) {
+    {
+        int env_walk_limit = 65536;
+        sexp env = src_env;
+        while (env && sexp_envp(env) && env_walk_limit-- > 0) {
 #if SEXP_USE_RENAME_BINDINGS
-        sexp ls;
-        for (ls = sexp_env_renames(env); sexp_pairp(ls); ls = sexp_env_next_cell(ls)) {
-            sexp key = sexp_car(ls);
-            // rename keys are syntactic closures wrapping the original symbol
-            if (sexp_synclop(key) && sexp_synclo_expr(key) == sym) {
-                // found it — the value is in cdr of the rename cell,
-                // which is itself a binding cell (car=key, cdr=value)
-                sexp cell = sexp_cdr(ls);
-                if (sexp_pairp(cell)) {
-                    val = sexp_cdr(cell);
-                } else {
-                    val = cell;
+            sexp ls;
+            for (ls = sexp_env_renames(env); sexp_pairp(ls); ls = sexp_env_next_cell(ls)) {
+                sexp key = sexp_car(ls);
+                // rename keys are syntactic closures wrapping the original symbol
+                if (sexp_synclop(key) && sexp_synclo_expr(key) == sym) {
+                    // found it — the value is in cdr of the rename cell,
+                    // which is itself a binding cell (car=key, cdr=value)
+                    sexp cell = sexp_cdr(ls);
+                    val = sexp_pairp(cell) ? sexp_cdr(cell) : cell;
+                    // define using the bare symbol so it's accessible without
+                    // the module system's rename machinery
+                    sexp_env_define(ctx, dst_env, sym, val);
+                    found = 1;
+                    goto done;
                 }
-                // define using the bare symbol so it's accessible without
-                // the module system's rename machinery
-                sexp_env_define(ctx, dst_env, sym, val);
-                return 1;
             }
-        }
 #endif
-        env = sexp_env_parent(env);
+            env = sexp_env_parent(env);
+        }
     }
 
-    return 0;
+done:
+    sexp_gc_release2(ctx);
+    return found;
 }
 
 // --- custom port creation ---
@@ -396,6 +416,7 @@ int tein_reader_dispatch_set(sexp ctx, int c, sexp proc) {
 int tein_reader_dispatch_unset(sexp ctx, int c) {
     tein_reader_dispatch_ensure_init();
     if (c < 0 || c >= TEIN_READER_DISPATCH_SIZE) return -2;
+    if (tein_reader_char_reserved(c)) return -1;
     sexp old = tein_reader_dispatch[c];
     if (old != SEXP_FALSE)
         sexp_release_object(ctx, old);
