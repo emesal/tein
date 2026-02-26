@@ -88,6 +88,19 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. ThreadLocalContext generalises this pattern with persistent/fresh modes. fuel counters are thread-local.
 
+## chibi safety invariants
+
+tein mitigates known chibi-scheme bugs via configuration. if any of these change, review
+`docs/plans/2026-02-25-chibi-scheme-review.md` for newly-exposed vulnerabilities.
+
+- **`SEXP_USE_DL=0`** (build.rs) — disables dlopen, image loading, runtime type registration. mitigates GC finaliser bugs, image loading overflows, NULL-self finalisers.
+- **`sexp_register_type` not exposed** (ffi.rs) — prevents C-level finaliser registration from rust side.
+- **`sexp_exceptionp` checked after every allocation** (context.rs) — prevents writing into the shared global OOM object.
+- **fuel always armed before eval** (context.rs) — bounds total operations, mitigates stack-exhaustion edge cases.
+- **bytecode never user-supplied** — chibi compiles scheme→bytecode internally; no load-bytecode API exposed.
+- **`heap_max` defaults to 128 MiB** (context.rs) — bounds heap growth, prevents memory exhaustion and strengthens heap-overflow mitigation.
+- **version parameter hardcoded to 7** (context.rs) — chibi's `init_file[128]` does `version + '0'` unchecked; version >= 10 overflows.
+
 ## critical gotchas
 
 **type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0, producing garbage integer values.

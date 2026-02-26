@@ -193,9 +193,13 @@ fn main() {
         //    — this is the ONLY mitigation for chibi GC finaliser bugs (M19-M21 in
         //    chibi-scheme-review.md): resurrection → use-after-free, re-entrant GC
         //    from allocating finalisers, and half-collected referenced objects.
+        //    also mitigates NULL-self finaliser call (M11).
         // 3. disables SEXP_USE_IMAGE_LOADING (derived: DL && 64-bit && ...), which
-        //    mitigates image loading buffer overflows (M23-M24).
+        //    mitigates image loading buffer overflows (M23-M24) and image version
+        //    check bug (M9).
         // if this flag is ever changed, all of the above bugs become exploitable.
+        // additionally, SEXP_USE_LIMITED_MALLOC (default 0) must stay disabled —
+        // it has an unsynchronised global counter that races under concurrency (M10).
         .flag("-DSEXP_USE_DL=0")
         .flag("-DSEXP_STATIC_LIBRARY") // static link (prevents dllimport on win32)
         .flag("-DSEXP_USE_STATIC_LIBS=1") // enable static library lookup in eval.c

@@ -1242,6 +1242,10 @@ impl Context {
     }
 
     /// Set fuel before an evaluation call (if step limit is configured).
+    ///
+    /// SAFETY INVARIANT: must be called before every sexp_evaluate/sexp_apply
+    /// entry point. fuel budget bounds total VM operations, which mitigates
+    /// chibi's error-handler stack overflow (M13 in chibi-scheme-review.md).
     fn arm_fuel(&self) {
         if let Some(limit) = self.step_limit {
             unsafe {
@@ -1269,6 +1273,15 @@ impl Context {
     /// Evaluates all expressions in the string sequentially, returning the
     /// result of the last expression. This enables natural scripting patterns
     /// like defining values and then using them.
+    ///
+    /// # safety invariant: OOM checking
+    ///
+    /// Every allocation result (`sexp_open_input_string`, `sexp_read`,
+    /// `sexp_evaluate`) is checked with `sexp_exceptionp` before use.
+    /// chibi returns a shared global OOM object on allocation failure (M12
+    /// in chibi-scheme-review.md) — writing fields into it corrupts future
+    /// OOM reporting. this pattern must be maintained in all evaluation
+    /// entry points (`evaluate`, `evaluate_port`, `call`).
     ///
     /// # examples
     ///
