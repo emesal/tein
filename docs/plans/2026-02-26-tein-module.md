@@ -7,11 +7,11 @@
 - [x] Task 1: runtime VFS registration — C side (chibi fork commit 811d611, pushed)
 - [x] Task 2: runtime VFS registration — rust side (tein commit 246bdb3)
 - [x] Task 3: #[tein_fn] standalone mode (tein commit 652d5f4, tein_fn.rs created)
-- [ ] Task 4: naming convention helpers
-- [ ] Task 5: #[tein_module] parsing + structure
-- [ ] Task 6: #[tein_module] ForeignType codegen
-- [ ] Task 7: #[tein_module] extern C wrappers
-- [ ] Task 8: #[tein_module] VFS content + register fn
+- [x] Task 4: naming convention helpers (commit f6ace94)
+- [x] Task 5: #[tein_module] parsing + structure (commit f6ace94, tein_module_parse.rs)
+- [x] Task 6: #[tein_module] ForeignType codegen (commit f6ace94)
+- [x] Task 7: #[tein_module] extern C wrappers (commit f6ace94)
+- [x] Task 8: #[tein_module] VFS content + register fn (commit f6ace94)
 - [ ] Task 9: naming edge cases + _q/_bang tests
 - [ ] Task 10: scheme-side integration test
 - [ ] Task 11: remove scheme_fn deprecation, update docs
@@ -20,7 +20,11 @@
 **Worktree:** `/home/fey/projects/tein/.worktrees/tein-module` on branch `feat/tein-module`
 — all implementation work happens here, not in the main repo checkout.
 
-**Note for resuming:** scheme_fn.rs is still in tests/ (deprecated, not yet removed — task 11).
+**Note for resuming:** tasks 4-8 codegen is written and committed. next session starts at task 9:
+write integration tests (tein_module_foreign.rs for task 6/7 foreign type + fn wrapper tests,
+then tein_module_full.rs for task 8 full VFS + registration, tein_module_naming.rs for task 9,
+scheme/tein_module.scm + scheme_tests.rs update for task 10). tests not yet run — need to
+verify compilation and correctness. scheme_fn.rs is still in tests/ (deprecated, not yet removed — task 11).
 
 **Goal:** Replace `#[scheme_fn]` with a unified `#[tein_module]` attribute macro system that generates ForeignType impls, extern "C" wrappers, VFS module content, and registration functions from annotated rust mod blocks.
 
