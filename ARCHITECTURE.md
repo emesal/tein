@@ -51,11 +51,32 @@
 - `ModulePolicy`: VFS-only import restriction in sandboxed standard-env contexts
 - C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
 
+**Milestone 6 — Foreign type protocol** (completed)
+- `ForeignType` trait + `ForeignStore` handle-map per context
+- `Value::Foreign { handle_id, type_name }` with tagged-list wire format
+- `(tein foreign)` VFS module: `foreign?`, `foreign-type`, `foreign-handle-id`
+- Auto-generated `type-name?` predicates + `type-name-method` convenience procs
+- `ctx.foreign_value(v)`, `ctx.foreign_ref::<T>(&val)` Rust-side API
+
+**Milestone 7 — Managed contexts** (completed)
+- `ThreadLocalContext`: `Send + Sync` managed context on a dedicated thread
+- Persistent mode (state accumulates) and fresh mode (rebuilt per call)
+- `ContextBuilder::build_managed(init)` / `build_managed_fresh(init)`
+- Shared channel protocol in `thread.rs` (generalises `TimeoutContext`)
+
+### Current milestone
+
+**Milestone 8 — Rust Ecosystem Bridge** (in progress)
+- `#[tein_module]` proc macro for rust→scheme module generation (issue #40)
+- `(tein json)`, `(tein regex)`, `(tein crypto)`, `(tein uuid)` capability modules
+- Foreign type constructor macro `define_foreign_type!` (issue #41)
+
 ### Known limitations
 
 1. **Limited type coverage**
    - Hash tables and ports are opaque (`Value::HashTable`, `Value::Port`) — no rich Rust API
    - Continuations surface as `Value::Procedure` (Chibi uses the same type tag)
+2. **`(tein foreign)` module broken in standard env** — `foreign.scm` uses `fixnum?` which is not exported by `(scheme base)`. See the Scheme environment quirks section below. Fix tracked in the chibi fork.
 
 ## Architecture
 
@@ -209,7 +230,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (208 lib + 12 scheme_fn + 6 scheme + 24 doc)
+cargo test                         # all tests (208 lib + 12 scheme_fn + 22 scheme + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
