@@ -2,6 +2,25 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+## Progress
+
+- [x] Task 1: runtime VFS registration — C side (chibi fork commit 811d611, pushed)
+- [x] Task 2: runtime VFS registration — rust side (tein commit 246bdb3)
+- [x] Task 3: #[tein_fn] standalone mode (tein commit 652d5f4, tein_fn.rs created)
+- [ ] Task 4: naming convention helpers
+- [ ] Task 5: #[tein_module] parsing + structure
+- [ ] Task 6: #[tein_module] ForeignType codegen
+- [ ] Task 7: #[tein_module] extern C wrappers
+- [ ] Task 8: #[tein_module] VFS content + register fn
+- [ ] Task 9: naming edge cases + _q/_bang tests
+- [ ] Task 10: scheme-side integration test
+- [ ] Task 11: remove scheme_fn deprecation, update docs
+- [ ] Task 12: final verification + design doc update
+
+**Branch:** `feat/tein-module` in `.worktrees/tein-module`
+
+**Note for resuming:** scheme_fn.rs is still in tests/ (deprecated, not yet removed — task 11).
+
 **Goal:** Replace `#[scheme_fn]` with a unified `#[tein_module]` attribute macro system that generates ForeignType impls, extern "C" wrappers, VFS module content, and registration functions from annotated rust mod blocks.
 
 **Architecture:** A single `#[tein_module("name")]` attribute macro parses a mod block, finds `#[tein_fn]`/`#[tein_type]`/`#[tein_methods]` items, and generates all scheme-side glue. Runtime VFS registration (`ctx.register_vfs_module()`) lets macro-generated modules participate in chibi's `(import ...)` system without build.rs coordination. `#[tein_fn]` also works standalone (replacing `#[scheme_fn]`).
