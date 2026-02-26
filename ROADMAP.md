@@ -11,6 +11,8 @@ long-term, tein aims to be a capable scheme implementation in its own right — 
 
 tein is a core dependency of chibi~ (an LLM agent harness). tein provides the sandboxed execution environment for LLM-synthesised tools, with the sandbox boundary serving as chibi~'s trust model. this makes production hardening and the rust ecosystem bridge high priorities.
 
+the two identities converge in agentic and stochastic use cases: the rust ecosystem provides high-performance building blocks exposed as scheme modules; scheme coordinates, composes, and expresses intent. tein is the platform where that meeting happens — generalist by design, with the module system determining what any given application can reach.
+
 ---
 
 ## completed milestones
@@ -84,15 +86,15 @@ tein is a core dependency of chibi~ (an LLM agent harness). tein provides the sa
 
 ### milestone 8 — rust ecosystem bridge
 
-expose high-value rust crates as idiomatic r7rs scheme modules. this is the "scheme with rust inside" story — capabilities no pure-scheme implementation can match.
+expose high-value rust crates as idiomatic r7rs scheme modules. this is the "scheme with rust inside" story — building blocks that scheme programs can import and compose freely.
 
-**`(tein json)`** — JSON via serde_json. faster and more correct than SRFI-180 (pure scheme). bidirectional: scheme values ↔ JSON strings, leveraging the existing serde foundation in tein-sexp.
+**`(tein json)`** — JSON via serde_json. bidirectional: scheme values ↔ JSON strings, leveraging the existing serde foundation in tein-sexp.
 
-**`(tein regex)`** — regex via the `regex` crate. dramatically faster than irregex. the perf story is the clearest argument here.
+**`(tein regex)`** — regex via the `regex` crate.
 
-**`(tein crypto)`** — hashing (blake3, sha2) and CSPRNG (rand). pure-scheme crypto exists on snow-fort but is orders of magnitude slower.
+**`(tein crypto)`** — hashing (blake3, sha2) and CSPRNG (rand).
 
-**`(tein uuid)`** — UUID generation. trivial wrapper, no good pure-scheme equivalent.
+**`(tein uuid)`** — UUID generation.
 
 **`#[tein_module]` proc macro** — generalises the boilerplate for exposing rust crates as scheme modules. auto-generates scheme-side glue (predicates, constructors, method procs) from annotated rust. makes adding further modules fast and consistent.
 
@@ -114,7 +116,7 @@ mod regex_module {
 
 tein as a first-class scheme implementation, not just a rust library.
 
-**`tein` binary** — a standalone scheme interpreter/REPL. open design question: one binary or several? chicken provides three (`chicken` compiles to C, `csc` compiles to binary, `csi` is the interpreter). tein is rooted in rust which changes the tradeoffs. to be decided during milestone planning.
+**`tein` binary** — a standalone scheme interpreter/REPL. open design question: one binary or several? chicken provides three (`chicken` compiles to C, `csc` compiles to binary, `csi` is the interpreter). tein is rooted in rust which changes the tradeoffs. to be decided during milestone planning. the custom reader extension (M5, done) already provides the hook for future file-format extensions (e.g. `.ssp` stochastic scheme programs, if that path is pursued).
 
 **snow-fort package support** — two tiers:
 - *vetted VFS packages*: curated snow-fort libraries embedded in the VFS at compile time by `build.rs`, available in sandboxed contexts. same trust level as existing VFS modules.
@@ -128,46 +130,46 @@ tein as a first-class scheme implementation, not just a rust library.
 
 more rust-backed scheme modules, building on the `#[tein_module]` infrastructure from M8.
 
-**`(tein http)`** — HTTP client via `ureq` or `reqwest`. no good pure-scheme equivalent. the biggest capability unlock for scheme-as-scripting-language.
+**`(tein http)`** — HTTP client via `ureq` or `reqwest`.
 
 **`(tein datetime)`** — date/time via `chrono`. better timezone and formatting support than SRFI-19.
 
-**`(tein tracing)`** — structured logging from scheme into rust's `tracing` ecosystem. scheme code generating structured spans that rust can consume. useful for chibi~ tool synthesis observability.
+**`(tein tracing)`** — structured logging from scheme into rust's `tracing` ecosystem. scheme code generating structured spans that rust can consume.
 
 *further modules follow naturally from the `#[tein_module]` pattern — this milestone establishes the pattern is working well before adding more.*
 
 ### milestone 11 — performance & throughput
 
-**context pool** — pool of `ThreadLocalContext` instances for high-throughput workloads. when chibi~ runs many parallel tool evaluations, context creation cost matters.
+**context pool** — pool of `ThreadLocalContext` instances for high-throughput workloads. relevant when many scheme evaluations run in parallel — tool execution, stochastic program dispatch, etc.
 
 **WASM target** — chibi compiles via emscripten. enables tein in browser and edge environments. previously listed in milestone 5 but deprioritised; now explicitly on the roadmap.
 
 **compile-to-C pipeline** — expose chibi's `compile-to-c` such that scheme files can be compiled to C and linked into rust binaries at build time via `build.rs`. scheme at near-native speed. complex to drive programmatically; needs careful design.
 
-### milestone 12 — stochastic runtime
+### milestone 12 — stochastic runtime support
 
-tein as a host platform for stochastic programming — a paradigm where bindings are probability distributions rather than values, programs carry semantic intent, and a compilation pipeline progressively collapses fuzzy specifications toward concrete outputs using the cheapest available strategy.
+tein as a platform for hosting a stochastic programming language — a language extension implemented *in* tein scheme via the module system. the stochastic language is not tein scheme; it is a library that uses tein as its substrate.
 
 see `~/projects/chibi/backrooms/stochastic-programming.md` for the full design.
 
-tein already has every primitive needed:
+tein already has every primitive the stochastic language needs:
 
-- continuations as residuals — chibi has first-class continuations; a residual node waiting for a model to fill in a value *is* a delimited continuation
-- macro expansion hook — deterministic compilation passes expressible as macro transformations
-- foreign type protocol — model handles, projection strategies, and the semantic knowledge base as rust-side objects
-- sandboxing — the deterministic compilation phase runs isolated; model dispatch runs with appropriate capabilities
+- **continuations as residuals** — chibi has first-class continuations; a residual node waiting for a model to fill in a value *is* a delimited continuation
+- **macro expansion hook** — deterministic compilation passes can be expressed as macro transformations on the stochastic IR
+- **foreign type protocol** — model handles, projection strategies, and the knowledge base are rust-side objects exposed to scheme
+- **sandboxing** — the deterministic compilation phase runs isolated; model dispatch runs with appropriate capabilities granted
 
-**`(tein llm)`** — rust-backed scheme module exposing LLM calls (via ratatosk or anthropic SDK directly) as first-class scheme values. the bridge between the stochastic runtime and actual models.
+**`(tein rat)`** — rust-backed scheme module wrapping ratatoskr's `ModelGateway`: chat, generate, embed, NLI, token counting. model access for any scheme program that wants it, not just the stochastic language. use r7rs `only`/`prefix` import forms for granularity.
 
-**stochastic core library** — `define~`, `intent`, `narrow`, `project`, `monad` forms as scheme macros. the deterministic compilation passes. the projection registry.
+**stochastic core library** — `define~`, `intent`, `narrow`, `project`, `monad`, `with-context`, `register-projection` as scheme macros and procedures. the deterministic compilation passes. the projection registry as a foreign type. this is the stochastic language itself, delivered as a tein module.
 
-this milestone is the convergence point for the dual identity: rust ecosystem modules provide the cheap algorithmic projections; `(tein llm)` provides the model fallback; chibi~'s tool protocol is expressed in stochastic scheme.
+the milestone is the point where tein's two identities are exercised simultaneously: rust ecosystem modules (M8, M10) provide cheap algorithmic building blocks; `(tein rat)` provides the model bridge; the stochastic language coordinates and composes them in scheme.
 
 ---
 
 ## unscheduled ideas
 
-- **context pool** — pool of `ThreadLocalContext` for high-throughput (absorbed into M11)
 - **`build_managed` with timeout** — combine `ThreadLocalContext` + wall-clock deadline without needing two threads
 - **hash table API** — expose `Value::HashTable` with rich rust methods rather than leaving it opaque
 - **continuation API** — first-class access to scheme continuations from rust
+- **`(tein chibi)`** — scheme module speaking chibi~'s tool/plugin protocol: call chibi~'s tools from tein programs, hook into the plugin architecture. depends on chibi~'s protocol stabilising; not a tein prerequisite.
