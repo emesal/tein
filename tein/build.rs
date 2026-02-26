@@ -134,6 +134,13 @@ fn fetch_chibi() -> String {
             .expect("failed to run git reset");
         assert!(reset.success(), "git reset failed");
     } else {
+        // if the dir exists but isn't a git repo (e.g. leftover from a cancelled build),
+        // remove it so git clone can proceed cleanly
+        if chibi_dir.exists() {
+            std::fs::remove_dir_all(&chibi_dir)
+                .expect("failed to remove stale chibi-scheme directory");
+        }
+
         // initial clone — shallow single-branch for speed
         let clone = Command::new("git")
             .args([
