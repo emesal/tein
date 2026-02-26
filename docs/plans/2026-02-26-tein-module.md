@@ -17,7 +17,8 @@
 - [ ] Task 11: remove scheme_fn deprecation, update docs
 - [ ] Task 12: final verification + design doc update
 
-**Branch:** `feat/tein-module` in `.worktrees/tein-module`
+**Worktree:** `/home/fey/projects/tein/.worktrees/tein-module` on branch `feat/tein-module`
+— all implementation work happens here, not in the main repo checkout.
 
 **Note for resuming:** scheme_fn.rs is still in tests/ (deprecated, not yet removed — task 11).
 
