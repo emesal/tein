@@ -122,6 +122,8 @@ tein as a first-class scheme implementation, not just a rust library.
 - *vetted VFS packages*: curated snow-fort libraries embedded in the VFS at compile time by `build.rs`, available in sandboxed contexts. same trust level as existing VFS modules.
 - *snow capability*: unvetted snow packages as a `ContextBuilder` capability (`.snow_packages(&["srfi/180"])`), following the same pattern as `file_read`/`file_write`. available only in contexts that explicitly grant it. fetched and embedded at compile time, not at runtime.
 
+**`(tein wisp)`** — wisp syntax (SRFI-119) as a VFS module. a pure-scheme R7RS port of the wisp preprocessor, vendored into the VFS. transforms indentation-based wisp source into s-expressions before evaluation — no second VM, full scheme semantics underneath. depends on `(tein regex)` (M8). exposes `wisp-read` / `wisp-eval` / `wisp-load` as entry points. serves as the first "alternate surface syntax" stepping stone, and as a foundation for more distinct scripting languages (e.g. the stochastic language's surface syntax) down the road.
+
 **r5rs/r6rs compatibility layers** — `ContextBuilder::r5rs_env()` / `ContextBuilder::r6rs_env()` for best-effort compatibility. chibi already has substantial r6rs support internally; the goal is exposing it properly rather than implementing it from scratch. expands the pool of available scheme code significantly. documented as best-effort, not full conformance.
 
 **scheme test harness** — run `.scm` files as cargo integration tests. enables testing scheme-level behaviour idiomatically.
