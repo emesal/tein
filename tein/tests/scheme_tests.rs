@@ -55,6 +55,21 @@ fn test_scheme_tail_calls() {
 }
 
 #[test]
+fn test_scheme_closures() {
+    run_scheme_test(include_str!("scheme/closures.scm"));
+}
+
+#[test]
+fn test_scheme_continuations() {
+    run_scheme_test(include_str!("scheme/continuations.scm"));
+}
+
+#[test]
+fn test_scheme_error_handling() {
+    run_scheme_test(include_str!("scheme/error_handling.scm"));
+}
+
+#[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
     use tein::sandbox::*;
