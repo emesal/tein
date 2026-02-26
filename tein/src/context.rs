@@ -4073,6 +4073,39 @@ mod tests {
         assert_eq!(result, Value::Char('λ'));
     }
 
+    /// L7: string `\x` escape must reject surrogates and out-of-range codepoints.
+    #[test]
+    fn test_string_hex_escape_rejects_surrogates() {
+        let ctx = Context::new_standard().expect("standard context");
+        // surrogate codepoint
+        let result = ctx.evaluate(r#"(string-length "\xD800;")"#);
+        assert!(result.is_err(), "surrogate \\xD800; should be rejected");
+        // beyond Unicode range
+        let result = ctx.evaluate(r#"(string-length "\x110000;")"#);
+        assert!(result.is_err(), "\\x110000; should be rejected");
+        // valid codepoint should still work
+        let result = ctx.evaluate(r#"(string-length "\x03BB;")"#);
+        assert_eq!(result.expect("valid hex escape"), Value::Integer(1));
+    }
+
+    /// L11: `integer->char` must reject non-Unicode-scalar-values.
+    #[test]
+    fn test_integer_to_char_rejects_invalid() {
+        let ctx = Context::new_standard().expect("standard context");
+        // negative
+        let result = ctx.evaluate("(integer->char -1)");
+        assert!(result.is_err(), "negative should be rejected");
+        // surrogate
+        let result = ctx.evaluate("(integer->char #xD800)");
+        assert!(result.is_err(), "surrogate should be rejected");
+        // beyond Unicode range
+        let result = ctx.evaluate("(integer->char #x110000)");
+        assert!(result.is_err(), "above 0x10FFFF should be rejected");
+        // valid codepoint should still work
+        let result = ctx.evaluate("(integer->char 955)");
+        assert_eq!(result.expect("valid char"), Value::Char('λ'));
+    }
+
     // --- ports ---
 
     #[test]

@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (196 lib + 12 scheme_fn + 15 doc-tests)
+cargo test                         # all tests (207 lib + 12 scheme_fn + 24 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
@@ -100,6 +100,10 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 - **bytecode never user-supplied** — chibi compiles scheme→bytecode internally; no load-bytecode API exposed.
 - **`heap_max` defaults to 128 MiB** (context.rs) — bounds heap growth, prevents memory exhaustion and strengthens heap-overflow mitigation.
 - **version parameter hardcoded to 7** (context.rs) — chibi's `init_file[128]` does `version + '0'` unchecked; version >= 10 overflows.
+- **`SEXP_G_STRICT_P` never set** — `sexp_warn` calls `exit(1)` in strict mode, bypassing all rust error handling. never enable strict mode.
+- **module path list never user-modifiable** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). safe because compiled-in defaults + VFS are never empty. never expose raw module path manipulation.
+- **`SEXP_USE_STRICT_TOPLEVEL_BINDINGS=1`** (default) — must stay enabled; without it, `analyze_bind_syntax` has a potential NULL deref.
+- **`CHIBI_MODULE_PATH` env var** — read by chibi's module resolver. our module policy gate blocks non-VFS paths at the C level so it can't escape the sandbox, but document that this env var exists.
 
 ## critical gotchas
 
