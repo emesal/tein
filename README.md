@@ -190,6 +190,12 @@ from Old Norse *tein* (teinn): **branch** — like the branches of an abstract s
 
 **why tein?** because embedding Scheme in Rust shouldn't require wrestling with raw FFI. and because a language that can carry intent deserves a host that can carry it faithfully.
 
+*carved with care, grown with intention*
+
 ---
 
-*carved with care, grown with intention*
+## License
+
+ISC
+
+make meow, not rawr
