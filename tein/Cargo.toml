@@ -1,0 +1,25 @@
+[package]
+name = "tein"
+version = "0.1.0"
+edition = "2024"
+authors = ["fey"]
+license = "MIT OR Apache-2.0"
+description = "embeddable r7rs scheme interpreter for rust, built on chibi-scheme"
+repository = "https://github.com/emesal/tein"
+keywords = ["scheme", "lisp", "scripting", "embedding", "r7rs"]
+categories = ["embedded", "parser-implementations"]
+
+[dependencies]
+tein-macros = { path = "../tein-macros" }
+
+[dev-dependencies]
+rustyline = { version = "17", features = ["with-file-history"] }
+
+[features]
+## enables chibi-scheme GC debugging instrumentation (+4 bytes/object overhead).
+## adds magic-number header validation and pointer bounds checking before GC mark.
+## useful for diagnosing heap corruption, dangling pointers, and unrooted locals.
+debug-chibi = []
+
+[build-dependencies]
+cc = "1.0"

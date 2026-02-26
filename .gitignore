@@ -1,0 +1,25 @@
+/.serena/
+/.worktrees/
+
+# rust
+/target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock is committed for reproducible builds (library with examples)
+
+# fetched chibi-scheme fork (build.rs clones from emesal/chibi-scheme)
+/target/chibi-scheme/
+
+# stray artefacts at repo root
+/vendor/
+
+# ide
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# os
+.DS_Store
+Thumbs.db

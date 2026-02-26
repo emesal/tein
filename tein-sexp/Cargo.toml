@@ -1,0 +1,17 @@
+[package]
+name = "tein-sexp"
+version = "0.1.0"
+edition = "2024"
+authors = ["fey"]
+license = "MIT OR Apache-2.0"
+description = "pure rust s-expression parser, printer, and serde data format"
+repository = "https://github.com/emesal/tein"
+keywords = ["sexp", "s-expression", "scheme", "serde", "config"]
+categories = ["parser-implementations", "encoding"]
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
