@@ -1,8 +1,15 @@
 # tein
 
-> Embeddable R7RS Scheme interpreter for Rust
+> Branch and rune-stick — embeddable R7RS Scheme for Rust
 
-**tein** wraps [chibi-scheme](https://github.com/ashinn/chibi-scheme) in a safe Rust API. Zero runtime dependencies, full r7rs-small compliance, ~200kb footprint. Evaluate Scheme from Rust, call Rust from Scheme, sandbox everything.
+**tein** is an embeddable R7RS Scheme interpreter for Rust, built on vendored chibi-scheme 0.11. safe Rust API wrapping unsafe C FFI. zero runtime dependencies.
+
+tein has a dual identity:
+
+- **scheme embedded in rust** — add Scheme as a scripting or extension language to any Rust application. safe sandboxing, resource limits, bidirectional data exchange
+- **scheme with rust inside** — Scheme programs get access to the Rust ecosystem via tein's module system: high-performance crates exposed as idiomatic R7RS libraries
+
+long-term, tein aims to be a capable scheme in its own right — one that just happens to be exceptionally easy to embed in Rust, in the same spirit that chibi-scheme is easy to embed in C.
 
 ## Quick start
 
@@ -19,22 +26,17 @@ let result = ctx.evaluate("(+ 1 2 3)")?;
 assert_eq!(result, Value::Integer(6));
 ```
 
-## Features
+## What tein can do today
 
 ### Sandboxing & resource limits
 
 Restrict the environment to exactly the primitives you need. Combine presets, step limits, wall-clock timeouts, and file IO policies.
 
 ```rust
-use tein::Context;
-
 let ctx = Context::builder()
     .safe()                     // no filesystem, no eval
     .step_limit(50_000)         // terminate infinite loops
     .build()?;
-
-let result = ctx.evaluate("(+ 1 2)")?;
-assert_eq!(result, tein::Value::Integer(3));
 
 // file IO blocked
 assert!(ctx.evaluate(r#"(open-input-file "/etc/passwd")"#).is_err());
@@ -47,18 +49,11 @@ assert!(ctx.evaluate(r#"(open-input-file "/etc/passwd")"#).is_err());
 Define Scheme-callable functions in pure Rust with automatic type conversion and error handling.
 
 ```rust
-use tein::{Context, scheme_fn};
-
 #[scheme_fn]
-fn square(n: i64) -> i64 {
-    n * n
-}
+fn square(n: i64) -> i64 { n * n }
 
-let ctx = Context::new()?;
 ctx.define_fn_variadic("square", __tein_square)?;
-
-let result = ctx.evaluate("(square 7)")?;
-assert_eq!(result, tein::Value::Integer(49));
+assert_eq!(ctx.evaluate("(square 7)")?, Value::Integer(49));
 ```
 
 ### Foreign type protocol
@@ -66,8 +61,6 @@ assert_eq!(result, tein::Value::Integer(49));
 Expose Rust types as first-class Scheme objects with method dispatch, predicates, and introspection.
 
 ```rust
-use tein::{Context, ForeignType, MethodFn, Value};
-
 struct Counter { n: i64 }
 
 impl ForeignType for Counter {
@@ -80,14 +73,12 @@ impl ForeignType for Counter {
                 Ok(Value::Integer(c.n))
             }),
             ("get", |obj, _ctx, _args| {
-                let c = obj.downcast_ref::<Counter>().unwrap();
-                Ok(Value::Integer(c.n))
+                Ok(Value::Integer(obj.downcast_ref::<Counter>().unwrap().n))
             }),
         ]
     }
 }
 
-let ctx = Context::new_standard()?;
 ctx.register_foreign_type::<Counter>()?;
 // auto-generates: counter?, counter-increment, counter-get
 ```
@@ -97,30 +88,18 @@ ctx.register_foreign_type::<Counter>()?;
 Bridge Rust `Read`/`Write` into Scheme's port system for streaming IO.
 
 ```rust
-use tein::Context;
-
-let ctx = Context::new_standard()?;
-let json = r#"{"key": "value"}"#;
-let port = ctx.open_input_port(std::io::Cursor::new(json))?;
-let datum = ctx.read(&port)?;
+let port = ctx.open_input_port(std::io::Cursor::new(b"(+ 1 2)"))?;
+let result = ctx.evaluate_port(&port)?;
 ```
 
 ### Reader extensions
 
 Register custom `#` dispatch characters to extend Scheme's reader at the syntax level.
 
-```rust
-let ctx = Context::new_standard()?;
-ctx.register_reader('j', &ctx.evaluate(
-    "(lambda (port) (read port))"  // #j<datum> → <datum>
-)?)?;
-```
-
-Or from Scheme via `(import (tein reader))`:
-
 ```scheme
 (import (tein reader))
-(set-reader! #\j (lambda (port) (read port)))
+(set-reader! #\j (lambda (port) (list 'json (read port))))
+;; #j(1 2 3) → (json (1 2 3))
 ```
 
 ### Macro expansion hooks
@@ -139,8 +118,6 @@ Intercept and transform macro expansions at analysis time — replace-and-reanal
 Thread-safe Scheme evaluation via `ThreadLocalContext` — persistent state or fresh-per-evaluation.
 
 ```rust
-use tein::Context;
-
 let ctx = Context::builder()
     .standard_env()
     .step_limit(1_000_000)
@@ -151,36 +128,67 @@ let ctx = Context::builder()
 
 ctx.evaluate("(set! counter (+ counter 1))")?;
 ctx.evaluate("(set! counter (+ counter 1))")?;
-let result = ctx.evaluate("counter")?;
-assert_eq!(result, tein::Value::Integer(2));
+assert_eq!(ctx.evaluate("counter")?, Value::Integer(2));
 
-ctx.reset()?; // rebuild context, re-run init
+ctx.reset()?;  // rebuild context, re-run init
 ```
 
 ## Examples
 
 | example | description |
 |---------|-------------|
-| `basic` | Evaluate expressions, pattern-match on values |
-| `floats` | Floating-point arithmetic |
-| `ffi` | `#[scheme_fn]` proc macro, calling Rust from Scheme and vice versa |
-| `debug` | Float/integer type inspection |
-| `sandbox` | Step limits, restricted environments, timeouts, file IO policies |
-| `foreign_types` | Foreign type protocol — registration, dispatch, introspection |
+| `basic` | evaluate expressions, pattern-match on values |
+| `floats` | floating-point arithmetic |
+| `ffi` | `#[scheme_fn]` proc macro, Rust↔Scheme calls |
+| `debug` | float/integer type inspection |
+| `sandbox` | step limits, restricted environments, timeouts, file IO policies |
+| `foreign_types` | foreign type protocol — registration, dispatch, introspection |
 | `managed` | `ThreadLocalContext` persistent and fresh modes |
-| `repl` | Interactive Scheme REPL with readline |
+| `repl` | interactive Scheme REPL with readline |
 
 ```bash
 cargo run --example sandbox
 ```
 
+## What tein is becoming
+
+the current feature set covers the "scheme embedded in rust" half of the dual identity well. the roadmap is about filling in the other half and then some.
+
+### the rust ecosystem bridge (M8)
+
+`(tein json)`, `(tein regex)`, `(tein crypto)`, `(tein uuid)` — high-value Rust crates exposed as idiomatic R7RS scheme modules. a `#[tein_module]` proc macro to make adding further modules fast and consistent. this is the "scheme with rust inside" story made real: scheme programs that import a regex library or a UUID generator and get a proper Rust implementation underneath.
+
+### tein as a scheme (M9)
+
+a standalone `tein` binary — a first-class scheme interpreter, not just a library. snow-fort package support with two trust tiers (vetted VFS packages available in sandboxed contexts; unvetted packages as an explicit capability). `(tein wisp)` for SRFI-119 indentation-based syntax. R5RS/R6RS compatibility layers. the goal is a scheme you could use on its own that also happens to embed into Rust trivially.
+
+### capability modules (M10)
+
+`(tein http)`, `(tein datetime)`, `(tein tracing)` — building on the module infrastructure from M8. scheme code that can make HTTP requests, manipulate datetimes, and emit structured traces into Rust's tracing ecosystem.
+
+### stochastic runtime support (M12)
+
+tein's long arc is toward hosting a stochastic programming language — a language where the fundamental primitive is not a value but a probability distribution. programs carry *intent*, not instructions. a stochastic binding like `(define~ meal (intent "comforting dinner, not heavy"))` names a typed cloud that collapses at runtime through the cheapest available strategy: deterministic resolution first, then algorithmic projection, then a small model, and only finally a full LLM call.
+
+the stochastic language is not tein itself — it's a library implemented *in* tein R7RS modules, using tein as its substrate. tein already has every primitive it needs:
+
+- **first-class continuations** — a residual node waiting for a model to fill in a value *is* a delimited continuation
+- **macro expansion hook** — the deterministic compilation passes are macro transformations on the stochastic IR
+- **foreign type protocol** — model handles, projection strategies, and knowledge base instances are Rust-side objects exposed to scheme
+- **sandboxing** — the deterministic compilation phase runs isolated, model dispatch runs with appropriate capabilities granted
+- **managed contexts** — persistent scheme contexts for holding compilation state and accumulated constraints across evaluations
+
+M12 adds `(tein rat)` — a Rust-backed module wrapping a model gateway (chat, generate, embed, NLI, token counting) — and the stochastic core library: `define~`, `intent`, `narrow`, `project`, `monad`, `with-context`, `register-projection`. this is where tein's two identities converge: Rust ecosystem modules provide cheap algorithmic projections; the model bridge provides the LLM fallback; scheme coordinates and expresses intent.
+
+---
+
 ## About
 
-From Old Norse *tein* (teinn): **branch** — like the branches of an abstract syntax tree; **rune-stick** — carved wood for writing magical symbols. Code as data, data as runes.
+from Old Norse *tein* (teinn): **branch** — like the branches of an abstract syntax tree; **rune-stick** — carved wood for writing magical symbols. code as data, data as runes.
 
-**Why Scheme?** Homoiconic syntax, proper tail calls, hygienic macros, minimalist elegance. **Why Chibi?** Tiny (~200kb), zero external deps, full r7rs-small, designed for embedding.
+**why Scheme?** homoiconic syntax, proper tail calls, hygienic macros, minimalist elegance. **why Chibi?** tiny (~200kb), zero external deps, full R7RS-small, designed for embedding.
 
-**Why tein?** Because embedding Scheme in Rust shouldn't require wrestling with raw FFI.
+**why tein?** because embedding Scheme in Rust shouldn't require wrestling with raw FFI. and because a language that can carry intent deserves a host that can carry it faithfully.
 
 ---
 
