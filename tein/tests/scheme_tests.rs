@@ -40,6 +40,21 @@ fn test_scheme_reader_macro() {
 }
 
 #[test]
+fn test_scheme_control_flow() {
+    run_scheme_test(include_str!("scheme/control_flow.scm"));
+}
+
+#[test]
+fn test_scheme_binding_forms() {
+    run_scheme_test(include_str!("scheme/binding_forms.scm"));
+}
+
+#[test]
+fn test_scheme_tail_calls() {
+    run_scheme_test(include_str!("scheme/tail_calls.scm"));
+}
+
+#[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
     use tein::sandbox::*;
