@@ -1,15 +1,19 @@
 //! proc macros for tein scheme interpreter
 //!
-//! provides `#[scheme_fn]` for ergonomic foreign function definition.
+//! provides `#[tein_fn]` and `#[tein_module]` for ergonomic foreign function
+//! and module definition. `#[scheme_fn]` is a deprecated alias for `#[tein_fn]`.
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 
-/// attribute macro for defining scheme-callable foreign functions
+/// attribute macro for defining scheme-callable foreign functions.
 ///
-/// transforms a regular rust function into one that chibi-scheme can call,
-/// with automatic argument extraction and return value conversion.
+/// generates an `unsafe extern "C"` wrapper named `__tein_{fn_name}` that
+/// handles argument extraction, type conversion, and panic safety.
+///
+/// works standalone (register via `ctx.define_fn_variadic`) or inside a
+/// `#[tein_module]` block (the module macro handles registration).
 ///
 /// # supported argument types
 ///
@@ -18,20 +22,40 @@ use syn::{FnArg, ItemFn, Pat, ReturnType, Type, parse_macro_input};
 /// - `String` — scheme string
 /// - `bool` — scheme boolean
 ///
+/// <!-- extensibility: add a branch in gen_arg_extraction() for new types -->
+///
 /// # supported return types
 ///
 /// - `i64`, `f64`, `String`, `bool` — auto-converted to scheme
 /// - `Result<T, E>` where T is a supported type — Err becomes scheme exception
 /// - `()` — returns scheme void
 ///
+/// <!-- extensibility: add a branch in gen_return_conversion() for new types -->
+///
 /// # examples
 ///
 /// ```ignore
-/// #[scheme_fn]
-/// fn add(a: i64, b: i64) -> i64 {
-///     a + b
-/// }
+/// use tein::tein_fn;
+///
+/// #[tein_fn]
+/// fn add(a: i64, b: i64) -> i64 { a + b }
+///
+/// // register manually:
+/// ctx.define_fn_variadic("add", __tein_add)?;
 /// ```
+#[proc_macro_attribute]
+pub fn tein_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+    match generate_scheme_fn(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// deprecated alias for `#[tein_fn]`.
+///
+/// use `#[tein_fn]` instead. this alias will be removed in a future release.
+#[deprecated(note = "use #[tein_fn] instead")]
 #[proc_macro_attribute]
 pub fn scheme_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
