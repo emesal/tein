@@ -25,7 +25,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
 
-use std::os::raw::{c_char, c_int, c_long, c_uchar, c_ulong, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uchar, c_ulong, c_uint, c_void};
 
 // opaque types from chibi
 pub type sexp = *mut c_void;
@@ -211,6 +211,10 @@ unsafe extern "C" {
     pub fn tein_macro_expand_hook_set(ctx: sexp, proc: sexp);
     pub fn tein_macro_expand_hook_get() -> sexp;
     pub fn tein_macro_expand_hook_clear(ctx: sexp);
+
+    // runtime VFS registration (tein_shim.c dynamic VFS table)
+    pub fn tein_vfs_register(key: *const c_char, content: *const c_char, length: c_uint);
+    pub fn tein_vfs_clear_dynamic();
 }
 
 // convenience wrappers that call our shim layer
