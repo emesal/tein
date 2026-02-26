@@ -417,3 +417,107 @@ ctx.set_macro_expand_hook(&hook)?;
 - Return value replaces the expansion — returning the expanded form unchanged is a no-op observation
 - Recursion guard prevents infinite loops when the hook itself uses macros
 - Hook cleared on `Context::drop()`
+
+---
+
+## Scheme environment quirks
+
+Findings from comprehensive r7rs test coverage (tasks 7–16 of the scheme test coverage plan).
+These apply to `Context::new_standard()` and inform how to write `.scm` test files.
+
+### Import requirements
+
+Procedures available **without any import** (loaded by init-7.scm into the standard toplevel):
+
+- control flow: `cond`, `case`, `and`, `or`, `do`, `when`, `unless`
+- binding: `let`, `let*`, `letrec`, `letrec*`, named `let`
+- continuations: `dynamic-wind`, `call/cc`, `call-with-current-continuation`, `values`,
+  `call-with-values`
+- exceptions: `with-exception-handler`, `raise`, `raise-continuable`
+- syntax: `define-syntax`, `syntax-rules`, `let-syntax`, `letrec-syntax`, `quasiquote`
+- eval: `eval`, `interaction-environment`, `scheme-report-environment`
+
+Require **`(import (scheme base))`**:
+
+- `when`, `unless` (also in init-7, but `(scheme base)` version recommended for consistency)
+- `define-values`, `guard`, `error-object?`, `error-object-message`, `error-object-irritants`
+- `floor/`, `truncate/`
+- `define-record-type` — syntax is present without import but accessor/mutator generation
+  is broken without `(import (scheme base))` (chibi compilation environment issue)
+- bytevector API: `bytevector`, `make-bytevector`, `bytevector-u8-ref`, `bytevector-u8-set!`,
+  `bytevector-length`, `bytevector-copy`, `bytevector-append`, `utf8->string`, `string->utf8`
+
+Require other imports:
+
+- `(import (scheme inexact))` — `finite?`, `infinite?`, `nan?`
+- `(import (scheme lazy))` — `delay`, `force`, `promise?`, `make-promise`
+- `(import (scheme case-lambda))` — `case-lambda`
+- `(scheme eval)` module not available — use `eval` etc. directly (no import needed)
+
+### call/cc re-entry and top-level defines
+
+Calling a saved continuation from a separate `ctx.evaluate()` call does not re-enter (C stack
+boundary). Within a single evaluate call, re-entry also fails when mutable state is in
+top-level `define`s — chibi's batch-compiled toplevel re-executes from the continuation point
+but define bindings reset. Keep mutable state in `let` scope:
+
+```scheme
+;; works:
+(let ((k #f) (n 0))
+  (call/cc (lambda (c) (set! k c)))
+  (set! n (+ n 1))
+  (if (< n 3) (k 'ignored) n))  ; => 3
+
+;; does NOT work (returns 1, not 3):
+(define saved-k #f)
+(define counter 0)
+(call/cc (lambda (k) (set! saved-k k)))
+(set! counter (+ counter 1))
+(if (< counter 3) (saved-k #f) counter)
+```
+
+### define-values in single-batch evaluate
+
+`define-values` introducing toplevel bindings mid-batch can corrupt subsequent expression
+evaluation in the same `evaluate()` call. Use `call-with-values` instead:
+
+```scheme
+;; instead of:
+(define-values (q r) (floor/ 13 4))
+(test-equal "q" 3 q)
+
+;; use:
+(call-with-values (lambda () (floor/ 13 4))
+  (lambda (q r) (test-equal "q" 3 q)))
+```
+
+### let binding order
+
+`let` bindings are evaluated in unspecified order. For sequential side-effectful operations
+(e.g. multiple `read` calls on a port), use `let*`.
+
+### raise-continuable return value
+
+The handler's return value flows back to the `raise-continuable` call site:
+`(+ 1 (raise-continuable x))` with a handler returning 99 yields **100** (not 99).
+
+### stream-cons must be a macro
+
+`(define (stream-cons h t) (cons h (delay t)))` evaluates `t` eagerly. Use `define-syntax`:
+
+```scheme
+(define-syntax stream-cons
+  (syntax-rules () ((stream-cons h t) (cons h (delay t)))))
+```
+
+### (tein foreign) import in standard env
+
+`lib/tein/foreign.scm` uses `fixnum?` which is available in the standard context toplevel
+(chibi builtin) but is not exported by `(scheme base)`. Since `foreign.sld` only imports
+`(scheme base)`, `(import (tein foreign))` fails in standard env with "undefined variable:
+fixnum?". The pure-scheme predicates (`foreign?`, `foreign-type`, `foreign-handle-id`) can
+be used inline with `integer?` replacing `fixnum?`.
+
+### condition/report-string
+
+`condition/report-string` does not exist. Use `error-object-message` instead.

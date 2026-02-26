@@ -108,16 +108,8 @@ const CLIB_ENTRIES: &[(&str, &str, &str)] = &[
         "/vfs/lib/srfi/151/bit",
     ),
     // tein native-backed modules (reader dispatch + macro hook)
-    (
-        "lib/tein/reader.c",
-        "tein_reader",
-        "/vfs/lib/tein/reader",
-    ),
-    (
-        "lib/tein/macro.c",
-        "tein_macro",
-        "/vfs/lib/tein/macro",
-    ),
+    ("lib/tein/reader.c", "tein_reader", "/vfs/lib/tein/reader"),
+    ("lib/tein/macro.c", "tein_macro", "/vfs/lib/tein/macro"),
 ];
 
 /// fetch or update the chibi-scheme fork into `target/chibi-scheme/`.

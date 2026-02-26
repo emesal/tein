@@ -378,8 +378,6 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
-
-
 /// The 4 file-opening primitives we wrap with policy checks.
 #[derive(Clone, Copy)]
 #[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names

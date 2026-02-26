@@ -18,17 +18,17 @@
 - [x] Task 4: `closures.scm` — DONE (commit 73ab72b)
 - [x] Task 5: `continuations.scm` — DONE (commit 73ab72b)
 - [x] Task 6: `error_handling.scm` — DONE (commit 73ab72b)
-- [ ] Task 7: `records.scm`
-- [ ] Task 8: `bytevectors.scm`
-- [ ] Task 9: `io.scm`
-- [ ] Task 10: `macros.scm`
-- [ ] Task 11: `quasiquote.scm`
-- [ ] Task 12: `case_lambda.scm`
-- [ ] Task 13: `lazy.scm`
-- [ ] Task 14: `numbers_extended.scm`
-- [ ] Task 15: `scheme_eval.scm`
-- [ ] Task 16: `tein_foreign.scm`
-- [ ] Task 17: Run full test suite + document findings
+- [x] Task 7: `records.scm` — DONE
+- [x] Task 8: `bytevectors.scm` — DONE
+- [x] Task 9: `io.scm` — DONE
+- [x] Task 10: `macros.scm` — DONE
+- [x] Task 11: `quasiquote.scm` — DONE
+- [x] Task 12: `case_lambda.scm` — DONE
+- [x] Task 13: `lazy.scm` — DONE
+- [x] Task 14: `numbers_extended.scm` — DONE
+- [x] Task 15: `scheme_eval.scm` — DONE
+- [x] Task 16: `tein_foreign.scm` — DONE
+- [x] Task 17: Run full test suite + document findings — DONE
 
 ---
 
@@ -57,12 +57,16 @@ A plain `(import (scheme base))` at the top of the file fixes this (produces har
 **Available without any import (defined in init-7.scm):**
 `cond`, `case`, `and`, `or`, `do`, `let`, `let*`, `letrec`, `letrec*`, `named let`,
 `dynamic-wind`, `call/cc`, `call-with-current-continuation`, `values`, `call-with-values`,
-`with-exception-handler`, `raise`, `raise-continuable`, `define-record-type`,
-`define-syntax`, `syntax-rules`, `let-syntax`, `letrec-syntax`, `quasiquote`
+`with-exception-handler`, `raise`, `raise-continuable`,
+`define-syntax`, `syntax-rules`, `let-syntax`, `letrec-syntax`, `quasiquote`,
+`eval`, `interaction-environment`, `scheme-report-environment`
 
 **Require `(import (scheme base))`:**
 `when`, `unless`, `define-values`, `guard`, `error-object?`, `error-object-message`,
-`error-object-irritants`, `floor/`, `truncate/`
+`error-object-irritants`, `floor/`, `truncate/`,
+`define-record-type` (syntax present but accessor/mutator generation broken without import),
+`bytevector`, `make-bytevector`, `bytevector-u8-ref`, `bytevector-u8-set!`,
+`bytevector-length`, `bytevector-copy`, `bytevector-append`, `utf8->string`, `string->utf8`
 
 **Require other imports as originally planned:**
 - `(import (scheme inexact))` — `finite?`, `infinite?`, `nan?`
@@ -77,6 +81,52 @@ A plain `(import (scheme base))` at the top of the file fixes this (produces har
 **`raise-continuable` expected value**: handler return flows back to the raise site.
 `(+ 1 (raise-continuable x))` with a handler returning 99 yields **100** (not 99).
 The original plan had the wrong expected value.
+
+**`define-record-type` requires `(import (scheme base))`**: despite being listed in init-7,
+the form does not correctly create accessor and mutator bindings in `new_standard()` without
+an explicit `(import (scheme base))`. The toplevel syntax is present but the macro expansion
+that registers the generated names only works after the import. Add `(import (scheme base))`
+at the top of any `.scm` file using `define-record-type`.
+
+**`bytevector` constructor requires `(import (scheme base))`**: same issue — `bytevector`,
+`make-bytevector`, and related procedures are not available in the toplevel without the import.
+
+**`let` binding order is unspecified**: chibi evaluates `let` bindings in unspecified order.
+For sequential side-effectful operations (e.g. multiple `read` calls on a port), use `let*`
+to guarantee left-to-right evaluation order.
+
+**`define-values` in a single-batch `evaluate()` causes later assertions to misbehave**:
+when chibi compiles an entire source file as one batch, `define-values` introducing toplevel
+bindings mid-batch can corrupt subsequent expression evaluation (observed as `test-false`
+reporting "got true" on an expression that returns `#f` in isolation). **Fix:** replace
+`define-values` with `call-with-values` + lambda to keep bindings lexically scoped:
+```scheme
+;; instead of:
+(define-values (q r) (floor/ 13 4))
+(test-equal "q" 3 q)
+;; use:
+(call-with-values (lambda () (floor/ 13 4))
+  (lambda (q r) (test-equal "q" 3 q)))
+```
+
+**`(scheme lazy)` stream-cons must be a macro**: `(define (stream-cons h t) (cons h (delay t)))`
+evaluates `t` eagerly before `delay` sees it. use `define-syntax` to delay evaluation:
+```scheme
+(define-syntax stream-cons
+  (syntax-rules () ((stream-cons h t) (cons h (delay t)))))
+```
+
+**`(scheme eval)` module not available**: the chibi build used by tein does not expose
+`(scheme eval)` as an importable module. however, `eval`, `interaction-environment`, and
+`scheme-report-environment` are available directly in the standard env without any import.
+
+**`(tein foreign)` module fails to import in standard env**: `foreign.scm` uses `fixnum?`
+which is available in the standard context toplevel (chibi builtin) but is NOT exported by
+`(scheme base)`. since `foreign.sld` only imports `(scheme base)`, the module's own
+compilation env lacks `fixnum?`. workaround: inline the predicate definitions using
+`integer?` instead of `fixnum?`, or test the tagged-list protocol directly without the import.
+(this is a bug in `lib/tein/foreign.sld` in the chibi fork — should add `(import (chibi))`
+or replace `fixnum?` with `integer?` in `foreign.scm`).
 
 **call/cc re-entry with top-level defines**: calling a saved continuation from a separate
 `ctx.evaluate()` call does not re-enter (C stack boundary). Within a single evaluate call,

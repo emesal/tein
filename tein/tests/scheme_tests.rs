@@ -9,7 +9,8 @@ use tein::Context;
 /// run a scheme test file in a fresh standard context with `(tein test)` loaded.
 fn run_scheme_test(source: &str) {
     let ctx = Context::new_standard().expect("context");
-    ctx.evaluate("(import (tein test))").expect("import tein test");
+    ctx.evaluate("(import (tein test))")
+        .expect("import tein test");
     ctx.evaluate(source).expect("scheme test failed");
 }
 
@@ -70,6 +71,56 @@ fn test_scheme_error_handling() {
 }
 
 #[test]
+fn test_scheme_records() {
+    run_scheme_test(include_str!("scheme/records.scm"));
+}
+
+#[test]
+fn test_scheme_bytevectors() {
+    run_scheme_test(include_str!("scheme/bytevectors.scm"));
+}
+
+#[test]
+fn test_scheme_io() {
+    run_scheme_test(include_str!("scheme/io.scm"));
+}
+
+#[test]
+fn test_scheme_macros() {
+    run_scheme_test(include_str!("scheme/macros.scm"));
+}
+
+#[test]
+fn test_scheme_quasiquote() {
+    run_scheme_test(include_str!("scheme/quasiquote.scm"));
+}
+
+#[test]
+fn test_scheme_case_lambda() {
+    run_scheme_test(include_str!("scheme/case_lambda.scm"));
+}
+
+#[test]
+fn test_scheme_lazy() {
+    run_scheme_test(include_str!("scheme/lazy.scm"));
+}
+
+#[test]
+fn test_scheme_numbers_extended() {
+    run_scheme_test(include_str!("scheme/numbers_extended.scm"));
+}
+
+#[test]
+fn test_scheme_scheme_eval() {
+    run_scheme_test(include_str!("scheme/scheme_eval.scm"));
+}
+
+#[test]
+fn test_scheme_tein_foreign() {
+    run_scheme_test(include_str!("scheme/tein_foreign.scm"));
+}
+
+#[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
     use tein::sandbox::*;
@@ -83,15 +134,26 @@ fn test_scheme_reader_macro_sandbox() {
         .preset(&MUTATION)
         .preset(&EXCEPTIONS)
         .allow(&[
-            "import", "define", "define-syntax", "syntax-rules",
-            "set!", "if", "let", "lambda", "begin", "quote",
+            "import",
+            "define",
+            "define-syntax",
+            "syntax-rules",
+            "set!",
+            "if",
+            "let",
+            "lambda",
+            "begin",
+            "quote",
         ])
         .step_limit(5_000_000)
         .build()
         .expect("sandboxed context");
-    ctx.evaluate("(import (tein test))").expect("import tein test");
-    ctx.evaluate("(import (tein reader))").expect("import tein reader");
-    ctx.evaluate("(import (tein macro))").expect("import tein macro");
+    ctx.evaluate("(import (tein test))")
+        .expect("import tein test");
+    ctx.evaluate("(import (tein reader))")
+        .expect("import tein reader");
+    ctx.evaluate("(import (tein macro))")
+        .expect("import tein macro");
     // simplified reader/macro test for sandbox — avoids standard library
     // fns like `member` that aren't in the primitive presets
     ctx.evaluate(
