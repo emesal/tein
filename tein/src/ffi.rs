@@ -11,6 +11,13 @@
 //! - String pointers (`*const c_char`) must be valid null-terminated C strings
 //! - Calling functions on invalid or destroyed sexp values is undefined behavior
 //! - The caller must ensure proper memory management across the FFI boundary
+//!
+//! # Intentionally omitted
+//!
+//! `sexp_register_type` / `sexp_register_simple_type` are NOT exposed here.
+//! chibi's C-level type registration ties into the GC finaliser system which
+//! has known bugs (M19-M21 in chibi-scheme-review.md). tein's `ForeignType`
+//! protocol stores objects rust-side, avoiding these issues entirely.
 
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -129,7 +136,7 @@ unsafe extern "C" {
         num_args: c_int,
         flags: c_int,
         fname: *const c_char,
-        f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
+        f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t, sexp) -> sexp>,
     ) -> sexp;
 
     // interning symbols
@@ -193,11 +200,11 @@ unsafe extern "C" {
     pub fn tein_make_custom_output_port(ctx: sexp, write_proc: sexp) -> sexp;
 
     // reader dispatch table (# syntax extensions)
-    pub fn tein_reader_dispatch_set(c: c_int, proc: sexp) -> c_int;
-    pub fn tein_reader_dispatch_unset(c: c_int) -> c_int;
+    pub fn tein_reader_dispatch_set(ctx: sexp, c: c_int, proc: sexp) -> c_int;
+    pub fn tein_reader_dispatch_unset(ctx: sexp, c: c_int) -> c_int;
     pub fn tein_reader_dispatch_get(c: c_int) -> sexp;
     pub fn tein_reader_dispatch_chars(ctx: sexp) -> sexp;
-    pub fn tein_reader_dispatch_clear();
+    pub fn tein_reader_dispatch_clear(ctx: sexp);
     pub fn tein_reader_char_is_reserved(c: c_int) -> c_int;
 
     // macro expansion hook
@@ -427,7 +434,11 @@ pub unsafe fn get_null() -> sexp {
 }
 
 // foreign function registration (procedure-wrapped, supports variadic)
-/// flag indicating a variadic foreign function (rest-args)
+/// Flag indicating a variadic foreign function (rest-args).
+///
+/// Note: C defines this as `sexp_uint_t` (unsigned) but we use `c_int` (signed)
+/// here. The value 1 is safe for both, and the `flags` field is passed through
+/// `tein_sexp_define_foreign_proc` which takes `int`.
 pub const SEXP_PROC_VARIADIC: c_int = 1;
 
 #[inline]
@@ -438,12 +449,19 @@ pub unsafe fn sexp_define_foreign_proc(
     num_args: c_int,
     flags: c_int,
     fname: *const c_char,
-    f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t) -> sexp>,
+    f: Option<unsafe extern "C" fn(sexp, sexp, sexp_sint_t, sexp) -> sexp>,
 ) -> sexp {
     unsafe { tein_sexp_define_foreign_proc(ctx, env, name, num_args, flags, fname, f) }
 }
 
-// error construction (policy violations)
+/// Construct a Scheme user exception with the given message.
+///
+/// `msg` must be a valid nul-terminated C string pointer. `len` is passed
+/// through for API symmetry but is unused by the C implementation (which
+/// treats `msg` as a C string). `CString::new(s).unwrap_or_default()` is
+/// safe to use at all call sites because `tein_make_error` ignores `len`
+/// and reads `msg` as a nul-terminated string; the empty-string fallback
+/// just produces a Scheme exception with an empty message.
 #[inline]
 pub unsafe fn make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp {
     unsafe { tein_make_error(ctx, msg, len) }
@@ -664,18 +682,20 @@ pub unsafe fn env_copy_named(
 
 /// register a reader dispatch handler for `#c` syntax.
 ///
-/// returns 0 on success, -1 if the character is reserved, -2 if out of range.
+/// the handler proc is GC-preserved in the dispatch table and released
+/// when overwritten, unset, or cleared. returns 0 on success, -1 if the
+/// character is reserved, -2 if out of range.
 #[inline]
-pub unsafe fn reader_dispatch_set(c: c_int, proc: sexp) -> c_int {
-    unsafe { tein_reader_dispatch_set(c, proc) }
+pub unsafe fn reader_dispatch_set(ctx: sexp, c: c_int, proc: sexp) -> c_int {
+    unsafe { tein_reader_dispatch_set(ctx, c, proc) }
 }
 
 /// remove a reader dispatch handler for `#c` syntax.
 ///
-/// returns 0 on success, -2 if out of range.
+/// releases the GC-preserved handler. returns 0 on success, -2 if out of range.
 #[inline]
-pub unsafe fn reader_dispatch_unset(c: c_int) -> c_int {
-    unsafe { tein_reader_dispatch_unset(c) }
+pub unsafe fn reader_dispatch_unset(ctx: sexp, c: c_int) -> c_int {
+    unsafe { tein_reader_dispatch_unset(ctx, c) }
 }
 
 /// get the reader dispatch handler for `#c`, or SEXP_FALSE if none.
@@ -690,10 +710,10 @@ pub unsafe fn reader_dispatch_chars(ctx: sexp) -> sexp {
     unsafe { tein_reader_dispatch_chars(ctx) }
 }
 
-/// clear all reader dispatch handlers.
+/// clear all reader dispatch handlers, releasing GC-preserved procs.
 #[inline]
-pub unsafe fn reader_dispatch_clear() {
-    unsafe { tein_reader_dispatch_clear() }
+pub unsafe fn reader_dispatch_clear(ctx: sexp) {
+    unsafe { tein_reader_dispatch_clear(ctx) }
 }
 
 /// check if a character is reserved by r7rs and cannot be dispatched.

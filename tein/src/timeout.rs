@@ -14,7 +14,7 @@
 //!   fresh modes, no built-in timeout
 //! - **[`crate::Context`]** — single-threaded, no timeout, maximum control
 //!
-//! # Example
+//! # examples
 //!
 //! ```
 //! use tein::{Context, Value, Error};
@@ -104,30 +104,37 @@ impl ContextBuilder {
             // signal successful init
             let _ = resp_tx.send(Response::Value(Ok(Value::Unspecified)));
 
-            // message loop
-            for req in req_rx {
-                match req {
+            // message loop — catch_unwind guards against panics in registered
+            // foreign fns. on panic, we send InitError so the caller gets an
+            // error on recv_timeout rather than blocking until the deadline.
+            'outer: for req in req_rx {
+                // TimeoutContext doesn't support reset
+                if matches!(req, Request::Reset | Request::Shutdown) {
+                    break;
+                }
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match req {
                     Request::Evaluate(code) => {
                         let result = ctx.evaluate(&code);
-                        if resp_tx.send(Response::Value(result)).is_err() {
-                            break;
-                        }
+                        let _ = resp_tx.send(Response::Value(result));
                     }
                     Request::Call(proc, args) => {
                         let args: Vec<Value> = args.into_iter().map(|s| s.0).collect();
                         let result = ctx.call(&proc.0, &args);
-                        if resp_tx.send(Response::Value(result)).is_err() {
-                            break;
-                        }
+                        let _ = resp_tx.send(Response::Value(result));
                     }
                     Request::DefineFnVariadic { name, f } => {
                         let result = ctx.define_fn_variadic(&name, f);
-                        if resp_tx.send(Response::Defined(result)).is_err() {
-                            break;
-                        }
+                        let _ = resp_tx.send(Response::Defined(result));
                     }
-                    // TimeoutContext doesn't support reset — treat as shutdown
-                    Request::Reset | Request::Shutdown => break,
+                    Request::Reset | Request::Shutdown => unreachable!("handled above"),
+                }));
+
+                if result.is_err() {
+                    let _ = resp_tx.send(Response::Value(Err(Error::InitError(
+                        "context thread panicked".to_string(),
+                    ))));
+                    break 'outer;
                 }
             }
         });

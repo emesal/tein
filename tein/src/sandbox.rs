@@ -87,6 +87,7 @@ use std::path::Path;
 ///
 /// Controls which paths Scheme code can read from and write to.
 /// Uses prefix matching against canonicalised paths.
+#[derive(Clone)]
 pub(crate) struct FsPolicy {
     /// allowed path prefixes for reading
     pub read_prefixes: Vec<String>,
@@ -413,4 +414,51 @@ pub(crate) const ALL_PRESETS: &[&Preset] = &[
     &CONTROL,
     &FILE_READ_SUPPORT,
     &FILE_WRITE_SUPPORT,
+];
+
+/// Primitives that are **always** stubbed out in sandboxed contexts,
+/// regardless of preset configuration.
+///
+/// These provide direct access to unrestricted environments and cannot
+/// be safely exposed in any sandboxed context. Unlike [`ALL_PRESETS`],
+/// these are never allowable — there is no preset that grants them.
+///
+/// A sandboxed scheme program holding any of these can call
+/// `(eval code (interaction-environment))` to execute arbitrary code
+/// in the full unrestricted environment, completely defeating presets.
+///
+/// Note: `compile` and `generate` are NOT listed here even though they
+/// could theoretically be misused, because chibi uses `compile` internally
+/// during macro expansion. Stubbing it breaks standard library features.
+/// `eval` + environment accessors are sufficient to close the escape hatch.
+///
+/// Note: `%meta-env`, `find-module-file`, `env-exports`, `env-parent`, `%import`
+/// are used by chibi's init-7 / meta-7 *during C-side initialisation*, not at
+/// runtime from Scheme. They are safe to stub once the sandbox env is built.
+pub(crate) const ALWAYS_STUB: &[&str] = &[
+    // environment escape — direct access to unrestricted or meta environments
+    "eval",
+    "interaction-environment",
+    "primitive-environment",
+    "scheme-report-environment",
+    "current-environment",
+    "set-current-environment!",
+    "%meta-env",
+    // environment introspection — allows mapping the env chain from scheme
+    "env-parent",
+    "env-exports",
+    // module system — filesystem module loading and path manipulation
+    "%load",
+    "%import",
+    "load-module-file",
+    "find-module-file",
+    "add-module-directory",
+    "current-module-path",
+    // process info — exposes binary path and arguments
+    "command-line",
+    // type/vm system mutation — could enable type confusion or VM side-channels
+    "register-simple-type",
+    "register-optimization!",
+    "print-vm-profile",
+    "reset-vm-profile",
 ];

@@ -1,6 +1,8 @@
 # Guide and capitalisation implementation plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+>
+> **Progress:** ALL TASKS COMPLETE. Implemented in `7c82f21` (sentence case throughout + guide.md).
 
 **Goal:** Write a newcomer-friendly guide (`docs/guide.md`) and normalise all prose to sentence case throughout the project's markdown and Rust doc comments.
 

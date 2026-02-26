@@ -14,12 +14,13 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (196 lib + 12 scheme_fn + 15 doc-tests)
+cargo test                         # all tests (207 lib + 12 scheme_fn + 24 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
 cargo fmt --check                  # format check
 cargo run --example basic          # run an example (basic|floats|ffi|debug|sandbox|foreign_types|managed)
+cargo test --features debug-chibi   # tests with chibi GC instrumentation (slower)
 cargo clean && cargo build         # nuclear option if ffi gets weird
 ```
 
@@ -46,7 +47,7 @@ src/
   thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
   port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
-vendor/chibi-scheme/
+target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
                  env_copy_named (rename-aware binding copy), error construction,
                  module import policy (tein_module_allowed, tein_module_policy_set),
@@ -62,7 +63,7 @@ vendor/chibi-scheme/
   lib/tein/reader.scm — module documentation
   lib/tein/macro.sld — (tein macro) library definition (re-exports native hook fns)
   lib/tein/macro.scm — module documentation
-build.rs       — compiles chibi + shim, generates install.h, tein_vfs_data.h, tein_clibs.c
+build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 ```
 
@@ -88,6 +89,23 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. ThreadLocalContext generalises this pattern with persistent/fresh modes. fuel counters are thread-local.
 
+## chibi safety invariants
+
+tein mitigates known chibi-scheme bugs via configuration. if any of these change, review
+`docs/plans/2026-02-25-chibi-scheme-review.md` for newly-exposed vulnerabilities.
+
+- **`SEXP_USE_DL=0`** (build.rs) — disables dlopen, image loading, runtime type registration. mitigates GC finaliser bugs, image loading overflows, NULL-self finalisers.
+- **`sexp_register_type` not exposed** (ffi.rs) — prevents C-level finaliser registration from rust side.
+- **`sexp_exceptionp` checked after every allocation** (context.rs) — prevents writing into the shared global OOM object.
+- **fuel always armed before eval** (context.rs) — bounds total operations, mitigates stack-exhaustion edge cases.
+- **bytecode never user-supplied** — chibi compiles scheme→bytecode internally; no load-bytecode API exposed.
+- **`heap_max` defaults to 128 MiB** (context.rs) — bounds heap growth, prevents memory exhaustion and strengthens heap-overflow mitigation.
+- **version parameter hardcoded to 7** (context.rs) — chibi's `init_file[128]` does `version + '0'` unchecked; version >= 10 overflows.
+- **`SEXP_G_STRICT_P` never set** — `sexp_warn` calls `exit(1)` in strict mode, bypassing all rust error handling. never enable strict mode.
+- **module path list never user-modifiable** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). safe because compiled-in defaults + VFS are never empty. never expose raw module path manipulation.
+- **`SEXP_USE_STRICT_TOPLEVEL_BINDINGS=1`** (default) — must stay enabled; without it, `analyze_bind_syntax` has a potential NULL deref.
+- **`CHIBI_MODULE_PATH` env var** — read by chibi's module resolver. our module policy gate blocks non-VFS paths at the C level so it can't escape the sandbox, but document that this env var exists.
+
 ## critical gotchas
 
 **type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0, producing garbage integer values.
@@ -96,7 +114,7 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 
 ## adding a new scheme type
 
-1. add predicate wrapper to `vendor/chibi-scheme/tein_shim.c`
+1. add predicate wrapper to `tein_shim.c` in the fork (emesal/chibi-scheme, branch emesal-tein)
 2. add extern declaration + safe wrapper in `src/ffi.rs`
 3. add variant to `Value` enum in `src/value.rs`
 4. add extraction in `Value::from_raw()` (respect type check ordering!)
