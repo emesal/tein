@@ -20,6 +20,7 @@ cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
 cargo fmt --check                  # format check
 cargo run --example basic          # run an example (basic|floats|ffi|debug|sandbox|foreign_types|managed)
+cargo test --features debug-chibi   # tests with chibi GC instrumentation (slower)
 cargo clean && cargo build         # nuclear option if ffi gets weird
 ```
 

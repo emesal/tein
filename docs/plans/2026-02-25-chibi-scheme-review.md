@@ -544,7 +544,7 @@ from `SEXP_USE_DL`. tein sets `SEXP_USE_DL=0`, so the code is compiled out.
 
 ## config recommendations (features.h)
 
-### enable in debug builds — **TODO**
+### enable in debug builds — **done**
 
 ```c
 -DSEXP_USE_HEADER_MAGIC=1      // lightweight GC corruption detector (+4 bytes/obj)

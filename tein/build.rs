@@ -206,6 +206,15 @@ fn main() {
         .flag("-DSEXP_USE_STATIC_LIBS_NO_INCLUDE=1") // we define sexp_static_libraries ourselves
         .warnings(false); // chibi may have warnings
 
+    // debug-chibi feature: GC instrumentation for diagnosing heap corruption.
+    // HEADER_MAGIC adds a 4-byte sentinel to every sexp — caught on GC traversal.
+    // SAFE_GC_MARK validates pointer bounds before marking — catches wild pointers.
+    #[cfg(feature = "debug-chibi")]
+    {
+        build.flag("-DSEXP_USE_HEADER_MAGIC=1");
+        build.flag("-DSEXP_USE_SAFE_GC_MARK=1");
+    }
+
     // include paths for C files referenced by the static library table.
     // ast.c uses `#include <chibi/eval.h>` (covered by include_dir).
     // io/io.c includes port.c via relative path.
