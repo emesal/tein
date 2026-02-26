@@ -65,6 +65,15 @@ pub use value::Value;
 /// Re-export the `#[tein_fn]` proc macro for defining scheme-callable functions.
 pub use tein_macros::tein_fn;
 
+/// Re-export the `#[tein_module]` proc macro for defining scheme modules.
+pub use tein_macros::tein_module;
+
+/// Re-export the `#[tein_type]` proc macro for marking structs in a `#[tein_module]`.
+pub use tein_macros::tein_type;
+
+/// Re-export the `#[tein_methods]` proc macro for exposing impl blocks in a `#[tein_module]`.
+pub use tein_macros::tein_methods;
+
 /// Deprecated: use [`tein_fn`] instead.
 #[allow(deprecated)]
 pub use tein_macros::scheme_fn;
