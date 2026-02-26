@@ -85,8 +85,9 @@ tein/
     sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
     vm.c         — 2-line patch: fuel budget consumption at timeslice boundary
     lib/tein/foreign.sld/.scm — (tein foreign) predicates
-    lib/tein/reader.sld/.scm  — (tein reader) dispatch fns
-    lib/tein/macro.sld/.scm   — (tein macro) expansion hook fns
+    lib/tein/reader.sld/.scm/.c — (tein reader) C-backed dispatch fns via static lib init
+    lib/tein/macro.sld/.scm/.c  — (tein macro) C-backed expansion hook fns via static lib init
+    lib/tein/test.sld/.scm     — (tein test) pure-scheme assertion framework
   build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h,
                    tein_clibs.c into OUT_DIR
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs,
@@ -208,7 +209,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (196 lib + 12 scheme_fn + 21 doc)
+cargo test                         # all tests (208 lib + 12 scheme_fn + 6 scheme + 24 doc)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
@@ -358,8 +359,7 @@ Extends Chibi's `#` reader syntax with user-defined handlers via a C-level dispa
 
 - **tein_reader_dispatch[128]** (`tein_shim.c`): thread-local table mapping ASCII chars → Scheme procs
 - **sexp.c patch**: reader checks dispatch table before hardcoded `#` switch — `tein_reader_dispatch_get(c1)` → `sexp_apply1` if handler found
-- **register_reader_protocol** (`context.rs`): registers `set-reader!`/`unset-reader!`/`reader-dispatch-chars` as native fns, always called in `build()` for standard env contexts
-- **(tein reader)** VFS module: re-exports native fns for idiomatic `(import (tein reader))` usage
+- **(tein reader)** C-backed module: `reader.c` implements `sexp_init_library` which registers `set-reader!`/`unset-reader!`/`reader-dispatch-chars` as native fns into the module env when `(import (tein reader))` triggers the static library init via `include-shared`
 
 ### Usage
 
@@ -371,7 +371,8 @@ assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
 ```
 
 ```scheme
-;; from scheme (fns available directly in standard env)
+;; from scheme (requires import)
+(import (tein reader))
 (set-reader! #\j (lambda (port) (list 'json (read port))))
 ;; #j(1 2 3) → (json (1 2 3))
 ```
@@ -392,7 +393,7 @@ Intercepts Chibi's macro expansion at analysis time — replace-and-reanalyse se
 - **tein_macro_expand_hook** (`tein_shim.c`): thread-local slot for a Scheme proc, with GC preservation
 - **tein_macro_expand_hook_active** (`tein_shim.c`): thread-local recursion guard (prevents hook from triggering on its own macro usage)
 - **eval.c patch D**: in `analyze_macro_once()`, after macro expansion, checks hook → if set and not active, calls `sexp_apply(ctx, hook, (name unexpanded expanded env))` → hook return value replaces expanded form → `goto loop` reanalyses
-- **(tein macro)** VFS module: re-exports `set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook`
+- **(tein macro)** C-backed module: `macro.c` implements `sexp_init_library` which registers `set-macro-expand-hook!`/`unset-macro-expand-hook!`/`macro-expand-hook` as native fns into the module env when `(import (tein macro))` triggers the static library init via `include-shared`
 
 ### Usage
 

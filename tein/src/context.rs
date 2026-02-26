@@ -378,191 +378,7 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
-/// Extern "C" wrapper for `(tein-reader-set! char proc)`.
-///
-/// Registers a reader dispatch handler for `#char` syntax. Rejects reserved
-/// R7RS characters with a descriptive error.
-unsafe extern "C" fn reader_set_wrapper(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        // args is a list: (char proc)
-        if ffi::sexp_nullp(args) != 0 {
-            let msg = "set-reader!: expected (set-reader! char proc)";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let ch_sexp = ffi::sexp_car(args);
-        let rest = ffi::sexp_cdr(args);
-        if ffi::sexp_nullp(rest) != 0 {
-            let msg = "set-reader!: expected (set-reader! char proc)";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let proc_sexp = ffi::sexp_car(rest);
 
-        if ffi::sexp_charp(ch_sexp) == 0 {
-            let msg = "set-reader!: first argument must be a character";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let c = ffi::sexp_unbox_character(ch_sexp);
-        let result = ffi::reader_dispatch_set(ctx, c, proc_sexp);
-        match result {
-            0 => ffi::get_void(),
-            -1 => {
-                let ch = char::from(c as u8);
-                let msg = format!(
-                    "reader dispatch #{} is reserved by r7rs and cannot be overridden",
-                    ch
-                );
-                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
-            }
-            _ => {
-                let msg = "set-reader!: character out of ASCII range";
-                let c_msg = CString::new(msg).unwrap_or_default();
-                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
-            }
-        }
-    }
-}
-
-/// Extern "C" wrapper for `(tein-reader-unset! char)`.
-///
-/// Removes a reader dispatch handler for `#char` syntax.
-unsafe extern "C" fn reader_unset_wrapper(
-    _ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        if ffi::sexp_nullp(args) != 0 {
-            return ffi::get_void();
-        }
-        let ch_sexp = ffi::sexp_car(args);
-        if ffi::sexp_charp(ch_sexp) == 0 {
-            return ffi::get_void();
-        }
-        let c = ffi::sexp_unbox_character(ch_sexp);
-        ffi::reader_dispatch_unset(_ctx, c);
-        ffi::get_void()
-    }
-}
-
-/// Extern "C" wrapper for `(tein-reader-dispatch-chars)`.
-///
-/// Returns a list of characters with active dispatch handlers.
-unsafe extern "C" fn reader_chars_wrapper(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    _args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { ffi::reader_dispatch_chars(ctx) }
-}
-
-/// Extern "C" wrapper for `(set-macro-expand-hook! proc)`.
-///
-/// Sets the thread-local macro expansion hook. The hook receives
-/// `(name unexpanded expanded env)` after each macro expansion and
-/// returns the form to use (return `expanded` unchanged for observation).
-unsafe extern "C" fn macro_expand_hook_set_wrapper(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        if ffi::sexp_nullp(args) != 0 {
-            let msg = "set-macro-expand-hook!: expected a procedure argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let proc = ffi::sexp_car(args);
-        if ffi::sexp_procedurep(proc) == 0 {
-            let msg = "set-macro-expand-hook!: argument must be a procedure";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        ffi::macro_expand_hook_set(ctx, proc);
-        ffi::get_void()
-    }
-}
-
-/// Extern "C" wrapper for `(unset-macro-expand-hook!)`.
-///
-/// Clears the thread-local macro expansion hook.
-unsafe extern "C" fn macro_expand_hook_unset_wrapper(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    _args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        ffi::macro_expand_hook_clear(ctx);
-        ffi::get_void()
-    }
-}
-
-/// Extern "C" wrapper for `(macro-expand-hook)`.
-///
-/// Returns the current hook procedure or `#f` if none is set.
-unsafe extern "C" fn macro_expand_hook_get_wrapper(
-    _ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    _args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { ffi::macro_expand_hook_get() }
-}
-
-/// Register protocol native fns into the context's current env.
-///
-/// Called during `build()` for standard env contexts, *before* sandbox
-/// restriction. Defines native functions that back the `(tein reader)`
-/// and `(tein macro)` VFS modules. By registering into the source env
-/// before sandboxing, these are available via `(import ...)` even in
-/// restricted contexts.
-unsafe fn register_protocol_fns(ctx: ffi::sexp) {
-    let protocol_fns: &[(
-        &str,
-        unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
-    )] = &[
-        // reader dispatch protocol
-        ("set-reader!", reader_set_wrapper),
-        ("unset-reader!", reader_unset_wrapper),
-        ("reader-dispatch-chars", reader_chars_wrapper),
-        // macro expansion hook protocol
-        ("set-macro-expand-hook!", macro_expand_hook_set_wrapper),
-        ("unset-macro-expand-hook!", macro_expand_hook_unset_wrapper),
-        ("macro-expand-hook", macro_expand_hook_get_wrapper),
-    ];
-    unsafe {
-        for (name, f) in protocol_fns {
-            // re-fetch env each iteration — sexp_define_foreign_proc allocates
-            // (interning symbols, creating procedures and env cells), which can
-            // trigger GC. since env is not GC-rooted here, a stale pointer
-            // would corrupt the binding list.
-            let env = ffi::sexp_context_env(ctx);
-            let c_name = CString::new(*name).unwrap();
-            ffi::sexp_define_foreign_proc(
-                ctx,
-                env,
-                c_name.as_ptr(),
-                0,
-                ffi::SEXP_PROC_VARIADIC,
-                c_name.as_ptr(),
-                Some(*f),
-            );
-        }
-    }
-}
 
 /// The 4 file-opening primitives we wrap with policy checks.
 #[derive(Clone, Copy)]
@@ -951,15 +767,6 @@ impl ContextBuilder {
                         "failed to load standard ports".to_string(),
                     ));
                 }
-            }
-
-            // register protocol native fns into the full standard env before
-            // sandbox restriction. these are needed for (import (tein reader))
-            // and (import (tein macro)) to work — the VFS modules re-export
-            // these bindings. placed here so they exist in the source env that
-            // sandboxing copies from, rather than in the restricted env.
-            if self.standard_env {
-                register_protocol_fns(ctx);
             }
 
             // activate VFS-only module policy if both standard_env and
@@ -5094,8 +4901,7 @@ mod tests {
     #[test]
     fn test_reader_dispatch_basic() {
         let ctx = Context::new_standard().expect("context");
-        // reader dispatch fns are registered in standard env by build(),
-        // available directly or via (import (tein reader)).
+        ctx.evaluate("(import (tein reader))").expect("import");
         // handler returns a self-evaluating value (number).
         ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
             .expect("set-reader");
@@ -5106,6 +4912,7 @@ mod tests {
     #[test]
     fn test_reader_dispatch_reserved_char() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
         let result = ctx.evaluate("(set-reader! #\\t (lambda (port) 42))");
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
@@ -5118,6 +4925,7 @@ mod tests {
         // more input). use read() to inspect the raw datum — the handler
         // returns a list, which evaluate() would try to call as a procedure.
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
         ctx.evaluate("(set-reader! #\\j (lambda (port) (list 'json (read port))))")
             .expect("set");
         let port = ctx
@@ -5132,6 +4940,7 @@ mod tests {
     #[test]
     fn test_reader_dispatch_unset() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
         ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
             .expect("set");
         assert_eq!(ctx.evaluate("#j").unwrap(), Value::Integer(42));
@@ -5142,6 +4951,7 @@ mod tests {
     #[test]
     fn test_reader_dispatch_chars_introspection() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
         ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
             .expect("set j");
         ctx.evaluate("(set-reader! #\\p (lambda (port) 42))")
@@ -5156,6 +4966,7 @@ mod tests {
         // handler reads further to distinguish sub-syntax.
         // use read() to inspect raw datums.
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
         ctx.evaluate(
             "(set-reader! #\\j
                (lambda (port)
@@ -5182,9 +4993,25 @@ mod tests {
 
     #[test]
     fn test_reader_dispatch_via_import() {
-        // verify (import (tein reader)) works for sandboxed contexts
-        // that need explicit import
+        // verify (import (tein reader)) works in standard context
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein reader))").expect("import");
+        ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
+            .expect("set-reader");
+        assert_eq!(ctx.evaluate("#j").unwrap(), Value::Integer(42));
+    }
+
+    #[test]
+    fn test_reader_dispatch_via_import_sandbox() {
+        // regression test for #31: (import (tein reader)) must work in
+        // sandboxed contexts where the module is loaded via C static lib
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import", "define"])
+            .build()
+            .expect("sandboxed context");
         ctx.evaluate("(import (tein reader))").expect("import");
         ctx.evaluate("(set-reader! #\\j (lambda (port) 42))")
             .expect("set-reader");
@@ -5213,6 +5040,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_basic() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5231,6 +5059,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_observation() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5251,6 +5080,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_name_arg() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5269,6 +5099,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_transformation() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5284,6 +5115,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_reanalyze() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define double");
         ctx.evaluate("(define-syntax add1 (syntax-rules () ((add1 x) (+ x 1))))")
@@ -5304,6 +5136,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_unset() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5319,6 +5152,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_recursion_guard() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5339,6 +5173,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_error_propagation() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5359,6 +5194,7 @@ mod tests {
     #[test]
     fn test_macro_expand_hook_introspection() {
         let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         let none = ctx.evaluate("(macro-expand-hook)").expect("get");
         assert_eq!(none, Value::Boolean(false));
         ctx.evaluate(
@@ -5377,6 +5213,7 @@ mod tests {
     fn test_macro_expand_hook_cleanup_on_drop() {
         {
             let ctx = Context::new_standard().expect("context");
+            ctx.evaluate("(import (tein macro))").expect("import");
             ctx.evaluate(
                 "(set-macro-expand-hook!
                    (lambda (name unexpanded expanded env) expanded))",
@@ -5384,30 +5221,23 @@ mod tests {
             .expect("set");
         }
         let ctx2 = Context::new_standard().expect("context2");
+        ctx2.evaluate("(import (tein macro))").expect("import");
         let hook = ctx2.evaluate("(macro-expand-hook)").expect("get");
         assert_eq!(hook, Value::Boolean(false));
     }
 
     #[test]
     fn test_macro_expand_hook_sandbox() {
-        // sandboxed context with macro hook fns allowed directly.
-        // VFS module re-export doesn't work in sandboxes (see #31),
-        // so we allow the native fns via the sandbox allowlist instead.
+        // regression test for #31: (import (tein macro)) must work in
+        // sandboxed contexts via C static library init.
         use crate::sandbox::*;
         let ctx = Context::builder()
             .standard_env()
             .preset(&ARITHMETIC)
-            .allow(&[
-                "define-syntax",
-                "syntax-rules",
-                "set!",
-                "define",
-                "set-macro-expand-hook!",
-                "unset-macro-expand-hook!",
-                "macro-expand-hook",
-            ])
+            .allow(&["import", "define-syntax", "syntax-rules", "set!", "define"])
             .build()
             .expect("sandboxed context");
+        ctx.evaluate("(import (tein macro))").expect("import");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5453,8 +5283,8 @@ mod tests {
     fn test_macro_hook_infinite_loop_halts() {
         // a hook that always returns the unexpanded form causes unbounded re-analysis.
         // it must terminate with an error, not hang.
-        // requires standard_env since set-macro-expand-hook! is registered there.
         let ctx = Context::builder().standard_env().build().unwrap();
+        ctx.evaluate("(import (tein macro))").unwrap();
 
         // define the macro BEFORE registering the looping hook, so define-syntax
         // itself compiles cleanly using the real expansion.

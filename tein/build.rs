@@ -79,6 +79,9 @@ const VFS_FILES: &[&str] = &[
     // tein macro expansion hook
     "lib/tein/macro.sld",
     "lib/tein/macro.scm",
+    // tein test framework
+    "lib/tein/test.sld",
+    "lib/tein/test.scm",
 ];
 
 /// C-backed modules that need static linking.
@@ -103,6 +106,17 @@ const CLIB_ENTRIES: &[(&str, &str, &str)] = &[
         "lib/srfi/151/bit.c",
         "srfi_151_bit",
         "/vfs/lib/srfi/151/bit",
+    ),
+    // tein native-backed modules (reader dispatch + macro hook)
+    (
+        "lib/tein/reader.c",
+        "tein_reader",
+        "/vfs/lib/tein/reader",
+    ),
+    (
+        "lib/tein/macro.c",
+        "tein_macro",
+        "/vfs/lib/tein/macro",
     ),
 ];
 
@@ -232,6 +246,7 @@ fn main() {
         format!("{chibi_dir}/lib/srfi/39"),
         format!("{chibi_dir}/lib/srfi/69"),
         format!("{chibi_dir}/lib/srfi/151"),
+        format!("{chibi_dir}/lib/tein"),
     ] {
         build.include(extra_include);
     }

@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (207 lib + 12 scheme_fn + 24 doc-tests)
+cargo test                         # all tests (208 lib + 12 scheme_fn + 6 scheme + 24 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
@@ -59,12 +59,17 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
   lib/tein/foreign.sld — (tein foreign) library definition
   lib/tein/foreign.scm — pure-scheme predicates: foreign?, foreign-type, foreign-handle-id
-  lib/tein/reader.sld — (tein reader) library definition (re-exports native dispatch fns)
+  lib/tein/reader.sld — (tein reader) library definition + include-shared for C init
   lib/tein/reader.scm — module documentation
-  lib/tein/macro.sld — (tein macro) library definition (re-exports native hook fns)
+  lib/tein/reader.c   — C static library init: set-reader!, unset-reader!, reader-dispatch-chars
+  lib/tein/macro.sld — (tein macro) library definition + include-shared for C init
   lib/tein/macro.scm — module documentation
+  lib/tein/macro.c   — C static library init: set-macro-expand-hook!, unset-macro-expand-hook!, macro-expand-hook
+  lib/tein/test.sld  — (tein test) library definition
+  lib/tein/test.scm  — pure-scheme assertion framework: test-equal, test-true, test-false, test-error
 build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
+tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-level tests)
 ```
 
 **data flow**: rust code → `Context::evaluate()` → arm_fuel() → ffi.rs safe wrappers → tein_shim.c → chibi-scheme vm → tein_fuel_consume_slice() at timeslice boundary → sexp result → `Value::from_raw()` → check_fuel() → rust `Value` enum
@@ -83,9 +88,9 @@ examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_ty
 
 **custom port flow**: `ctx.open_input_port(reader)` → inserts `Box<dyn Read>` into `PortStore` → creates scheme closure `(lambda (buf start end) (tein-port-read ID buf start end))` → `ffi::make_custom_input_port(ctx, closure)` → chibi's `fopencookie` + `sexp_cookie_reader` calls closure on buffer fill → `port_read_trampoline` (extern "C") reads from `PORT_STORE_PTR` thread-local → copies bytes into scheme string buffer → returns fixnum byte count. output ports mirror via `port_write_trampoline`. `ctx.read(&port)` calls `sexp_read` for one s-expression; `ctx.evaluate_port(&port)` loops read+eval.
 
-**reader dispatch flow**: `ctx.register_reader('j', &handler)` or scheme `(set-reader! #\j handler)` → `ffi::reader_dispatch_set(c, proc)` → stores proc in thread-local `tein_reader_dispatch[128]` table. when chibi's reader encounters `#j`, patched `sexp.c` calls `tein_reader_dispatch_get(c1)` → finds handler → `sexp_apply1(ctx, handler, in)` → handler receives input port, reads further if needed, returns datum → reader returns datum to evaluator. `register_protocol_fns` registers reader + macro hook native fns in `build()` for standard env contexts. dispatch table cleared on `Context::drop()`. reserved r7rs chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden.
+**reader dispatch flow**: `ctx.register_reader('j', &handler)` or scheme `(import (tein reader)) (set-reader! #\j handler)` → `ffi::reader_dispatch_set(c, proc)` → stores proc in thread-local `tein_reader_dispatch[128]` table. when chibi's reader encounters `#j`, patched `sexp.c` calls `tein_reader_dispatch_get(c1)` → finds handler → `sexp_apply1(ctx, handler, in)` → handler receives input port, reads further if needed, returns datum → reader returns datum to evaluator. scheme-level fns are registered by the C static library init (`reader.c`) when `(import (tein reader))` loads the module via `include-shared`. dispatch table cleared on `Context::drop()`. reserved r7rs chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden.
 
-**macro expansion hook flow**: `ctx.set_macro_expand_hook(&proc)` or scheme `(set-macro-expand-hook! proc)` → `ffi::macro_expand_hook_set(ctx, proc)` → stores proc in thread-local `tein_macro_expand_hook` with GC preservation. when chibi's `analyze_macro_once()` expands a macro (patched eval.c D), checks hook → if set and not already active, sets `tein_macro_expand_hook_active` recursion guard → calls `sexp_apply(ctx, hook, (name unexpanded expanded env))` → hook return value replaces expanded form → `goto loop` reanalyses (replace-and-reanalyse semantics). native fns `set-macro-expand-hook!`, `unset-macro-expand-hook!`, `macro-expand-hook` registered via `register_protocol_fns`. hook cleared on `Context::drop()`.
+**macro expansion hook flow**: `ctx.set_macro_expand_hook(&proc)` or scheme `(import (tein macro)) (set-macro-expand-hook! proc)` → `ffi::macro_expand_hook_set(ctx, proc)` → stores proc in thread-local `tein_macro_expand_hook` with GC preservation. when chibi's `analyze_macro_once()` expands a macro (patched eval.c D), checks hook → if set and not already active, sets `tein_macro_expand_hook_active` recursion guard → calls `sexp_apply(ctx, hook, (name unexpanded expanded env))` → hook return value replaces expanded form → `goto loop` reanalyses (replace-and-reanalyse semantics). scheme-level fns are registered by the C static library init (`macro.c`) when `(import (tein macro))` loads the module via `include-shared`. hook cleared on `Context::drop()`.
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. ThreadLocalContext generalises this pattern with persistent/fresh modes. fuel counters are thread-local.
 
