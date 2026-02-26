@@ -1,7 +1,7 @@
 # `#[tein_module]` proc macro design
 
 **issue:** #40
-**status:** approved design, pending implementation plan
+**status:** implemented (feat/tein-module branch)
 **date:** 2026-02-26
 
 ## summary

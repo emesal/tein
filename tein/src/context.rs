@@ -1206,7 +1206,7 @@ impl Context {
     /// Register a foreign function as a Scheme primitive.
     ///
     /// All arguments are passed as a single Scheme list via the `args` parameter.
-    /// This is the universal registration method — use `#[scheme_fn]` for ergonomic
+    /// This is the universal registration method — use `#[tein_fn]` for ergonomic
     /// wrappers that handle argument extraction and return conversion automatically.
     ///
     /// The function receives all arguments as a single Scheme list in the `args`
@@ -1434,6 +1434,49 @@ impl Context {
                 )),
             }
         }
+    }
+
+    /// Register a virtual filesystem entry at runtime.
+    ///
+    /// `path` is the VFS-relative path, e.g. `"lib/tein/json.sld"`. The entry
+    /// becomes immediately available to chibi's module resolver via `(import ...)`.
+    /// Must be called before any scheme code imports the module.
+    ///
+    /// Entries registered here are cleared on `Context::drop()`, so each context
+    /// has its own isolated set of runtime VFS modules.
+    ///
+    /// # errors
+    ///
+    /// Returns `Error::EvalError` if `path` contains null bytes.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// # use tein::{Context, Value};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// ctx.register_vfs_module(
+    ///     "lib/tein/mymod.sld",
+    ///     "(define-library (tein mymod) (import (scheme base)) (export the-answer) (include \"mymod.scm\"))",
+    /// )?;
+    /// ctx.register_vfs_module("lib/tein/mymod.scm", "(define the-answer 42)")?;
+    /// let result = ctx.evaluate("(import (tein mymod)) the-answer")?;
+    /// assert_eq!(result, Value::Integer(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_vfs_module(&self, path: &str, content: &str) -> Result<()> {
+        let full_path = format!("/vfs/{path}");
+        let c_path = std::ffi::CString::new(full_path)
+            .map_err(|_| Error::EvalError("VFS path contains null bytes".into()))?;
+        unsafe {
+            ffi::tein_vfs_register(
+                c_path.as_ptr(),
+                content.as_ptr() as *const std::ffi::c_char,
+                content.len() as std::ffi::c_uint,
+            );
+        }
+        Ok(())
     }
 
     /// Set a Scheme procedure as the macro expansion hook.
@@ -1832,6 +1875,9 @@ impl Drop for Context {
 
         // clear macro expansion hook (thread-local in C)
         unsafe { ffi::macro_expand_hook_clear(self.ctx) };
+
+        // clear runtime VFS entries registered by this context (thread-local in C)
+        unsafe { ffi::tein_vfs_clear_dynamic() };
 
         unsafe {
             if !self.ctx.is_null() {
@@ -4694,7 +4740,7 @@ mod tests {
     #[test]
     fn test_managed_concurrent_evaluate() {
         // ThreadLocalContext is Send + Sync; concurrent callers are serialised
-        // by the Mutex<Receiver<Response>> on the receive side.
+        // by the Mutex<(Sender, Receiver)> guarding the entire send+recv roundtrip.
         use std::sync::Arc;
         let ctx = Arc::new(
             Context::builder()
@@ -5379,5 +5425,53 @@ mod tests {
         let v2 = ctx.read(&port2).unwrap();
         assert_eq!(v1, Value::Symbol("a".into()));
         assert_eq!(v2, Value::Symbol("b".into()));
+    }
+
+    #[test]
+    fn test_register_vfs_module() {
+        let ctx = Context::new_standard().expect("standard context");
+
+        ctx.register_vfs_module(
+            "lib/tein/test-runtime.sld",
+            "(define-library (tein test-runtime) (import (scheme base)) (export test-rt-val) (include \"test-runtime.scm\"))",
+        )
+        .expect("register sld");
+        ctx.register_vfs_module("lib/tein/test-runtime.scm", "(define test-rt-val 42)")
+            .expect("register scm");
+
+        let result = ctx
+            .evaluate("(import (tein test-runtime)) test-rt-val")
+            .expect("eval");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_vfs_module_null_byte_error() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_vfs_module("lib/bad\0path.sld", "")
+            .unwrap_err();
+        assert!(matches!(err, Error::EvalError(_)));
+    }
+
+    #[test]
+    fn test_register_vfs_module_cleared_on_drop() {
+        // register a module in one context, verify a fresh context can't see it
+        {
+            let ctx = Context::new_standard().expect("ctx1");
+            ctx.register_vfs_module(
+                "lib/tein/drop-test.sld",
+                "(define-library (tein drop-test) (import (scheme base)) (export x) (include \"drop-test.scm\"))",
+            )
+            .unwrap();
+            ctx.register_vfs_module("lib/tein/drop-test.scm", "(define x 1)")
+                .unwrap();
+            ctx.evaluate("(import (tein drop-test)) x")
+                .expect("should work in ctx1");
+        }
+        // ctx dropped → dynamic VFS cleared; new context should not find module
+        let ctx2 = Context::new_standard().expect("ctx2");
+        let err = ctx2.evaluate("(import (tein drop-test))").unwrap_err();
+        assert!(matches!(err, Error::EvalError(_)));
     }
 }

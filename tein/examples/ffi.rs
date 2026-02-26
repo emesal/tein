@@ -1,27 +1,27 @@
-// foreign function example — using #[scheme_fn] proc macro
+// foreign function example — using #[tein_fn] proc macro
 
-use tein::{Context, Value, scheme_fn};
+use tein::{Context, Value, tein_fn};
 
 // 0 args: returns a greeting string
-#[scheme_fn]
+#[tein_fn]
 fn greet() -> String {
     "hail from rust!".to_string()
 }
 
 // 1 arg: squares an integer
-#[scheme_fn]
+#[tein_fn]
 fn square(n: i64) -> i64 {
     n * n
 }
 
 // 2 args: adds two integers
-#[scheme_fn]
+#[tein_fn]
 fn rust_add(a: i64, b: i64) -> i64 {
     a + b
 }
 
 // error handling: safe division
-#[scheme_fn]
+#[tein_fn]
 fn safe_div(a: i64, b: i64) -> Result<i64, String> {
     if b == 0 {
         Err("division by zero".to_string())
@@ -33,13 +33,13 @@ fn safe_div(a: i64, b: i64) -> Result<i64, String> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Context::new()?;
 
-    // register rust functions in scheme using #[scheme_fn] wrappers
+    // register rust functions in scheme using #[tein_fn] wrappers
     ctx.define_fn_variadic("greet", __tein_greet)?;
     ctx.define_fn_variadic("square", __tein_square)?;
     ctx.define_fn_variadic("rust-add", __tein_rust_add)?;
     ctx.define_fn_variadic("safe-div", __tein_safe_div)?;
 
-    println!("--- rust→scheme ffi (via #[scheme_fn]) ---\n");
+    println!("--- rust→scheme ffi (via #[tein_fn]) ---\n");
 
     println!("==> (greet)");
     let result = ctx.evaluate("(greet)")?;

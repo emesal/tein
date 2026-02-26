@@ -1,46 +1,46 @@
-//! integration tests for the #[scheme_fn] proc macro
+//! integration tests for the #[tein_fn] proc macro
 
-use tein::{Context, Value, scheme_fn};
+use tein::{Context, Value, tein_fn};
 
 // --- basic types ---
 
-#[scheme_fn]
+#[tein_fn]
 fn add(a: i64, b: i64) -> i64 {
     a + b
 }
 
-#[scheme_fn]
+#[tein_fn]
 fn greet(name: String) -> String {
     format!("hello, {}!", name)
 }
 
-#[scheme_fn]
+#[tein_fn]
 fn negate(b: bool) -> bool {
     !b
 }
 
-#[scheme_fn]
+#[tein_fn]
 fn multiply_float(a: f64, b: f64) -> f64 {
     a * b
 }
 
 // --- no args ---
 
-#[scheme_fn]
+#[tein_fn]
 fn random_number() -> i64 {
     42
 }
 
 // --- mixed types ---
 
-#[scheme_fn]
+#[tein_fn]
 fn format_pair(key: String, val: i64) -> String {
     format!("{}: {}", key, val)
 }
 
 // --- error propagation ---
 
-#[scheme_fn]
+#[tein_fn]
 fn safe_div(a: i64, b: i64) -> Result<i64, String> {
     if b == 0 {
         Err("division by zero".to_string())
@@ -51,7 +51,7 @@ fn safe_div(a: i64, b: i64) -> Result<i64, String> {
 
 // --- void return ---
 
-#[scheme_fn]
+#[tein_fn]
 fn do_nothing() {
     // side-effect only function
 }
@@ -59,7 +59,7 @@ fn do_nothing() {
 // --- tests ---
 
 #[test]
-fn test_scheme_fn_add() {
+fn test_tein_fn_add() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("add", __tein_add).expect("define");
     let result = ctx.evaluate("(add 3 4)").expect("eval");
@@ -67,7 +67,7 @@ fn test_scheme_fn_add() {
 }
 
 #[test]
-fn test_scheme_fn_greet() {
+fn test_tein_fn_greet() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("greet", __tein_greet)
         .expect("define");
@@ -76,7 +76,7 @@ fn test_scheme_fn_greet() {
 }
 
 #[test]
-fn test_scheme_fn_negate() {
+fn test_tein_fn_negate() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("negate", __tein_negate)
         .expect("define");
@@ -85,7 +85,7 @@ fn test_scheme_fn_negate() {
 }
 
 #[test]
-fn test_scheme_fn_float() {
+fn test_tein_fn_float() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("mul", __tein_multiply_float)
         .expect("define");
@@ -94,7 +94,7 @@ fn test_scheme_fn_float() {
 }
 
 #[test]
-fn test_scheme_fn_no_args() {
+fn test_tein_fn_no_args() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("random-number", __tein_random_number)
         .expect("define");
@@ -103,7 +103,7 @@ fn test_scheme_fn_no_args() {
 }
 
 #[test]
-fn test_scheme_fn_mixed_types() {
+fn test_tein_fn_mixed_types() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("format-pair", __tein_format_pair)
         .expect("define");
@@ -112,7 +112,7 @@ fn test_scheme_fn_mixed_types() {
 }
 
 #[test]
-fn test_scheme_fn_result_ok() {
+fn test_tein_fn_result_ok() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("safe-div", __tein_safe_div)
         .expect("define");
@@ -121,7 +121,7 @@ fn test_scheme_fn_result_ok() {
 }
 
 #[test]
-fn test_scheme_fn_result_err() {
+fn test_tein_fn_result_err() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("safe-div", __tein_safe_div)
         .expect("define");
@@ -135,7 +135,7 @@ fn test_scheme_fn_result_err() {
 }
 
 #[test]
-fn test_scheme_fn_wrong_arg_type() {
+fn test_tein_fn_wrong_arg_type() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("add", __tein_add).expect("define");
     // pass string where integer expected
@@ -151,7 +151,7 @@ fn test_scheme_fn_wrong_arg_type() {
 }
 
 #[test]
-fn test_scheme_fn_void_return() {
+fn test_tein_fn_void_return() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("do-nothing", __tein_do_nothing)
         .expect("define");
@@ -160,8 +160,8 @@ fn test_scheme_fn_void_return() {
 }
 
 #[test]
-fn test_scheme_fn_panic_safety() {
-    #[scheme_fn]
+fn test_tein_fn_panic_safety() {
+    #[tein_fn]
     fn panicker() -> i64 {
         panic!("oh no!");
     }
@@ -178,7 +178,7 @@ fn test_scheme_fn_panic_safety() {
 }
 
 #[test]
-fn test_scheme_fn_float_int_coercion() {
+fn test_tein_fn_float_int_coercion() {
     // passing an integer where f64 is expected should auto-coerce
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("mul", __tein_multiply_float)

@@ -20,7 +20,7 @@
 - Procedures as values via `sexp_applicablep`
 - `ctx.call(proc, &[args])` for Rust→Scheme callbacks
 - `define_fn_variadic` for registering Rust functions
-- `#[scheme_fn]` proc macro for ergonomic FFI
+- `#[tein_fn]` / `#[tein_module]` proc macros for ergonomic FFI
 - Panic safety at FFI boundary
 
 **Milestone 3 — tein-sexp pure Rust s-expression crate**
@@ -113,7 +113,7 @@ tein/
                    tein_clibs.c into OUT_DIR
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs,
                    foreign_types.rs, managed.rs, repl.rs
-tein-macros/     — #[scheme_fn] proc macro crate
+tein-macros/     — #[tein_fn], #[tein_module] proc macro crate
 tein-sexp/       — pure Rust s-expression parser/printer
 ```
 
@@ -230,7 +230,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (208 lib + 12 scheme_fn + 22 scheme + doc-tests)
+cargo test                         # all tests (208 lib + 12 tein_fn + 23 scheme + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint
@@ -252,9 +252,21 @@ cargo clean && cargo build         # nuclear option if ffi gets weird
 
 ## Registering Rust functions in Scheme
 
-**Via proc macro (recommended):**
+**Via `#[tein_module]` (recommended for grouped functionality):**
 ```rust
-#[scheme_fn]
+#[tein_module("mymod")]
+mod mymod {
+    #[tein_fn]
+    pub fn add(a: i64, b: i64) -> i64 { a + b }
+}
+
+// registers VFS entries + bindings; scheme code can (import (tein mymod))
+mymod::register_module_mymod(&ctx)?;
+```
+
+**Via `#[tein_fn]` standalone (for individual functions):**
+```rust
+#[tein_fn]
 fn add(a: i64, b: i64) -> i64 { a + b }
 
 ctx.define_fn_variadic("add", __tein_add)?;

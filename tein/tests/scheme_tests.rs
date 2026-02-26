@@ -4,7 +4,7 @@
 //! standard context. assertions in scheme raise errors on failure, which
 //! propagate as `Error::EvalError` and fail the cargo test.
 
-use tein::Context;
+use tein::{Context, tein_module};
 
 /// run a scheme test file in a fresh standard context with `(tein test)` loaded.
 fn run_scheme_test(source: &str) {
@@ -12,6 +12,47 @@ fn run_scheme_test(source: &str) {
     ctx.evaluate("(import (tein test))")
         .expect("import tein test");
     ctx.evaluate(source).expect("scheme test failed");
+}
+
+// ── module test infrastructure ───────────────────────────────────────────────
+
+#[tein_module("testmod")]
+mod testmod {
+    #[tein_fn]
+    pub fn greet(name: String) -> String {
+        format!("hello, {}!", name)
+    }
+
+    #[tein_fn]
+    pub fn add(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    #[tein_type(name = "counter")]
+    pub struct Counter {
+        pub n: i64,
+    }
+
+    #[tein_methods]
+    impl Counter {
+        pub fn get(&self) -> i64 {
+            self.n
+        }
+        pub fn increment(&mut self) -> i64 {
+            self.n += 1;
+            self.n
+        }
+    }
+}
+
+/// run a scheme test that needs a `#[tein_module]` registered first.
+fn run_scheme_test_with_module(source: &str) {
+    let ctx = Context::new_standard().expect("context");
+    testmod::register_module_testmod(&ctx).expect("register testmod");
+    ctx.evaluate("(import (tein test))")
+        .expect("import tein test");
+    ctx.evaluate(source)
+        .expect("scheme test with module failed");
 }
 
 #[test]
@@ -181,4 +222,9 @@ fn test_scheme_reader_macro_sandbox() {
         "#,
     )
     .expect("sandboxed reader/macro test failed");
+}
+
+#[test]
+fn test_scheme_tein_module() {
+    run_scheme_test_with_module(include_str!("scheme/tein_module.scm"));
 }

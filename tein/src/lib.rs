@@ -24,8 +24,8 @@
 //!
 //! - **Sandboxing** — Restrict environments with composable [`sandbox`] presets,
 //!   step limits, wall-clock timeouts, and file IO policies via [`ContextBuilder`]
-//! - **`#[scheme_fn]`** — Define Scheme-callable functions in Rust with automatic
-//!   type conversion (see [`scheme_fn`])
+//! - **`#[tein_fn]`** — Define Scheme-callable functions in Rust with automatic
+//!   type conversion (see [`tein_fn`])
 //! - **Foreign types** — Expose Rust types as Scheme objects with method dispatch
 //!   and introspection (see [`foreign`])
 //! - **Custom ports** — Bridge Rust `Read`/`Write` into Scheme's port system
@@ -62,12 +62,21 @@ pub use managed::{Mode, ThreadLocalContext};
 pub use timeout::TimeoutContext;
 pub use value::Value;
 
-/// Re-export the `#[scheme_fn]` proc macro for ergonomic foreign function definition.
-pub use tein_macros::scheme_fn;
+/// Re-export the `#[tein_fn]` proc macro for defining scheme-callable functions.
+pub use tein_macros::tein_fn;
+
+/// Re-export the `#[tein_module]` proc macro for defining scheme modules.
+pub use tein_macros::tein_module;
+
+/// Re-export the `#[tein_type]` proc macro for marking structs in a `#[tein_module]`.
+pub use tein_macros::tein_type;
+
+/// Re-export the `#[tein_methods]` proc macro for exposing impl blocks in a `#[tein_module]`.
+pub use tein_macros::tein_methods;
 
 /// Raw FFI types for advanced use (foreign functions, proc macro generated code, etc.)
 ///
-/// These are thin wrappers over Chibi's C API. The `#[scheme_fn]` proc macro
+/// These are thin wrappers over Chibi's C API. The `#[tein_fn]` proc macro
 /// generates code that references these symbols, so they must remain public.
 #[allow(missing_docs)]
 pub mod raw {
