@@ -25,7 +25,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
 
-use std::os::raw::{c_char, c_int, c_long, c_uchar, c_ulong, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 
 // opaque types from chibi
 pub type sexp = *mut c_void;

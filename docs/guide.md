@@ -250,14 +250,14 @@ preset reference.
 
 ## Calling Rust from Scheme
 
-### With `#[scheme_fn]`
+### With `#[tein_fn]`
 
-The `#[scheme_fn]` proc macro is the easiest way to expose a Rust function to Scheme:
+The `#[tein_fn]` proc macro is the easiest way to expose a Rust function to Scheme:
 
 ```rust
-use tein::{Context, scheme_fn};
+use tein::{Context, tein_fn};
 
-#[scheme_fn]
+#[tein_fn]
 fn square(n: i64) -> i64 {
     n * n
 }
@@ -269,11 +269,11 @@ assert_eq!(ctx.evaluate("(square 7)")?, tein::Value::Integer(49));
 ```
 
 The macro generates a `__tein_<name>` wrapper with the Chibi FFI signature. Supported
-argument and return types: `i64`, `f64`, `bool`, `String`, `&str`. Functions can return
-`Result<T, String>` to signal Scheme errors:
+argument and return types: `i64`, `f64`, `bool`, `String`. Functions can return
+`Result<T, E>` where `E: Display` to signal Scheme errors:
 
 ```rust
-#[scheme_fn]
+#[tein_fn]
 fn safe_div(a: i64, b: i64) -> Result<i64, String> {
     if b == 0 { Err("division by zero".to_string()) }
     else { Ok(a / b) }

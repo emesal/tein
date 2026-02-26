@@ -1206,7 +1206,7 @@ impl Context {
     /// Register a foreign function as a Scheme primitive.
     ///
     /// All arguments are passed as a single Scheme list via the `args` parameter.
-    /// This is the universal registration method — use `#[scheme_fn]` for ergonomic
+    /// This is the universal registration method — use `#[tein_fn]` for ergonomic
     /// wrappers that handle argument extraction and return conversion automatically.
     ///
     /// The function receives all arguments as a single Scheme list in the `args`

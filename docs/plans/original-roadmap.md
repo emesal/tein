@@ -120,7 +120,7 @@
 
 ### Milestone 8 — Rust Ecosystem Bridge
 
-- [ ] **`#[tein_module]` proc macro** — auto-generates scheme glue (VFS module, predicates, constructors, method procs) from annotated rust. `#[tein_module]`, `#[tein_type]`, `#[tein_fn]`, `#[tein_method]` attributes. (issue #40)
+- [x] **`#[tein_module]` proc macro** — auto-generates scheme glue (VFS module, predicates, constructors, method procs) from annotated rust. `#[tein_module]`, `#[tein_type]`, `#[tein_fn]`, `#[tein_methods]` attributes. (issue #40)
 - [ ] **`(tein json)`** — bidirectional JSON ↔ scheme value conversion via serde_json. `json-parse`, `json-stringify`, `json?`. (issue #36)
 - [ ] **`(tein regex)`** — regular expression support via the `regex` crate. `make-regex`, `regex?`, `regex-is-match`, `regex-find`, `regex-replace`. Regex as ForeignType handle. (issue #37)
 - [ ] **`(tein crypto)`** — cryptographic primitives via blake3/sha2/rand. `blake3-hash`, `sha256-hash`, `random-bytes`, `random-integer`, `random-float`. (issue #38)

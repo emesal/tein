@@ -2,15 +2,15 @@
 //!
 //! provides `#[tein_fn]`, `#[tein_module]`, `#[tein_type]`, and `#[tein_methods]`
 //! for ergonomic foreign function and module definition.
-//! `#[scheme_fn]` is a deprecated alias for `#[tein_fn]`.
+//! legacy `#[scheme_fn]` has been removed — use `#[tein_fn]` instead.
 
 use std::collections::HashMap;
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
+use syn::parse_macro_input;
 use syn::{FnArg, ImplItem, Item, ItemFn, ItemImpl, ItemMod, ItemStruct, Pat, ReturnType, Type};
-use syn::{parse_macro_input};
 
 // ── public proc macros ────────────────────────────────────────────────────────
 
@@ -52,19 +52,6 @@ use syn::{parse_macro_input};
 /// ```
 #[proc_macro_attribute]
 pub fn tein_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as ItemFn);
-    match generate_scheme_fn(input) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
-}
-
-/// deprecated alias for `#[tein_fn]`.
-///
-/// use `#[tein_fn]` instead. this alias will be removed in a future release.
-#[deprecated(note = "use #[tein_fn] instead")]
-#[proc_macro_attribute]
-pub fn scheme_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     match generate_scheme_fn(input) {
         Ok(tokens) => tokens.into(),
@@ -244,19 +231,25 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                     format!("{}-{}", module_name, rust_to_scheme_name(&rust_name))
                 });
                 let mut clean_func = func.clone();
-                clean_func.attrs.retain(|a| !is_tein_attr_named(a, "tein_fn"));
-                free_fns.push(FreeFnInfo { func: clean_func.clone(), scheme_name });
-                clean_items.push(Item::Fn(clean_func));
+                clean_func
+                    .attrs
+                    .retain(|a| !is_tein_attr_named(a, "tein_fn"));
+                free_fns.push(FreeFnInfo {
+                    func: clean_func,
+                    scheme_name,
+                });
+                // don't push to clean_items — generate_scheme_fn emits the fn + wrapper
             }
             Item::Struct(s) if has_tein_attr(&s.attrs, "tein_type") => {
                 let override_name = extract_name_override(&s.attrs, "tein_type")?;
                 let rust_name = s.ident.to_string();
-                let scheme_type_name =
-                    override_name.unwrap_or_else(|| pascal_to_kebab(&rust_name));
+                let scheme_type_name = override_name.unwrap_or_else(|| pascal_to_kebab(&rust_name));
                 let idx = types.len();
                 type_names.insert(rust_name, idx);
                 let mut clean_struct = s.clone();
-                clean_struct.attrs.retain(|a| !is_tein_attr_named(a, "tein_type"));
+                clean_struct
+                    .attrs
+                    .retain(|a| !is_tein_attr_named(a, "tein_type"));
                 types.push(TypeInfo {
                     struct_item: clean_struct.clone(),
                     scheme_type_name,
@@ -281,14 +274,11 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                 for impl_item in &imp.items {
                     if let ImplItem::Fn(method) = impl_item {
                         let rust_name = method.sig.ident.to_string();
-                        let scheme_name = format!(
-                            "{}-{}",
-                            scheme_type_name,
-                            rust_to_scheme_name(&rust_name)
+                        let scheme_name =
+                            format!("{}-{}", scheme_type_name, rust_to_scheme_name(&rust_name));
+                        let is_mut = method.sig.inputs.first().is_some_and(
+                            |arg| matches!(arg, FnArg::Receiver(r) if r.mutability.is_some()),
                         );
-                        let is_mut = method.sig.inputs.first().is_some_and(|arg| {
-                            matches!(arg, FnArg::Receiver(r) if r.mutability.is_some())
-                        });
                         types[type_idx].methods.push(MethodInfo {
                             method: method.clone(),
                             scheme_name,
@@ -297,7 +287,9 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                     }
                 }
                 let mut clean_impl = imp.clone();
-                clean_impl.attrs.retain(|a| !is_tein_attr_named(a, "tein_methods"));
+                clean_impl
+                    .attrs
+                    .retain(|a| !is_tein_attr_named(a, "tein_methods"));
                 clean_items.push(Item::Impl(clean_impl));
             }
             other => {
@@ -308,9 +300,16 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
 
     let mut clean_mod = mod_item.clone();
     clean_mod.content = Some((*brace, clean_items));
-    clean_mod.attrs.retain(|a| !is_tein_attr_named(a, "tein_module"));
+    clean_mod
+        .attrs
+        .retain(|a| !is_tein_attr_named(a, "tein_module"));
 
-    Ok(ModuleInfo { name: module_name, mod_item: clean_mod, free_fns, types })
+    Ok(ModuleInfo {
+        name: module_name,
+        mod_item: clean_mod,
+        free_fns,
+        types,
+    })
 }
 
 // ── module codegen ────────────────────────────────────────────────────────────
@@ -385,18 +384,23 @@ fn generate_method_entry(
         .skip(1) // skip self
         .enumerate()
         .map(|(i, arg)| {
-            if let FnArg::Typed(pt) = arg {
-                if let Pat::Ident(pi) = pt.pat.as_ref() {
-                    return Ok((i, &pi.ident, pt.ty.as_ref()));
-                }
+            if let FnArg::Typed(pt) = arg
+                && let Pat::Ident(pi) = pt.pat.as_ref()
+            {
+                return Ok((i, &pi.ident, pt.ty.as_ref()));
             }
-            Err(syn::Error::new_spanned(arg, "expected named argument in #[tein_methods] method"))
+            Err(syn::Error::new_spanned(
+                arg,
+                "expected named argument in #[tein_methods] method",
+            ))
         })
         .collect::<syn::Result<_>>()?;
 
     let extractions: Vec<proc_macro2::TokenStream> = args
         .iter()
-        .map(|(i, name, ty)| gen_method_arg_extraction(name, ty, *i, scheme_type_name, &scheme_method_name))
+        .map(|(i, name, ty)| {
+            gen_method_arg_extraction(name, ty, *i, scheme_type_name, &scheme_method_name)
+        })
         .collect::<syn::Result<_>>()?;
 
     let arg_names: Vec<&syn::Ident> = args.iter().map(|(_, n, _)| *n).collect();
@@ -437,8 +441,14 @@ fn gen_method_arg_extraction(
     method_name: &str,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let type_str = type_name_str(ty).unwrap_or_default();
-    let err_msg =
-        format!("{}-{}: argument {} ({}): expected {}", type_name, method_name, index + 1, arg_name, type_str);
+    let err_msg = format!(
+        "{}-{}: argument {} ({}): expected {}",
+        type_name,
+        method_name,
+        index + 1,
+        arg_name,
+        type_str
+    );
 
     let extraction = match type_str.as_str() {
         "i64" => quote! {
@@ -632,10 +642,7 @@ fn is_tein_attr_named(attr: &syn::Attribute, name: &str) -> bool {
 /// extract a `name = "..."` string from an attribute's arguments, if present.
 ///
 /// e.g. `#[tein_fn(name = "my-scheme-name")]` → `Some("my-scheme-name")`
-fn extract_name_override(
-    attrs: &[syn::Attribute],
-    attr_name: &str,
-) -> syn::Result<Option<String>> {
+fn extract_name_override(attrs: &[syn::Attribute], attr_name: &str) -> syn::Result<Option<String>> {
     for attr in attrs {
         if !is_tein_attr_named(attr, attr_name) {
             continue;
@@ -648,7 +655,11 @@ fn extract_name_override(
         let result = attr.parse_args::<syn::MetaNameValue>();
         match result {
             Ok(nv) if nv.path.is_ident("name") => {
-                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                {
                     return Ok(Some(s.value()));
                 }
             }
@@ -660,10 +671,10 @@ fn extract_name_override(
 
 /// extract the type name from an impl block's Self type
 fn impl_self_type_name(imp: &ItemImpl) -> syn::Result<String> {
-    if let Type::Path(tp) = imp.self_ty.as_ref() {
-        if let Some(seg) = tp.path.segments.last() {
-            return Ok(seg.ident.to_string());
-        }
+    if let Type::Path(tp) = imp.self_ty.as_ref()
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return Ok(seg.ident.to_string());
     }
     Err(syn::Error::new_spanned(
         &imp.self_ty,
@@ -699,7 +710,12 @@ fn type_name_str(ty: &Type) -> Option<String> {
 /// generate the extraction code for a single argument from the scheme args list
 fn gen_arg_extraction(arg_name: &syn::Ident, ty: &Type, index: usize) -> proc_macro2::TokenStream {
     let type_str = type_name_str(ty).unwrap_or_default();
-    let err_msg = format!("argument {} ({}): expected {}", index + 1, arg_name, type_str);
+    let err_msg = format!(
+        "argument {} ({}): expected {}",
+        index + 1,
+        arg_name,
+        type_str
+    );
 
     match type_str.as_str() {
         "i64" => quote! {

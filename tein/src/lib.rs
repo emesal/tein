@@ -74,10 +74,6 @@ pub use tein_macros::tein_type;
 /// Re-export the `#[tein_methods]` proc macro for exposing impl blocks in a `#[tein_module]`.
 pub use tein_macros::tein_methods;
 
-/// Deprecated: use [`tein_fn`] instead.
-#[allow(deprecated)]
-pub use tein_macros::scheme_fn;
-
 /// Raw FFI types for advanced use (foreign functions, proc macro generated code, etc.)
 ///
 /// These are thin wrappers over Chibi's C API. The `#[tein_fn]` proc macro

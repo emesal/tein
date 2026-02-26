@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (208 lib + 12 scheme_fn + 6 scheme + 24 doc-tests)
+cargo test                         # all tests (208 lib + 12 tein_fn + 23 scheme + 24 doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint

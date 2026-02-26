@@ -44,12 +44,12 @@ assert!(ctx.evaluate(r#"(open-input-file "/etc/passwd")"#).is_err());
 
 16 composable presets (`ARITHMETIC`, `LISTS`, `STRINGS`, `IO`, ...) plus convenience builders (`.pure_computation()`, `.safe()`). See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module.
 
-### `#[scheme_fn]` proc macro
+### `#[tein_fn]` proc macro
 
 Define Scheme-callable functions in pure Rust with automatic type conversion and error handling.
 
 ```rust
-#[scheme_fn]
+#[tein_fn]
 fn square(n: i64) -> i64 { n * n }
 
 ctx.define_fn_variadic("square", __tein_square)?;
@@ -139,7 +139,7 @@ ctx.reset()?;  // rebuild context, re-run init
 |---------|-------------|
 | `basic` | evaluate expressions, pattern-match on values |
 | `floats` | floating-point arithmetic |
-| `ffi` | `#[scheme_fn]` proc macro, Rust↔Scheme calls |
+| `ffi` | `#[tein_fn]` proc macro, Rust↔Scheme calls |
 | `debug` | float/integer type inspection |
 | `sandbox` | step limits, restricted environments, timeouts, file IO policies |
 | `foreign_types` | foreign type protocol — registration, dispatch, introspection |

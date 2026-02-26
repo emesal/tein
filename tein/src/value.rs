@@ -427,7 +427,7 @@ impl Value {
     /// Convert a Rust value to a raw Chibi sexp.
     ///
     /// Useful for returning values from foreign functions registered
-    /// with [`crate::Context::define_fn_variadic`] or `#[scheme_fn]`.
+    /// with [`crate::Context::define_fn_variadic`] or `#[tein_fn]`.
     ///
     /// Supports all value types except `Other`.
     ///

@@ -27,7 +27,7 @@ the two identities converge in agentic and stochastic use cases: the rust ecosys
 
 - [x] scheme→rust callbacks (procedures as values)
 - [x] variadic foreign functions (`define_fn_variadic`)
-- [x] `#[scheme_fn]` proc macro for ergonomic FFI
+- [x] `#[tein_fn]` / `#[tein_module]` proc macros for ergonomic FFI
 
 ### milestone 3 — tein-sexp pure rust s-expression crate
 
