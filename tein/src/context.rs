@@ -4740,7 +4740,7 @@ mod tests {
     #[test]
     fn test_managed_concurrent_evaluate() {
         // ThreadLocalContext is Send + Sync; concurrent callers are serialised
-        // by the Mutex<Receiver<Response>> on the receive side.
+        // by the Mutex<(Sender, Receiver)> guarding the entire send+recv roundtrip.
         use std::sync::Arc;
         let ctx = Arc::new(
             Context::builder()

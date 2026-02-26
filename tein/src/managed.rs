@@ -95,14 +95,15 @@ pub enum Mode {
 /// # }
 /// ```
 pub struct ThreadLocalContext {
-    tx: mpsc::SyncSender<Request>,
-    rx: Mutex<mpsc::Receiver<Response>>,
+    /// Mutex guards the entire send+receive roundtrip so concurrent callers
+    /// cannot interleave their requests and steal each other's responses.
+    channel: Mutex<(mpsc::SyncSender<Request>, mpsc::Receiver<Response>)>,
     mode: Mode,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 // SAFETY: the inner Context never leaves its dedicated thread.
-// tx is Send, rx is wrapped in Mutex (Sync). all values crossing
+// channel is wrapped in Mutex (Send + Sync). all values crossing
 // the channel boundary use SendableValue with the same safety
 // argument as TimeoutContext.
 unsafe impl Send for ThreadLocalContext {}
@@ -228,8 +229,7 @@ impl ThreadLocalContext {
         }
 
         Ok(ThreadLocalContext {
-            tx: req_tx,
-            rx: Mutex::new(resp_rx),
+            channel: Mutex::new((req_tx, resp_rx)),
             mode,
             handle: Some(handle),
         })
@@ -247,15 +247,13 @@ impl ThreadLocalContext {
 
     /// Evaluate Scheme code.
     pub fn evaluate(&self, code: &str) -> Result<Value> {
-        self.tx
-            .send(Request::Evaluate(code.to_string()))
-            .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
-
-        let rx = self
-            .rx
+        let ch = self
+            .channel
             .lock()
-            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
-        match rx.recv() {
+            .map_err(|_| Error::InitError("context channel mutex poisoned".to_string()))?;
+        ch.0.send(Request::Evaluate(code.to_string()))
+            .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
+        match ch.1.recv() {
             Ok(Response::Value(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
             Err(_) => Err(Error::InitError("context thread died".to_string())),
@@ -264,18 +262,16 @@ impl ThreadLocalContext {
 
     /// Call a Scheme procedure with arguments.
     pub fn call(&self, proc: &Value, args: &[Value]) -> Result<Value> {
-        self.tx
-            .send(Request::Call(
-                SendableValue(proc.clone()),
-                args.iter().map(|a| SendableValue(a.clone())).collect(),
-            ))
-            .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
-
-        let rx = self
-            .rx
+        let ch = self
+            .channel
             .lock()
-            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
-        match rx.recv() {
+            .map_err(|_| Error::InitError("context channel mutex poisoned".to_string()))?;
+        ch.0.send(Request::Call(
+            SendableValue(proc.clone()),
+            args.iter().map(|a| SendableValue(a.clone())).collect(),
+        ))
+        .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
+        match ch.1.recv() {
             Ok(Response::Value(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
             Err(_) => Err(Error::InitError("context thread died".to_string())),
@@ -284,18 +280,16 @@ impl ThreadLocalContext {
 
     /// Register a variadic foreign function.
     pub fn define_fn_variadic(&self, name: &str, f: ForeignFnPtr) -> Result<()> {
-        self.tx
-            .send(Request::DefineFnVariadic {
-                name: name.to_string(),
-                f,
-            })
-            .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
-
-        let rx = self
-            .rx
+        let ch = self
+            .channel
             .lock()
-            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
-        match rx.recv() {
+            .map_err(|_| Error::InitError("context channel mutex poisoned".to_string()))?;
+        ch.0.send(Request::DefineFnVariadic {
+            name: name.to_string(),
+            f,
+        })
+        .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
+        match ch.1.recv() {
             Ok(Response::Defined(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
             Err(_) => Err(Error::InitError("context thread died".to_string())),
@@ -308,15 +302,13 @@ impl ThreadLocalContext {
     /// from the stored builder config + init closure. Live foreign objects
     /// are dropped. In fresh mode, this is a no-op (already rebuilds each call).
     pub fn reset(&self) -> Result<()> {
-        self.tx
-            .send(Request::Reset)
-            .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
-
-        let rx = self
-            .rx
+        let ch = self
+            .channel
             .lock()
-            .map_err(|_| Error::InitError("context rx mutex poisoned".to_string()))?;
-        match rx.recv() {
+            .map_err(|_| Error::InitError("context channel mutex poisoned".to_string()))?;
+        ch.0.send(Request::Reset)
+            .map_err(|_| Error::InitError("context thread is dead".to_string()))?;
+        match ch.1.recv() {
             Ok(Response::Reset(result)) => result,
             Ok(_) => Err(Error::InitError("unexpected response type".to_string())),
             Err(_) => Err(Error::InitError("context thread died".to_string())),
@@ -339,7 +331,9 @@ impl std::fmt::Debug for ThreadLocalContext {
 
 impl Drop for ThreadLocalContext {
     fn drop(&mut self) {
-        let _ = self.tx.send(Request::Shutdown);
+        if let Ok(ch) = self.channel.lock() {
+            let _ = ch.0.send(Request::Shutdown);
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
