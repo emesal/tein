@@ -224,6 +224,8 @@ impl Value {
 
             // bignums (arbitrary-precision integers)
             if ffi::sexp_bignump(raw) != 0 {
+                // root raw — sexp_bignum_to_string allocates (opens a string port)
+                let _root = ffi::GcRoot::new(ctx, raw);
                 let str_sexp = ffi::sexp_bignum_to_string(ctx, raw);
                 let str_ptr = ffi::sexp_string_data(str_sexp);
                 let str_len = ffi::sexp_string_size(str_sexp);
@@ -513,8 +515,11 @@ impl Value {
                     })?;
                     let str_sexp =
                         ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t);
+                    // root str_sexp — sexp_string_to_number allocates internally
+                    let _str_root = ffi::GcRoot::new(ctx, str_sexp);
                     let result = ffi::sexp_string_to_number(ctx, str_sexp, 10);
-                    if ffi::sexp_exceptionp(result) != 0 {
+                    // sexp_string_to_number returns SEXP_FALSE on parse failure, not an exception
+                    if ffi::sexp_booleanp(result) != 0 {
                         return Err(Error::TypeError(format!("invalid bignum string: {s}")));
                     }
                     Ok(result)

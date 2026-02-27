@@ -634,10 +634,6 @@ impl<'a> Lexer<'a> {
             // +inf.0, -inf.0, +nan.0
             Some('i') | Some('n') => self.lex_special_number_or_symbol(),
             _ => {
-                // check for pure unit imaginary: +i or -i
-                if next == Some('i') {
-                    // already handled above, but check delimiter after i
-                }
                 // bare + or - is a symbol
                 Ok(self.lex_symbol())
             }
