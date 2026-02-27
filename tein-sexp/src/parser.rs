@@ -135,6 +135,15 @@ impl<'a> Parser<'a> {
                     comments: Vec::new(),
                 }
             }
+            TokenKind::Complex(real_str, imag_str) => {
+                let real = parse_number_string(&real_str);
+                let imag = parse_number_string(&imag_str);
+                Sexp {
+                    kind: SexpKind::Complex(Box::new(real), Box::new(imag)),
+                    span: tok.span,
+                    comments: Vec::new(),
+                }
+            }
             TokenKind::Quote => self.parse_sugar("quote", tok.span)?,
             TokenKind::Quasiquote => self.parse_sugar("quasiquote", tok.span)?,
             TokenKind::Unquote => self.parse_sugar("unquote", tok.span)?,
@@ -369,12 +378,15 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// parse a numeric string (from a rational component) as Integer or Bignum Sexp
+/// parse a numeric string (from rational/complex components) as Integer, Float, or Bignum Sexp
 fn parse_number_string(s: &str) -> Sexp {
-    match s.parse::<i64>() {
-        Ok(n) => Sexp::integer(n),
-        Err(_) => Sexp::bignum(s),
+    if let Ok(n) = s.parse::<i64>() {
+        return Sexp::integer(n);
     }
+    if let Ok(f) = s.parse::<f64>() {
+        return Sexp::float(f);
+    }
+    Sexp::bignum(s)
 }
 
 #[cfg(test)]
@@ -739,6 +751,54 @@ mod tests {
     #[test]
     fn roundtrip_bytevector() {
         assert_eq!(parse("#u8(1 2 3)").unwrap().to_string(), "#u8(1 2 3)");
+    }
+
+    // --- complex numbers ---
+
+    #[test]
+    fn parse_complex_integers() {
+        let sexp = parse("1+2i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(1));
+        assert_eq!(i.as_integer(), Some(2));
+    }
+
+    #[test]
+    fn parse_complex_negative_imag() {
+        let sexp = parse("1-2i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(1));
+        assert_eq!(i.as_integer(), Some(-2));
+    }
+
+    #[test]
+    fn parse_pure_imaginary() {
+        let sexp = parse("+2i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(0));
+        assert_eq!(i.as_integer(), Some(2));
+    }
+
+    #[test]
+    fn parse_plus_i() {
+        let sexp = parse("+i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(0));
+        assert_eq!(i.as_integer(), Some(1));
+    }
+
+    #[test]
+    fn parse_minus_i() {
+        let sexp = parse("-i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(0));
+        assert_eq!(i.as_integer(), Some(-1));
+    }
+
+    #[test]
+    fn roundtrip_complex() {
+        assert_eq!(parse("1+2i").unwrap().to_string(), "1+2i");
+        assert_eq!(parse("1-2i").unwrap().to_string(), "1-2i");
     }
 
     // --- complex expressions ---
