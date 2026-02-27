@@ -13,11 +13,13 @@
 **Base branch:** dev
 **Branch:** `feature/numeric-tower-2602`
 
-**Progress:** tasks 1-8 done. tasks 9-10 remain.
+**Progress:** all tasks done. ✓
 **Notes:**
 - tasks 3-5 combined in one commit (value.rs non-exhaustive match forced all three together). `test_complex_from_scheme` uses `Context::new_standard()` — `make-rectangular` requires standard env.
 - tasks 6-8 done in session 2: tein-sexp ast variants, lexer/parser for bignum/rational/bytevector/complex. 139 tein-sexp tests passing.
 - commits: `2dd42f3` (task 6), `603df68` (task 7), `ff9f5a1` (task 8)
+- tasks 9-10 done in session 3: scheme integration tests (`124ee01`), AGENTS.md update (`c1ddf9b`).
+- session 4: code review caught 5 bugs (gc roots, wrong error check, bignum/float misclassification, dead code) — fixed in `f788066`.
 
 ---
 
@@ -1170,7 +1172,7 @@ feat(tein-sexp): complex number lexing and parsing (#71)
 
 ---
 
-### Task 9: scheme-level integration tests
+### ~~Task 9: scheme-level integration tests~~ ✓
 
 **Files:**
 - Create: `tein/tests/scheme/numeric_tower.scm`
@@ -1219,7 +1221,7 @@ test: scheme-level numeric tower integration tests (#71)
 
 ---
 
-### Task 10: full test suite + AGENTS.md updates + final commit
+### ~~Task 10: full test suite + AGENTS.md updates + final commit~~ ✓
 
 **Files:**
 - Modify: `AGENTS.md`
