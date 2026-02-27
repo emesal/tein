@@ -156,6 +156,70 @@ fn test_ext_load_nonexistent() {
 }
 
 #[test]
+fn test_ext_foreign_type_predicate() {
+    let ctx = Context::new_standard().expect("context");
+    ctx.load_extension(ext_lib_path()).expect("load");
+    ctx.evaluate("(import (tein testext))").expect("import");
+    // counter? should be a procedure even without foreign value creation
+    assert_eq!(
+        ctx.evaluate("(procedure? counter?)").expect("pred is proc"),
+        Value::Boolean(true),
+    );
+    assert_eq!(
+        ctx.evaluate("(counter? 42)").expect("pred false on int"),
+        Value::Boolean(false),
+    );
+}
+
+#[test]
+fn test_ext_foreign_type_convenience_proc_names() {
+    // convenience procs should use the correct (non-doubled) name prefix (#69).
+    // ext method names arrive already prefixed (e.g. "counter-get"), so the
+    // generated (define ...) must use them directly, not wrap in type-name again.
+    let ctx = Context::new_standard().expect("context");
+    ctx.load_extension(ext_lib_path()).expect("load");
+    ctx.evaluate("(import (tein testext))").expect("import");
+
+    // correct names should be bound as procedures
+    for name in &["counter-get", "counter-increment", "counter-add"] {
+        assert_eq!(
+            ctx.evaluate(&format!("(procedure? {})", name)).expect(name),
+            Value::Boolean(true),
+            "{} should be a procedure",
+            name,
+        );
+    }
+
+    // doubled-prefix names should NOT be bound (#69 regression)
+    for name in &[
+        "counter-counter-get",
+        "counter-counter-increment",
+        "counter-counter-add",
+    ] {
+        let result = ctx.evaluate(&format!("(procedure? {})", name));
+        assert!(
+            result.is_err(),
+            "{} should not be defined (double prefix bug)",
+            name,
+        );
+    }
+}
+
+#[test]
+fn test_ext_foreign_type_method_error_message() {
+    // error message should use correct (non-doubled) prefix
+    let ctx = Context::new_standard().expect("context");
+    ctx.load_extension(ext_lib_path()).expect("load");
+    ctx.evaluate("(import (tein testext))").expect("import");
+    let err = ctx.evaluate("(counter-get 42)").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("counter-get: expected counter"),
+        "expected clear error with correct prefix, got: {msg}"
+    );
+}
+
+#[test]
 fn test_ext_docs_sublibrary() {
     let ctx = Context::new_standard().expect("context");
     ctx.load_extension(ext_lib_path()).expect("load");

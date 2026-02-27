@@ -609,11 +609,13 @@ fn ext_register_type_impl(
             .collect();
 
         for method_name in &method_names {
+            // ext method names are already prefixed (e.g. "counter-get"), so use
+            // them directly — don't wrap in {type_name}-{method_name} again (#69)
             let wrapper_code = format!(
-                "(define ({tn}-{mn} obj . args) \
+                "(define ({mn} obj . args) \
                    (if (and (foreign? obj) (equal? (foreign-type obj) \"{tn}\")) \
                        (apply foreign-call obj (quote {mn}) args) \
-                       (error \"{tn}-{mn}: expected {tn}, got\" \
+                       (error \"{mn}: expected {tn}, got\" \
                               (if (foreign? obj) (foreign-type obj) obj))))",
                 tn = type_name,
                 mn = method_name
