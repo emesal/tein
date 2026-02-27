@@ -74,6 +74,20 @@ unsafe extern "C" {
     pub fn tein_sexp_bytes_length(x: sexp) -> sexp_uint_t;
     pub fn tein_sexp_make_bytes(ctx: sexp, len: sexp_uint_t, init: c_uchar) -> sexp;
 
+    // numeric tower operations (via tein shim)
+    pub fn tein_sexp_bignump(x: sexp) -> c_int;
+    pub fn tein_sexp_ratiop(x: sexp) -> c_int;
+    pub fn tein_sexp_complexp(x: sexp) -> c_int;
+    pub fn tein_sexp_bignum_sign(x: sexp) -> c_int;
+    pub fn tein_sexp_bignum_to_string(ctx: sexp, x: sexp) -> sexp;
+    pub fn tein_sexp_ratio_numerator(x: sexp) -> sexp;
+    pub fn tein_sexp_ratio_denominator(x: sexp) -> sexp;
+    pub fn tein_sexp_complex_real(x: sexp) -> sexp;
+    pub fn tein_sexp_complex_imag(x: sexp) -> sexp;
+    pub fn tein_sexp_string_to_number(ctx: sexp, str: sexp, base: c_int) -> sexp;
+    pub fn tein_sexp_make_ratio(ctx: sexp, num: sexp, den: sexp) -> sexp;
+    pub fn tein_sexp_make_complex(ctx: sexp, real: sexp, imag: sexp) -> sexp;
+
     // port operations (via tein shim)
     pub fn tein_sexp_portp(x: sexp) -> c_int;
     pub fn tein_sexp_iportp(x: sexp) -> c_int;
@@ -344,6 +358,70 @@ pub unsafe fn sexp_bytes_length(x: sexp) -> sexp_uint_t {
 #[inline]
 pub unsafe fn sexp_make_bytes(ctx: sexp, len: sexp_uint_t, init: u8) -> sexp {
     unsafe { tein_sexp_make_bytes(ctx, len, init as c_uchar) }
+}
+
+// numeric tower operations
+
+#[inline]
+pub unsafe fn sexp_bignump(x: sexp) -> c_int {
+    unsafe { tein_sexp_bignump(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_ratiop(x: sexp) -> c_int {
+    unsafe { tein_sexp_ratiop(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_complexp(x: sexp) -> c_int {
+    unsafe { tein_sexp_complexp(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_bignum_sign(x: sexp) -> c_int {
+    unsafe { tein_sexp_bignum_sign(x) }
+}
+
+/// converts a bignum to a decimal string sexp. allocates (opens string port).
+#[inline]
+pub unsafe fn sexp_bignum_to_string(ctx: sexp, x: sexp) -> sexp {
+    unsafe { tein_sexp_bignum_to_string(ctx, x) }
+}
+
+#[inline]
+pub unsafe fn sexp_ratio_numerator(x: sexp) -> sexp {
+    unsafe { tein_sexp_ratio_numerator(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_ratio_denominator(x: sexp) -> sexp {
+    unsafe { tein_sexp_ratio_denominator(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_complex_real(x: sexp) -> sexp {
+    unsafe { tein_sexp_complex_real(x) }
+}
+
+#[inline]
+pub unsafe fn sexp_complex_imag(x: sexp) -> sexp {
+    unsafe { tein_sexp_complex_imag(x) }
+}
+
+/// parses a string sexp as a number in the given base. allocates.
+#[inline]
+pub unsafe fn sexp_string_to_number(ctx: sexp, s: sexp, base: c_int) -> sexp {
+    unsafe { tein_sexp_string_to_number(ctx, s, base) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_ratio(ctx: sexp, num: sexp, den: sexp) -> sexp {
+    unsafe { tein_sexp_make_ratio(ctx, num, den) }
+}
+
+#[inline]
+pub unsafe fn sexp_make_complex(ctx: sexp, real: sexp, imag: sexp) -> sexp {
+    unsafe { tein_sexp_make_complex(ctx, real, imag) }
 }
 
 // port operations

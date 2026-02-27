@@ -92,6 +92,14 @@ pub enum SexpKind {
     Vector(Vec<Sexp>),
     /// empty list / nil `()`
     Nil,
+    /// bignum (arbitrary-precision integer, decimal string)
+    Bignum(String),
+    /// rational number `n/d`
+    Rational(Box<Sexp>, Box<Sexp>),
+    /// complex number `a+bi`
+    Complex(Box<Sexp>, Box<Sexp>),
+    /// bytevector `#u8(1 2 3)`
+    Bytevector(Vec<u8>),
 }
 
 /// a comment associated with an s-expression node
@@ -181,6 +189,29 @@ impl Sexp {
     pub fn nil() -> Self {
         Self::new(SexpKind::Nil)
     }
+
+    /// bignum (arbitrary-precision integer as decimal string)
+    pub fn bignum(s: impl Into<String>) -> Self {
+        Self::new(SexpKind::Bignum(s.into()))
+    }
+
+    /// rational number
+    pub fn rational(numerator: Sexp, denominator: Sexp) -> Self {
+        Self::new(SexpKind::Rational(
+            Box::new(numerator),
+            Box::new(denominator),
+        ))
+    }
+
+    /// complex number
+    pub fn complex(real: Sexp, imag: Sexp) -> Self {
+        Self::new(SexpKind::Complex(Box::new(real), Box::new(imag)))
+    }
+
+    /// bytevector
+    pub fn bytevector(bytes: Vec<u8>) -> Self {
+        Self::new(SexpKind::Bytevector(bytes))
+    }
 }
 
 // --- accessors ---
@@ -262,6 +293,38 @@ impl Sexp {
     pub fn is_nil(&self) -> bool {
         matches!(self.kind, SexpKind::Nil)
     }
+
+    /// extract as bignum string, if this is a `Bignum`
+    pub fn as_bignum(&self) -> Option<&str> {
+        match &self.kind {
+            SexpKind::Bignum(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// extract rational components, if this is a `Rational`
+    pub fn as_rational(&self) -> Option<(&Sexp, &Sexp)> {
+        match &self.kind {
+            SexpKind::Rational(n, d) => Some((n.as_ref(), d.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// extract complex components, if this is a `Complex`
+    pub fn as_complex(&self) -> Option<(&Sexp, &Sexp)> {
+        match &self.kind {
+            SexpKind::Complex(r, i) => Some((r.as_ref(), i.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// extract as bytevector slice, if this is a `Bytevector`
+    pub fn as_bytevector(&self) -> Option<&[u8]> {
+        match &self.kind {
+            SexpKind::Bytevector(b) => Some(b.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 // --- equality (ignores span and comments) ---
@@ -293,6 +356,27 @@ impl fmt::Display for Sexp {
                 write!(f, ")")
             }
             SexpKind::Nil => write!(f, "()"),
+            SexpKind::Bignum(s) => write!(f, "{s}"),
+            SexpKind::Rational(n, d) => write!(f, "{n}/{d}"),
+            SexpKind::Complex(r, i) => {
+                write!(f, "{r}")?;
+                let imag_str = format!("{i}");
+                if imag_str.starts_with('-') || imag_str.starts_with('+') {
+                    write!(f, "{imag_str}i")
+                } else {
+                    write!(f, "+{imag_str}i")
+                }
+            }
+            SexpKind::Bytevector(bytes) => {
+                write!(f, "#u8(")?;
+                for (idx, b) in bytes.iter().enumerate() {
+                    if idx > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{b}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -501,6 +585,28 @@ impl serde::Serialize for Sexp {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
                     seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            SexpKind::Bignum(s) => serializer.serialize_str(s),
+            SexpKind::Rational(n, d) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("numerator", n.as_ref())?;
+                map.serialize_entry("denominator", d.as_ref())?;
+                map.end()
+            }
+            SexpKind::Complex(r, i) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("real", r.as_ref())?;
+                map.serialize_entry("imag", i.as_ref())?;
+                map.end()
+            }
+            SexpKind::Bytevector(bytes) => {
+                let mut seq = serializer.serialize_seq(Some(bytes.len()))?;
+                for b in bytes {
+                    seq.serialize_element(b)?;
                 }
                 seq.end()
             }
@@ -840,5 +946,67 @@ mod tests {
         assert_eq!(Sexp::symbol("+").to_string(), "+");
         assert_eq!(Sexp::symbol("-").to_string(), "-");
         assert_eq!(Sexp::symbol("...").to_string(), "...");
+    }
+
+    // --- numeric tower tests ---
+
+    #[test]
+    fn display_bignum() {
+        assert_eq!(
+            Sexp::bignum("12345678901234567890").to_string(),
+            "12345678901234567890"
+        );
+        assert_eq!(Sexp::bignum("-99999").to_string(), "-99999");
+    }
+
+    #[test]
+    fn display_rational() {
+        let r = Sexp::rational(Sexp::integer(1), Sexp::integer(3));
+        assert_eq!(r.to_string(), "1/3");
+    }
+
+    #[test]
+    fn display_complex() {
+        let c = Sexp::complex(Sexp::integer(1), Sexp::integer(2));
+        assert_eq!(c.to_string(), "1+2i");
+
+        let c_neg = Sexp::complex(Sexp::integer(1), Sexp::integer(-2));
+        assert_eq!(c_neg.to_string(), "1-2i");
+    }
+
+    #[test]
+    fn display_bytevector() {
+        assert_eq!(Sexp::bytevector(vec![1, 2, 3]).to_string(), "#u8(1 2 3)");
+        assert_eq!(Sexp::bytevector(vec![]).to_string(), "#u8()");
+    }
+
+    #[test]
+    fn accessors_new_types() {
+        assert_eq!(Sexp::bignum("42").as_bignum(), Some("42"));
+        assert!(
+            Sexp::rational(Sexp::integer(1), Sexp::integer(2))
+                .as_rational()
+                .is_some()
+        );
+        assert!(
+            Sexp::complex(Sexp::integer(1), Sexp::integer(2))
+                .as_complex()
+                .is_some()
+        );
+        assert_eq!(
+            Sexp::bytevector(vec![1, 2]).as_bytevector(),
+            Some([1u8, 2].as_slice())
+        );
+    }
+
+    #[test]
+    fn equality_new_types() {
+        assert_eq!(Sexp::bignum("123"), Sexp::bignum("123"));
+        assert_ne!(Sexp::bignum("123"), Sexp::bignum("456"));
+        assert_eq!(
+            Sexp::rational(Sexp::integer(1), Sexp::integer(3)),
+            Sexp::rational(Sexp::integer(1), Sexp::integer(3)),
+        );
+        assert_eq!(Sexp::bytevector(vec![1, 2]), Sexp::bytevector(vec![1, 2]));
     }
 }
