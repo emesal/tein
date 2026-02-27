@@ -51,6 +51,7 @@ pub mod foreign;
 pub mod managed;
 mod port;
 pub mod sandbox;
+mod sexp_bridge;
 mod thread;
 mod timeout;
 mod value;
