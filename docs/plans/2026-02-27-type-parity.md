@@ -13,8 +13,11 @@
 **Base branch:** dev
 **Branch:** `feature/numeric-tower-2602`
 
-**Progress:** tasks 1-5 done (commit `43df9a0`). tasks 6-10 remain.
-**Notes:** tasks 3-5 combined in one commit (value.rs non-exhaustive match forced all three together). `test_complex_from_scheme` uses `Context::new_standard()` — `make-rectangular` requires standard env.
+**Progress:** tasks 1-8 done. tasks 9-10 remain.
+**Notes:**
+- tasks 3-5 combined in one commit (value.rs non-exhaustive match forced all three together). `test_complex_from_scheme` uses `Context::new_standard()` — `make-rectangular` requires standard env.
+- tasks 6-8 done in session 2: tein-sexp ast variants, lexer/parser for bignum/rational/bytevector/complex. 139 tein-sexp tests passing.
+- commits: `2dd42f3` (task 6), `603df68` (task 7), `ff9f5a1` (task 8)
 
 ---
 
@@ -625,7 +628,7 @@ feat(value): to_raw for bignum, rational, complex with GC-safe rooting (#71)
 
 ---
 
-### Task 6: tein-sexp — SexpKind new variants (ast, constructors, accessors, Display, PartialEq)
+### ~~Task 6: tein-sexp — SexpKind new variants (ast, constructors, accessors, Display, PartialEq)~~ ✓
 
 **Files:**
 - Modify: `tein-sexp/src/ast.rs`
@@ -832,7 +835,7 @@ feat(tein-sexp): add Bignum, Rational, Complex, Bytevector to SexpKind (#71)
 
 ---
 
-### Task 7: tein-sexp — lexer/parser for bignum, rational, and bytevector literals
+### ~~Task 7: tein-sexp — lexer/parser for bignum, rational, and bytevector literals~~ ✓
 
 **Files:**
 - Modify: `tein-sexp/src/lexer.rs`
@@ -1059,7 +1062,7 @@ feat(tein-sexp): lexer/parser for bignum, rational, bytevector literals (#71)
 
 ---
 
-### Task 8: tein-sexp — complex number lexing/parsing
+### ~~Task 8: tein-sexp — complex number lexing/parsing~~ ✓
 
 **Files:**
 - Modify: `tein-sexp/src/lexer.rs`
