@@ -781,15 +781,14 @@ unsafe extern "C" fn json_parse_trampoline(
         }
         let data = ffi::sexp_string_data(str_sexp);
         let len = ffi::sexp_string_size(str_sexp) as usize;
-        let input =
-            match std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
-                Ok(s) => s,
-                Err(e) => {
-                    let msg = format!("json-parse: invalid UTF-8: {e}");
-                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                    return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-                }
-            };
+        let input = match std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("json-parse: invalid UTF-8: {e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
         match crate::json::json_parse(input) {
             Ok(value) => match value.to_raw(ctx) {
                 Ok(raw) => raw,

@@ -20,7 +20,6 @@
 //! | `null`       | `'null` symbol            |
 
 use crate::{Error, Result, Value, ffi};
-use tein_sexp::{Sexp, SexpKind};
 
 /// parse a JSON string into a scheme `Value`.
 ///
@@ -28,25 +27,9 @@ use tein_sexp::{Sexp, SexpKind};
 /// (empty list/array). empty `[]` becomes `Value::Nil` and empty `{}` becomes
 /// `Value::Nil`.
 pub fn json_parse(input: &str) -> Result<Value> {
-    let jv: serde_json::Value = serde_json::from_str(input)
-        .map_err(|e| Error::EvalError(format!("json-parse: {e}")))?;
+    let jv: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| Error::EvalError(format!("json-parse: {e}")))?;
     json_value_to_value(jv)
-}
-
-/// stringify a scheme `Value` as JSON.
-///
-/// `Value::Symbol("null")` becomes JSON `null`. values that can't be
-/// represented in JSON (procedures, ports, etc.) produce an error.
-///
-/// note: this path is for rust callers using `Value` directly. the scheme
-/// trampoline uses `json_stringify_raw` to preserve alist structure.
-pub fn json_stringify(value: &Value) -> Result<String> {
-    use crate::sexp_bridge;
-    use tein_sexp::Sexp;
-    let sexp = sexp_bridge::value_to_sexp(value)?;
-    let sexp = remap_null_symbol_to_nil(sexp);
-    serde_json::to_string(&sexp)
-        .map_err(|e| Error::EvalError(format!("json-stringify: {e}")))
 }
 
 /// stringify a raw chibi sexp as JSON.
@@ -75,11 +58,7 @@ const MAX_DEPTH: usize = 10_000;
 /// with a string or symbol car. scheme's `(key . val)` is stored as a cons pair
 /// regardless of whether val is a proper list, so `sexp_pairp(car)` and
 /// `sexp_stringp(sexp_car(car))` reliably detects alist entries.
-unsafe fn json_sexp_to_value(
-    ctx: ffi::sexp,
-    sexp: ffi::sexp,
-    depth: usize,
-) -> Result<String> {
+unsafe fn json_sexp_to_value(ctx: ffi::sexp, sexp: ffi::sexp, depth: usize) -> Result<String> {
     if depth > MAX_DEPTH {
         return Err(Error::EvalError(
             "json-stringify: maximum nesting depth exceeded".to_string(),
@@ -99,10 +78,14 @@ unsafe fn json_sexp_to_value(
         }
         if ffi::sexp_symbolp(sexp) != 0 {
             // check for 'null symbol → JSON null
-            let sym_ptr = ffi::sexp_string_data(ffi::sexp_symbol_to_string(ctx, sexp));
-            let sym_len = ffi::sexp_string_size(ffi::sexp_symbol_to_string(ctx, sexp)) as usize;
-            let sym = std::str::from_utf8(std::slice::from_raw_parts(sym_ptr as *const u8, sym_len))
-                .map_err(|e| Error::EvalError(format!("json-stringify: symbol UTF-8 error: {e}")))?;
+            let sym_str = ffi::sexp_symbol_to_string(ctx, sexp);
+            let sym_ptr = ffi::sexp_string_data(sym_str);
+            let sym_len = ffi::sexp_string_size(sym_str) as usize;
+            let sym =
+                std::str::from_utf8(std::slice::from_raw_parts(sym_ptr as *const u8, sym_len))
+                    .map_err(|e| {
+                        Error::EvalError(format!("json-stringify: symbol UTF-8 error: {e}"))
+                    })?;
             if sym == "null" {
                 return Ok("null".to_string());
             }
@@ -114,7 +97,9 @@ unsafe fn json_sexp_to_value(
             let ptr = ffi::sexp_string_data(sexp);
             let len = ffi::sexp_string_size(sexp) as usize;
             let s = std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
-                .map_err(|e| Error::EvalError(format!("json-stringify: string UTF-8 error: {e}")))?;
+                .map_err(|e| {
+                    Error::EvalError(format!("json-stringify: string UTF-8 error: {e}"))
+                })?;
             return serde_json::to_string(s)
                 .map_err(|e| Error::EvalError(format!("json-stringify: {e}")));
         }
@@ -159,21 +144,21 @@ unsafe fn json_sexp_to_value(
                         let key = if ffi::sexp_stringp(k) != 0 {
                             let ptr = ffi::sexp_string_data(k);
                             let len = ffi::sexp_string_size(k) as usize;
-                            std::str::from_utf8(
-                                std::slice::from_raw_parts(ptr as *const u8, len),
-                            )
-                            .map_err(|e| Error::EvalError(format!("json-stringify: key UTF-8: {e}")))?
-                            .to_string()
+                            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                                .map_err(|e| {
+                                    Error::EvalError(format!("json-stringify: key UTF-8: {e}"))
+                                })?
+                                .to_string()
                         } else {
                             // symbol key
                             let ss = ffi::sexp_symbol_to_string(ctx, k);
                             let ptr = ffi::sexp_string_data(ss);
                             let len = ffi::sexp_string_size(ss) as usize;
-                            std::str::from_utf8(
-                                std::slice::from_raw_parts(ptr as *const u8, len),
-                            )
-                            .map_err(|e| Error::EvalError(format!("json-stringify: key UTF-8: {e}")))?
-                            .to_string()
+                            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                                .map_err(|e| {
+                                    Error::EvalError(format!("json-stringify: key UTF-8: {e}"))
+                                })?
+                                .to_string()
                         };
                         let key_json = serde_json::to_string(&key)
                             .map_err(|e| Error::EvalError(format!("json-stringify: {e}")))?;
@@ -209,9 +194,9 @@ unsafe fn json_sexp_to_value(
             ));
         }
 
-        Err(Error::TypeError(format!(
-            "json-stringify: cannot convert scheme value to JSON"
-        )))
+        Err(Error::TypeError(
+            "json-stringify: cannot convert scheme value to JSON".to_string(),
+        ))
     }
 }
 
@@ -259,29 +244,38 @@ fn json_value_to_value(jv: serde_json::Value) -> Result<Value> {
     }
 }
 
-/// recursively remap `Sexp::Symbol("null")` → `Sexp::Nil` before serialization.
-///
-/// ensures scheme `'null` becomes JSON `null` in the output.
-fn remap_null_symbol_to_nil(sexp: Sexp) -> Sexp {
-    match sexp.kind {
-        SexpKind::Symbol(ref s) if s == "null" => Sexp::nil(),
-        SexpKind::List(items) => {
-            Sexp::list(items.into_iter().map(remap_null_symbol_to_nil).collect())
-        }
-        SexpKind::DottedList(heads, tail) => Sexp::dotted_list(
-            heads.into_iter().map(remap_null_symbol_to_nil).collect(),
-            remap_null_symbol_to_nil(*tail),
-        ),
-        SexpKind::Vector(items) => {
-            Sexp::vector(items.into_iter().map(remap_null_symbol_to_nil).collect())
-        }
-        _ => sexp,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sexp_bridge;
+    use tein_sexp::{Sexp, SexpKind};
+
+    /// stringify a `Value` as JSON via the sexp bridge (test-only rust path).
+    ///
+    /// `Value::Symbol("null")` → JSON `null`. for test assertions on hand-built
+    /// `Value`s where alist structure is preserved (no chibi round-trip needed).
+    fn json_stringify(value: &Value) -> Result<String> {
+        let sexp = sexp_bridge::value_to_sexp(value)?;
+        let sexp = remap_null_symbol_to_nil(sexp);
+        serde_json::to_string(&sexp).map_err(|e| Error::EvalError(format!("json-stringify: {e}")))
+    }
+
+    fn remap_null_symbol_to_nil(sexp: Sexp) -> Sexp {
+        match sexp.kind {
+            SexpKind::Symbol(ref s) if s == "null" => Sexp::nil(),
+            SexpKind::List(items) => {
+                Sexp::list(items.into_iter().map(remap_null_symbol_to_nil).collect())
+            }
+            SexpKind::DottedList(heads, tail) => Sexp::dotted_list(
+                heads.into_iter().map(remap_null_symbol_to_nil).collect(),
+                remap_null_symbol_to_nil(*tail),
+            ),
+            SexpKind::Vector(items) => {
+                Sexp::vector(items.into_iter().map(remap_null_symbol_to_nil).collect())
+            }
+            _ => sexp,
+        }
+    }
 
     // --- json_parse tests ---
 
@@ -373,7 +367,7 @@ mod tests {
 
     #[test]
     fn parse_float() {
-        assert_eq!(json_parse("3.14").unwrap(), Value::Float(3.14));
+        assert_eq!(json_parse("2.5").unwrap(), Value::Float(2.5));
     }
 
     #[test]
@@ -411,7 +405,7 @@ mod tests {
         assert!(err.to_string().contains("json-parse"));
     }
 
-    // --- json_stringify tests ---
+    // --- json_stringify tests (rust-side, hand-built Values) ---
 
     #[test]
     fn stringify_alist_as_object() {
@@ -450,7 +444,7 @@ mod tests {
         assert_eq!(json, "null");
     }
 
-    // --- round-trip tests ---
+    // --- round-trip tests (rust-side) ---
 
     #[test]
     fn round_trip_object() {

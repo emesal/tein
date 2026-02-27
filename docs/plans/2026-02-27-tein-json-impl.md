@@ -2,6 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Status:** COMPLETE — all 7 tasks implemented.
+
 **Goal:** bidirectional JSON ↔ scheme conversion as a built-in `(tein json)` module.
 
 **Architecture:** json string → `serde_json::from_str::<Sexp>` → null remapping → `sexp_to_value` bridge → `Value` → `to_raw` → chibi sexp. reverse path for stringify. the `Value ↔ Sexp` bridge is reusable for future format modules (toml, yaml).

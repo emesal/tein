@@ -589,8 +589,8 @@ mod tests {
 
     #[test]
     fn deserialize_bool() {
-        assert_eq!(from_str::<bool>("#t").unwrap(), true);
-        assert_eq!(from_str::<bool>("#f").unwrap(), false);
+        assert!(from_str::<bool>("#t").unwrap());
+        assert!(!from_str::<bool>("#f").unwrap());
     }
 
     #[test]
@@ -799,7 +799,7 @@ mod tests {
 
         // booleans
         let text = crate::serde::to_string(&true).unwrap();
-        assert_eq!(from_str::<bool>(&text).unwrap(), true);
+        assert!(from_str::<bool>(&text).unwrap());
     }
 
     #[test]

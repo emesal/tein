@@ -25,6 +25,11 @@
 //! | `DottedList`   | `Pair`         | nest into right-recursive pairs (reverse)  |
 //! | opaque types   | —              | error (Procedure, Port, etc.)              |
 
+// sexp_bridge is a shared layer for format modules (json, toml, yaml, ...).
+// not all fns are called from current code — suppress dead_code until more
+// format modules are added.
+#![allow(dead_code)]
+
 use crate::{Error, Result, Value};
 use tein_sexp::Sexp;
 
@@ -111,18 +116,16 @@ fn value_to_sexp_depth(value: &Value, depth: usize) -> Result<Sexp> {
         Value::Procedure(_) => Err(Error::TypeError(
             "cannot convert procedure to sexp".to_string(),
         )),
-        Value::Port(_) => Err(Error::TypeError(
-            "cannot convert port to sexp".to_string(),
-        )),
+        Value::Port(_) => Err(Error::TypeError("cannot convert port to sexp".to_string())),
         Value::HashTable(_) => Err(Error::TypeError(
             "cannot convert hash-table to sexp".to_string(),
         )),
-        Value::Foreign { type_name, .. } => Err(Error::TypeError(
-            format!("cannot convert foreign object ({type_name}) to sexp"),
-        )),
-        Value::Other(desc) => Err(Error::TypeError(
-            format!("cannot convert opaque value ({desc}) to sexp"),
-        )),
+        Value::Foreign { type_name, .. } => Err(Error::TypeError(format!(
+            "cannot convert foreign object ({type_name}) to sexp"
+        ))),
+        Value::Other(desc) => Err(Error::TypeError(format!(
+            "cannot convert opaque value ({desc}) to sexp"
+        ))),
         Value::Unspecified => Err(Error::TypeError(
             "cannot convert unspecified to sexp".to_string(),
         )),
@@ -197,9 +200,9 @@ mod tests {
 
     #[test]
     fn round_trip_float() {
-        let v = Value::Float(3.14);
+        let v = Value::Float(2.5);
         let s = value_to_sexp(&v).unwrap();
-        assert_eq!(s, Sexp::float(3.14));
+        assert_eq!(s, Sexp::float(2.5));
         assert_eq!(sexp_to_value(&s).unwrap(), v);
     }
 
@@ -281,10 +284,7 @@ mod tests {
     fn round_trip_list() {
         let v = Value::List(vec![Value::Integer(1), Value::String("two".to_string())]);
         let s = value_to_sexp(&v).unwrap();
-        assert_eq!(
-            s,
-            Sexp::list(vec![Sexp::integer(1), Sexp::string("two")])
-        );
+        assert_eq!(s, Sexp::list(vec![Sexp::integer(1), Sexp::string("two")]));
         assert_eq!(sexp_to_value(&s).unwrap(), v);
     }
 
@@ -301,7 +301,10 @@ mod tests {
         // (1 . 2) → DottedList [1] 2
         let v = Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
         let s = value_to_sexp(&v).unwrap();
-        assert_eq!(s, Sexp::dotted_list(vec![Sexp::integer(1)], Sexp::integer(2)));
+        assert_eq!(
+            s,
+            Sexp::dotted_list(vec![Sexp::integer(1)], Sexp::integer(2))
+        );
     }
 
     #[test]
