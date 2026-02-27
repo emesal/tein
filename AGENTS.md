@@ -64,8 +64,9 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
                  module import policy (tein_module_allowed, tein_module_policy_set),
                  custom port creation, reader dispatch table (set/unset/get/chars/clear/reserved),
                  macro expansion hook (set/get/clear/active guard)
-  eval.c       — 4 patches: VFS module lookup (A + module policy gate), VFS load (B), VFS open-input-file (C),
-                 macro expansion hook call in analyze_macro_once (D)
+  eval.c       — 5 patches: VFS module lookup (A + module policy gate), VFS load (B), VFS open-input-file (C),
+                 macro expansion hook call in analyze_macro_once (D),
+                 suppress false "importing undefined variable" for rust-registered bindings (E)
   sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
   vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
   lib/tein/foreign.sld — (tein foreign) library definition
@@ -131,6 +132,8 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **tein_const scheme naming**: constants get no module prefix — `#[tein_const] pub const GREETING` in module `"foo"` → scheme name `greeting`, not `foo-greeting`. free fns do get the prefix (`foo-greet`).
 
 **Result::Err returns a scheme string**: `fn foo() -> Result<i64, String>` — the `Err` path returns `sexp_c_str(msg)` which becomes `Value::String(msg)` in rust. it's not an exception; `(test-error ...)` won't catch it. match on `Value::String` instead. same in internal and ext mode.
+
+**import warning suppression (eval.c patch E)**: `define_fn_variadic` registers bindings into the top-level env, not the library env. chibi's `sexp_env_import_op` would normally warn "importing undefined variable" for these because they're absent from the library's `.scm`. the fork patch suppresses the warning when `oldcell` (destination env lookup) is non-NULL — meaning the name is already reachable. NOTE: ext foreign type method convenience procs still warn due to a separate double-prefix bug (#69).
 
 **type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0, producing garbage integer values.
 
