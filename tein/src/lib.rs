@@ -48,6 +48,7 @@ mod context;
 mod error;
 mod ffi;
 pub mod foreign;
+mod json;
 pub mod managed;
 mod port;
 pub mod sandbox;
