@@ -1,7 +1,7 @@
 //! proc macros for tein scheme interpreter
 //!
-//! provides `#[tein_fn]`, `#[tein_module]`, `#[tein_type]`, and `#[tein_methods]`
-//! for ergonomic foreign function and module definition.
+//! provides `#[tein_fn]`, `#[tein_module]`, `#[tein_type]`, `#[tein_methods]`,
+//! and `#[tein_const]` for ergonomic foreign function and module definition.
 //! legacy `#[scheme_fn]` has been removed — use `#[tein_fn]` instead.
 
 use std::collections::HashMap;
@@ -160,6 +160,49 @@ fn pascal_to_kebab(name: &str) -> String {
     result
 }
 
+/// convert SCREAMING_SNAKE_CASE to kebab-case.
+///
+/// examples: `UUID_NIL` → `uuid-nil`, `MAX_SIZE` → `max-size`
+fn screaming_to_kebab(name: &str) -> String {
+    name.to_ascii_lowercase().replace('_', "-")
+}
+
+/// extract a scheme literal representation from a const expression.
+///
+/// supported: string literals → `"..."`, integer → digits, float → digits,
+/// bool → `#t`/`#f`. returns `Err` for unsupported expressions.
+fn const_to_scheme_literal(expr: &syn::Expr) -> syn::Result<String> {
+    match expr {
+        syn::Expr::Lit(syn::ExprLit { lit, .. }) => match lit {
+            syn::Lit::Str(s) => {
+                // escape backslashes and double quotes for scheme string
+                let escaped = s.value().replace('\\', "\\\\").replace('"', "\\\"");
+                Ok(format!("\"{}\"", escaped))
+            }
+            syn::Lit::Int(i) => Ok(i.base10_digits().to_string()),
+            syn::Lit::Float(f) => Ok(f.base10_digits().to_string()),
+            syn::Lit::Bool(b) => Ok(if b.value { "#t" } else { "#f" }.to_string()),
+            _ => Err(syn::Error::new_spanned(
+                lit,
+                "#[tein_const] supports string, integer, float, and bool literals",
+            )),
+        },
+        // handle negative literals: `-42`, `-3.14`
+        syn::Expr::Unary(syn::ExprUnary {
+            op: syn::UnOp::Neg(_),
+            expr: inner,
+            ..
+        }) => {
+            let inner_lit = const_to_scheme_literal(inner)?;
+            Ok(format!("-{}", inner_lit))
+        }
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "#[tein_const] requires a literal expression (string, integer, float, or bool)",
+        )),
+    }
+}
+
 // ── module data model ─────────────────────────────────────────────────────────
 
 /// parsed representation of a `#[tein_module("name")]` block.
@@ -170,6 +213,8 @@ struct ModuleInfo {
     mod_item: ItemMod,
     /// free functions annotated with `#[tein_fn]`
     free_fns: Vec<FreeFnInfo>,
+    /// constants annotated with `#[tein_const]`
+    consts: Vec<ConstInfo>,
     /// types annotated with `#[tein_type]`
     types: Vec<TypeInfo>,
 }
@@ -202,6 +247,14 @@ struct MethodInfo {
     is_mut: bool,
 }
 
+/// a `#[tein_const]` constant inside a module
+struct ConstInfo {
+    /// scheme name (derived from const name, or overridden via `name = "..."`)
+    scheme_name: String,
+    /// scheme literal representation (e.g. `"\"hello\""`, `42`, `#t`)
+    scheme_literal: String,
+}
+
 // ── module parsing ────────────────────────────────────────────────────────────
 
 fn parse_and_generate_module(
@@ -218,6 +271,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
     })?;
 
     let mut free_fns = Vec::new();
+    let mut consts: Vec<ConstInfo> = Vec::new(); // populated below
     let mut types: Vec<TypeInfo> = Vec::new();
     let mut type_names: HashMap<String, usize> = HashMap::new();
     let mut clean_items: Vec<Item> = Vec::new();
@@ -239,6 +293,21 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                     scheme_name,
                 });
                 // don't push to clean_items — generate_scheme_fn emits the fn + wrapper
+            }
+            Item::Const(c) if has_tein_attr(&c.attrs, "tein_const") => {
+                let override_name = extract_name_override(&c.attrs, "tein_const")?;
+                let rust_name = c.ident.to_string();
+                let scheme_name = override_name.unwrap_or_else(|| screaming_to_kebab(&rust_name));
+                let scheme_literal = const_to_scheme_literal(&c.expr)?;
+                consts.push(ConstInfo {
+                    scheme_name,
+                    scheme_literal,
+                });
+                let mut clean_const = c.clone();
+                clean_const
+                    .attrs
+                    .retain(|a| !is_tein_attr_named(a, "tein_const"));
+                clean_items.push(Item::Const(clean_const));
             }
             Item::Struct(s) if has_tein_attr(&s.attrs, "tein_type") => {
                 let override_name = extract_name_override(&s.attrs, "tein_type")?;
@@ -308,6 +377,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
         name: module_name,
         mod_item: clean_mod,
         free_fns,
+        consts,
         types,
     })
 }
@@ -557,6 +627,9 @@ fn generate_vfs_sld(info: &ModuleInfo) -> String {
     for f in &info.free_fns {
         exports.push(f.scheme_name.clone());
     }
+    for c in &info.consts {
+        exports.push(c.scheme_name.clone());
+    }
     for t in &info.types {
         exports.push(format!("{}?", t.scheme_type_name));
         for m in &t.methods {
@@ -576,7 +649,14 @@ fn generate_vfs_sld(info: &ModuleInfo) -> String {
 }
 
 fn generate_vfs_scm(info: &ModuleInfo) -> String {
-    format!(";; (tein {}) — generated by #[tein_module]\n", info.name)
+    let mut lines = vec![format!(
+        ";; (tein {}) — generated by #[tein_module]",
+        info.name
+    )];
+    for c in &info.consts {
+        lines.push(format!("(define {} {})", c.scheme_name, c.scheme_literal));
+    }
+    lines.join("\n") + "\n"
 }
 
 fn generate_register_fn(info: &ModuleInfo) -> proc_macro2::TokenStream {

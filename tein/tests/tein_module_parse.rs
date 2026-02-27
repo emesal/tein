@@ -12,6 +12,10 @@ mod parse_test {
     pub fn hello() -> i64 {
         42
     }
+
+    #[tein_const]
+    #[allow(dead_code)]
+    pub const MAX_ITEMS: i64 = 100;
 }
 
 #[test]
