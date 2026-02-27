@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-cargo test                         # all tests (211 lib + 12 tein_fn + 23 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 4 tein_module_docs + 5 tein-macros + doc-tests)
+cargo test                         # all tests (211 lib + 12 tein_fn + 24 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 9 tein-macros + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 cargo clippy                       # lint

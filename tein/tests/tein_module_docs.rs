@@ -103,3 +103,111 @@ fn test_doc_preservation_compiles() {
     // cargo doc would pick them up.
     let _: fn(&tein::Context) -> tein::Result<()> = dp::register_module_dp;
 }
+
+// ── docs sub-library tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_docs_sub_library_import() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    // importing the docs sub-library should work
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    // the docs alist should be defined
+    let result = ctx.evaluate("dp-docs").expect("dp-docs");
+    // it should be a list (alist)
+    assert!(matches!(result, Value::List(_)));
+}
+
+#[test]
+fn test_docs_module_metadata() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    ctx.evaluate("(import (tein docs))")
+        .expect("import tein docs");
+    let result = ctx
+        .evaluate("(module-doc dp-docs '__module__)")
+        .expect("module-doc");
+    assert_eq!(result, Value::String("tein dp".into()));
+}
+
+#[test]
+fn test_docs_fn_doc_lookup() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    ctx.evaluate("(import (tein docs))")
+        .expect("import tein docs");
+    let result = ctx
+        .evaluate("(module-doc dp-docs 'dp-documented-fn)")
+        .expect("module-doc fn");
+    assert_eq!(result, Value::String("documented function".into()));
+}
+
+#[test]
+fn test_docs_const_doc_lookup() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    ctx.evaluate("(import (tein docs))")
+        .expect("import tein docs");
+    let result = ctx
+        .evaluate("(module-doc dp-docs 'documented)")
+        .expect("module-doc const");
+    assert_eq!(result, Value::String("documented constant".into()));
+}
+
+#[test]
+fn test_docs_type_predicate_doc() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    ctx.evaluate("(import (tein docs))")
+        .expect("import tein docs");
+    let result = ctx
+        .evaluate("(module-doc dp-docs 'doc-type?)")
+        .expect("module-doc type");
+    assert_eq!(result, Value::String("documented type".into()));
+}
+
+#[test]
+fn test_docs_method_doc() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    ctx.evaluate("(import (tein docs))")
+        .expect("import tein docs");
+    let result = ctx
+        .evaluate("(module-doc dp-docs 'doc-type-get)")
+        .expect("module-doc method");
+    assert_eq!(result, Value::String("get the value".into()));
+}
+
+#[test]
+fn test_docs_describe_output() {
+    let ctx = Context::builder().standard_env().build().expect("ctx");
+    dp::register_module_dp(&ctx).expect("register");
+    ctx.evaluate("(import (tein dp docs))")
+        .expect("import docs");
+    ctx.evaluate("(import (tein docs))")
+        .expect("import tein docs");
+    let result = ctx.evaluate("(describe dp-docs)").expect("describe");
+    if let Value::String(s) = &result {
+        assert!(s.contains("(tein dp)"), "should contain module name");
+        assert!(
+            s.contains("documented constant"),
+            "should contain const doc"
+        );
+        assert!(s.contains("documented function"), "should contain fn doc");
+        assert!(s.contains("doc-type?"), "should contain type predicate");
+        assert!(s.contains("get the value"), "should contain method doc");
+    } else {
+        panic!("describe should return a string, got {:?}", result);
+    }
+}

@@ -82,6 +82,9 @@ const VFS_FILES: &[&str] = &[
     // tein test framework
     "lib/tein/test.sld",
     "lib/tein/test.scm",
+    // tein documentation accessors
+    "lib/tein/docs.sld",
+    "lib/tein/docs.scm",
 ];
 
 /// C-backed modules that need static linking.

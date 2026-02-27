@@ -228,3 +228,8 @@ fn test_scheme_reader_macro_sandbox() {
 fn test_scheme_tein_module() {
     run_scheme_test_with_module(include_str!("scheme/tein_module.scm"));
 }
+
+#[test]
+fn test_scheme_docs() {
+    run_scheme_test_with_module(include_str!("scheme/docs.scm"));
+}
