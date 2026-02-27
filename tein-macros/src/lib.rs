@@ -550,6 +550,7 @@ fn generate_module_ext(info: ModuleInfo) -> syn::Result<proc_macro2::TokenStream
 
     Ok(quote! {
         #(#mod_attrs)*
+        #[allow(dead_code, non_snake_case)]
         #mod_vis mod #mod_name {
             #(#items)*
             #api_tls
@@ -781,6 +782,7 @@ fn generate_ext_method_wrapper(
     let return_conv = gen_return_conversion_ext(&m.method.sig.output, call_expr, "api")?;
 
     Ok(quote! {
+        #[allow(non_snake_case)]
         unsafe extern "C" fn #wrapper_ident(
             obj: *mut ::std::ffi::c_void,
             ctx: *mut tein_ext::OpaqueCtx,

@@ -290,6 +290,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tein-test-ext"
+version = "0.1.0"
+dependencies = [
+ "tein-ext",
+ "tein-macros",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
