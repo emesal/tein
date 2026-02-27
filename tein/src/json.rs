@@ -5,14 +5,17 @@
 //! (bypassing `Value::from_raw`) to preserve alist structure — chibi's pair representation
 //! collapses `(key . val)` into a proper list when val is itself a proper list, which would
 //! lose the dotted-pair structure needed to detect alists. the `'null` symbol distinguishes
-//! JSON null from scheme `'()` (empty list/array).
+//! JSON null from scheme `'()`. empty `[]` and empty `{}` both map to `'()` — an accepted
+//! ambiguity in the alist model; `'()` stringifies back as `[]`.
 //!
 //! ## representation
 //!
 //! | JSON         | scheme                    |
 //! |--------------|---------------------------|
 //! | object `{}`  | alist `((key . val) ...)` |
+//! | empty `{}`   | `'()` (same as `[]`)      |
 //! | array `[]`   | list `(...)`              |
+//! | empty `[]`   | `'()`                     |
 //! | string       | string                    |
 //! | integer      | integer / bignum          |
 //! | float        | flonum                    |
@@ -23,9 +26,9 @@ use crate::{Error, Result, Value, ffi};
 
 /// parse a JSON string into a scheme `Value`.
 ///
-/// JSON null becomes `Value::Symbol("null")` to distinguish from `Value::Nil`
-/// (empty list/array). empty `[]` becomes `Value::Nil` and empty `{}` becomes
-/// `Value::Nil`.
+/// JSON null becomes `Value::Symbol("null")` to distinguish from `Value::Nil`.
+/// both empty `[]` and empty `{}` become `Value::Nil` (`'()`) — an accepted
+/// ambiguity in the alist model; `'()` stringifies back as `[]`.
 pub fn json_parse(input: &str) -> Result<Value> {
     let jv: serde_json::Value =
         serde_json::from_str(input).map_err(|e| Error::EvalError(format!("json-parse: {e}")))?;
@@ -73,8 +76,10 @@ unsafe fn json_sexp_to_value(ctx: ffi::sexp, sexp: ffi::sexp, depth: usize) -> R
             }
         }
         if ffi::sexp_nullp(sexp) != 0 {
-            // scheme '() (empty list/empty object) → JSON null
-            return Ok("null".to_string());
+            // scheme '() → JSON empty array. note: empty objects ({}) also
+            // parse to '() and will round-trip as [] not {} — this is a known
+            // ambiguity in the alist model; empty array is the canonical output.
+            return Ok("[]".to_string());
         }
         if ffi::sexp_symbolp(sexp) != 0 {
             // check for 'null symbol → JSON null
@@ -271,6 +276,8 @@ mod tests {
                 remap_null_symbol_to_nil(*tail),
             ),
             SexpKind::Vector(items) => {
+                // note: Vector case handled but JSON doesn't produce vectors,
+                // so null-in-vector is untested on this path.
                 Sexp::vector(items.into_iter().map(remap_null_symbol_to_nil).collect())
             }
             _ => sexp,
@@ -378,6 +385,8 @@ mod tests {
 
     #[test]
     fn parse_empty_object() {
+        // {} and [] are indistinguishable at the scheme level — both become '().
+        // '() stringifies back as [] (known limitation, see module docs).
         assert_eq!(json_parse("{}").unwrap(), Value::Nil);
     }
 
@@ -438,10 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn stringify_nil_as_null() {
-        // Nil → Sexp::Nil → serialize_unit() → JSON null
+    fn stringify_nil_as_empty_array() {
+        // Nil → '() → JSON []
         let json = json_stringify(&Value::Nil).unwrap();
-        assert_eq!(json, "null");
+        assert_eq!(json, "[]");
     }
 
     // --- round-trip tests (rust-side) ---
