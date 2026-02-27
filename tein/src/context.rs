@@ -6251,4 +6251,74 @@ mod tests {
             other => panic!("expected Complex, got {:?}", other),
         }
     }
+
+    // --- (tein json) ---
+
+    #[test]
+    fn test_json_parse_object() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate(r#"(json-parse "{\"a\": 1, \"b\": \"two\"}")"#)
+            .expect("parse");
+        match result {
+            Value::List(items) => assert_eq!(items.len(), 2),
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_json_parse_array() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"[1, 2, 3]\")").expect("parse");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_json_parse_null_is_symbol() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"null\")").expect("parse");
+        assert_eq!(result, Value::Symbol("null".to_string()));
+    }
+
+    #[test]
+    fn test_json_stringify_alist() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate("(json-stringify '((\"name\" . \"tein\")))")
+            .expect("stringify");
+        assert_eq!(result, Value::String("{\"name\":\"tein\"}".to_string()));
+    }
+
+    #[test]
+    fn test_json_round_trip_via_scheme() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate(r#"(json-stringify (json-parse "{\"x\":42}"))"#)
+            .expect("round-trip");
+        assert_eq!(result, Value::String("{\"x\":42}".to_string()));
+    }
+
+    #[test]
+    fn test_json_parse_invalid() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"not json\")").expect("parse");
+        // per convention: errors return scheme strings (see AGENTS.md critical gotchas)
+        match result {
+            Value::String(msg) => assert!(msg.contains("json-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
 }
