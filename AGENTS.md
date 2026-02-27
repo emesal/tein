@@ -36,7 +36,8 @@ src/
   context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests;
                  load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII
   value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
-                 variants: Integer, Float, String, Symbol, Boolean, List, Pair,
+                 variants: Integer, Float, Bignum(String), Rational(Box<Value>, Box<Value>),
+                 Complex(Box<Value>, Box<Value>), String, Symbol, Boolean, List, Pair,
                  Vector, Char, Bytevector, Port (opaque), HashTable (opaque,
                  falls to Other until runtime type detection added), Nil,
                  Unspecified, Procedure, Other, Foreign { handle_id, type_name }
@@ -135,7 +136,9 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **import warning suppression (eval.c patch E)**: `define_fn_variadic` registers bindings into the top-level env, not the library env. chibi's `sexp_env_import_op` would normally warn "importing undefined variable" for these because they're absent from the library's `.scm`. the fork patch suppresses the warning when `oldcell` (destination env lookup) is non-NULL — meaning the name is already reachable. NOTE: ext foreign type method convenience procs previously had doubled name prefixes (#69, fixed).
 
-**type checking order**: check `sexp_flonump` BEFORE `sexp_integerp`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0, producing garbage integer values.
+**type checking order**: `from_raw` checks in broadest-first order: `complex → ratio → bignum → flonum → integer`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0 (garbage integer values) — flonum must come before integer. similarly, ratio and bignum are heap-allocated numbers chibi checks before fixnums/flonums; complex is the broadest and must be outermost.
+
+**numeric tower shim functions**: `sexp_bignum_to_string(ctx, x)` — opens a string port, writes bignum in decimal, returns string sexp (allocates). `sexp_string_to_number(ctx, str, base)` — parses a scheme string as a number (used for `Bignum::to_raw`). `sexp_make_ratio(ctx, num, den)` / `sexp_make_complex(ctx, real, imag)` — constructors for to_raw; the first argument must be GC-rooted before calling (both may allocate).
 
 **chibi feature flags**: on linux, `SEXP_USE_GREEN_THREADS` defaults to 1, so the `threads` cond-expand feature is active (affects which VFS files are loaded, e.g. `srfi/39/syntax.scm` vs `syntax-no-threads.scm`). `full-unicode` is always enabled (affects `scheme/char.sld` path selection).
 
