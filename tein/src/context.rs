@@ -760,6 +760,87 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
+// --- json trampolines ---
+
+/// Trampoline for `json-parse`: takes one scheme string argument, returns parsed value.
+///
+/// On parse error or type mismatch, returns a scheme string with the error message.
+/// This matches tein's convention for native function errors (see AGENTS.md).
+unsafe extern "C" fn json_parse_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let str_sexp = ffi::sexp_car(args);
+        if ffi::sexp_stringp(str_sexp) == 0 {
+            let msg = "json-parse: expected string argument";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let data = ffi::sexp_string_data(str_sexp);
+        let len = ffi::sexp_string_size(str_sexp) as usize;
+        let input =
+            match std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("json-parse: invalid UTF-8: {e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                }
+            };
+        match crate::json::json_parse(input) {
+            Ok(value) => match value.to_raw(ctx) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    let msg = format!("json-parse: {e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                }
+            },
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// Trampoline for `json-stringify`: takes one scheme value, returns JSON string.
+///
+/// On conversion error, returns a scheme string with the error message.
+/// This matches tein's convention for native function errors (see AGENTS.md).
+unsafe extern "C" fn json_stringify_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let val_sexp = ffi::sexp_car(args);
+        match Value::from_raw(ctx, val_sexp) {
+            Ok(value) => match crate::json::json_stringify(&value) {
+                Ok(json) => {
+                    let c_json = CString::new(json.as_str()).unwrap_or_default();
+                    ffi::sexp_c_str(ctx, c_json.as_ptr(), json.len() as ffi::sexp_sint_t)
+                }
+                Err(e) => {
+                    let msg = format!("{e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                }
+            },
+            Err(e) => {
+                let msg = format!("json-stringify: {e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
 /// The 4 file-opening primitives we wrap with policy checks.
 #[derive(Clone, Copy)]
 #[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
@@ -1326,6 +1407,12 @@ impl ContextBuilder {
                 has_port_protocol: Cell::new(false),
                 ext_api: RefCell::new(None),
             };
+
+            // register built-in module trampolines for standard-env contexts.
+            // pure data conversion, no IO — always safe and cheap to register.
+            if self.standard_env {
+                context.register_json_module()?;
+            }
 
             Ok(context)
         }
@@ -2277,6 +2364,17 @@ impl Context {
                    (error \"foreign-handle-id: expected foreign object, got\" x)))",
         )?;
 
+        Ok(())
+    }
+
+    /// Register `json-parse` and `json-stringify` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts. the VFS module
+    /// `(tein json)` exports these names, making them available via
+    /// `(import (tein json))`.
+    fn register_json_module(&self) -> Result<()> {
+        self.define_fn_variadic("json-parse", json_parse_trampoline)?;
+        self.define_fn_variadic("json-stringify", json_stringify_trampoline)?;
         Ok(())
     }
 
