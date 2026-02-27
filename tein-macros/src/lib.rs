@@ -203,6 +203,31 @@ fn const_to_scheme_literal(expr: &syn::Expr) -> syn::Result<String> {
     }
 }
 
+/// extract `///` doc comments from an attribute list.
+///
+/// `///` comments are parsed by rustc into `#[doc = "..."]` attributes.
+/// the leading space rustc adds is trimmed. returns empty vec if no docs.
+fn extract_doc_comments(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter_map(|attr| {
+            if !attr.path().is_ident("doc") {
+                return None;
+            }
+            if let syn::Meta::NameValue(nv) = &attr.meta {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                {
+                    return Some(s.value().strip_prefix(' ').unwrap_or(&s.value()).to_string());
+                }
+            }
+            None
+        })
+        .collect()
+}
+
 // ── module data model ─────────────────────────────────────────────────────────
 
 /// parsed representation of a `#[tein_module("name")]` block.
@@ -1020,5 +1045,40 @@ mod tests {
         assert_eq!(pascal_to_kebab("HttpClient"), "http-client");
         assert_eq!(pascal_to_kebab("Regex"), "regex");
         assert_eq!(pascal_to_kebab("URL"), "u-r-l"); // edge case, use name override
+    }
+
+    #[test]
+    fn test_extract_doc_comments() {
+        use syn::parse_quote;
+
+        // single-line doc
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[doc = " hello world"])];
+        assert_eq!(extract_doc_comments(&attrs), vec!["hello world"]);
+
+        // multi-line docs
+        let attrs: Vec<syn::Attribute> = vec![
+            parse_quote!(#[doc = " line one"]),
+            parse_quote!(#[doc = " line two"]),
+        ];
+        assert_eq!(
+            extract_doc_comments(&attrs),
+            vec!["line one", "line two"]
+        );
+
+        // mixed with non-doc attrs
+        let attrs: Vec<syn::Attribute> = vec![
+            parse_quote!(#[allow(dead_code)]),
+            parse_quote!(#[doc = " the doc"]),
+            parse_quote!(#[cfg(test)]),
+        ];
+        assert_eq!(extract_doc_comments(&attrs), vec!["the doc"]);
+
+        // empty — no docs
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[allow(dead_code)])];
+        assert!(extract_doc_comments(&attrs).is_empty());
+
+        // empty doc comment (just `///`)
+        let attrs: Vec<syn::Attribute> = vec![parse_quote!(#[doc = ""])];
+        assert_eq!(extract_doc_comments(&attrs), vec![""]);
     }
 }
