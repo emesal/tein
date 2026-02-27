@@ -1,0 +1,9 @@
+[package]
+name = "tein-ext"
+version = "0.1.0"
+edition = "2024"
+authors = ["fey"]
+license = "ISC"
+description = "C ABI type definitions for tein extension modules"
+repository = "https://github.com/emesal/tein"
+keywords = ["scheme", "tein", "extension", "ffi"]

@@ -86,6 +86,39 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// ── ext-type support ─────────────────────────────────────────────────────────
+
+/// A method entry for dynamically registered ext types.
+///
+/// Unlike [`MethodFn`] (which takes `&mut dyn Any` through rust dispatch),
+/// ext methods take `*mut c_void` and the API table — operating at the C ABI
+/// level so no rust types need to cross the `.so` boundary.
+pub(crate) struct ExtMethodEntry {
+    /// scheme method name (e.g. `"get"`, `"increment"`)
+    pub name: String,
+    /// the method function pointer (matches `TeinMethodFn`)
+    pub func: tein_ext::TeinMethodFn,
+    /// whether the method requires mutable access (`&mut self` in the ext)
+    pub is_mut: bool,
+}
+
+/// Entry for a dynamically registered ext type.
+struct ExtTypeEntry {
+    methods: Vec<ExtMethodEntry>,
+}
+
+/// Result of a method lookup — either a static (rust-native) or ext (cdylib) method.
+pub(crate) enum MethodLookup {
+    /// static rust method via MethodFn
+    Static(MethodFn),
+    /// dynamic ext method via TeinMethodFn
+    Ext {
+        func: tein_ext::TeinMethodFn,
+        #[allow(dead_code)] // reserved for future read-only dispatch optimisation
+        is_mut: bool,
+    },
+}
+
 thread_local! {
     /// xorshift64 state for unpredictable handle ID generation.
     /// seeded from SystemTime on first use to prevent sequential ID guessing.
@@ -190,9 +223,17 @@ struct TypeEntry {
 ///
 /// Lives inside `Context` as `RefCell<ForeignStore>`. Drops all instances
 /// when the context drops — no GC integration needed.
+///
+/// Supports two registration paths:
+/// - **static** (`types`): rust types implementing `ForeignType`, registered via
+///   [`register_type`](ForeignStore::register_type). Method dispatch goes through `MethodFn`.
+/// - **ext** (`ext_types`): types registered across the cdylib boundary via `TeinTypeDesc`.
+///   Method dispatch calls `TeinMethodFn` with `*mut c_void` — no rust trait needed.
 pub(crate) struct ForeignStore {
-    /// registered types: name → method table
+    /// registered static rust types: name → method table
     types: HashMap<&'static str, TypeEntry>,
+    /// registered ext types: name → ext method table
+    ext_types: HashMap<String, ExtTypeEntry>,
     /// live instances: handle ID → object
     instances: HashMap<u64, ForeignObject>,
 }
@@ -202,6 +243,7 @@ impl ForeignStore {
     pub(crate) fn new() -> Self {
         Self {
             types: HashMap::new(),
+            ext_types: HashMap::new(),
             instances: HashMap::new(),
         }
     }
@@ -251,7 +293,8 @@ impl ForeignStore {
             .map(|obj| (obj.data.as_mut(), obj.type_name))
     }
 
-    /// look up a method by type name and method name
+    /// look up a method by type name and method name (static types only).
+    #[allow(dead_code)]
     pub(crate) fn find_method(&self, type_name: &str, method_name: &str) -> Option<MethodFn> {
         self.types.get(type_name).and_then(|entry| {
             entry
@@ -262,16 +305,71 @@ impl ForeignStore {
         })
     }
 
-    /// list method names for a type
+    /// look up a method by type name and method name, checking both static and ext types.
+    pub(crate) fn find_method_any(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<MethodLookup> {
+        // check static types first
+        if let Some(entry) = self.types.get(type_name) {
+            for (name, func) in entry.methods {
+                if *name == method_name {
+                    return Some(MethodLookup::Static(*func));
+                }
+            }
+        }
+        // check ext types
+        if let Some(entry) = self.ext_types.get(type_name) {
+            for m in &entry.methods {
+                if m.name == method_name {
+                    return Some(MethodLookup::Ext {
+                        func: m.func,
+                        is_mut: m.is_mut,
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// register a dynamically-defined ext type with its method table.
+    ///
+    /// returns `Err` if the type name is already registered (static or ext).
+    pub(crate) fn register_ext_type(
+        &mut self,
+        type_name: String,
+        methods: Vec<ExtMethodEntry>,
+    ) -> Result<()> {
+        if self.types.contains_key(type_name.as_str()) || self.ext_types.contains_key(&type_name) {
+            return Err(Error::EvalError(format!(
+                "foreign type '{}' already registered",
+                type_name
+            )));
+        }
+        self.ext_types.insert(type_name, ExtTypeEntry { methods });
+        Ok(())
+    }
+
+    /// list method names for a type (static types only).
     pub(crate) fn method_names(&self, type_name: &str) -> Option<Vec<&'static str>> {
         self.types
             .get(type_name)
             .map(|entry| entry.methods.iter().map(|(name, _)| *name).collect())
     }
 
-    /// list all registered type names
-    pub(crate) fn type_names(&self) -> Vec<&'static str> {
-        self.types.keys().copied().collect()
+    /// list method names for an ext type.
+    pub(crate) fn ext_method_names(&self, type_name: &str) -> Option<Vec<&str>> {
+        self.ext_types
+            .get(type_name)
+            .map(|entry| entry.methods.iter().map(|m| m.name.as_str()).collect())
+    }
+
+    /// list all registered type names (static + ext).
+    pub(crate) fn type_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.types.keys().map(|s| s.to_string()).collect();
+        names.extend(self.ext_types.keys().cloned());
+        names
     }
 
     /// check if a type is registered
@@ -329,43 +427,97 @@ pub(crate) unsafe fn dispatch_foreign_call(
         ))
         .map_err(|_| "foreign-call: invalid utf-8 in method name".to_string())?;
 
-        // collect remaining args as Vec<Value>
-        let mut call_args = Vec::new();
-        let mut current = args_rest;
-        while ffi::sexp_pairp(current) != 0 {
-            let arg = ffi::sexp_car(current);
-            call_args.push(
-                Value::from_raw(ctx, arg)
-                    .map_err(|e| format!("foreign-call: argument error: {}", e))?,
-            );
-            current = ffi::sexp_cdr(current);
-        }
-
-        // look up method (drop store_ref before borrow_mut below)
-        let method_fn = {
+        // look up method — check both static and ext types
+        // (drop store_ref before any borrow_mut below)
+        let method_lookup = {
             let store_ref = store.borrow();
             store_ref
-                .find_method(type_name, method_name)
+                .find_method_any(type_name, method_name)
                 .ok_or_else(|| {
-                    let available = store_ref
+                    // build available-methods error message from both tables
+                    let mut available: Vec<String> = store_ref
                         .method_names(type_name)
-                        .map(|names| names.join(", "))
-                        .unwrap_or_else(|| "none".to_string());
+                        .map(|ns| ns.iter().map(|n| n.to_string()).collect())
+                        .or_else(|| {
+                            store_ref
+                                .ext_method_names(type_name)
+                                .map(|ns| ns.iter().map(|n| n.to_string()).collect())
+                        })
+                        .unwrap_or_default();
+                    available.sort();
                     format!(
                         "foreign-call: {} has no method '{}' \u{2014} available: {}",
-                        type_name, method_name, available
+                        type_name,
+                        method_name,
+                        if available.is_empty() {
+                            "none".to_string()
+                        } else {
+                            available.join(", ")
+                        }
                     )
                 })?
         };
 
-        // call method with mutable access to the object
-        let mut store_mut = store.borrow_mut();
-        let (data, _) = store_mut
-            .get_mut(handle_id)
-            .ok_or_else(|| format!("foreign-call: stale handle {} ({})", handle_id, type_name))?;
+        match method_lookup {
+            MethodLookup::Static(method_fn) => {
+                // collect remaining args as Vec<Value>
+                let mut call_args = Vec::new();
+                let mut current = args_rest;
+                while ffi::sexp_pairp(current) != 0 {
+                    let arg = ffi::sexp_car(current);
+                    call_args.push(
+                        Value::from_raw(ctx, arg)
+                            .map_err(|e| format!("foreign-call: argument error: {}", e))?,
+                    );
+                    current = ffi::sexp_cdr(current);
+                }
 
-        let method_ctx = MethodContext { ctx };
-        method_fn(data, &method_ctx, &call_args)
-            .map_err(|e| format!("{}.{}: {}", type_name, method_name, e))
+                // call method with mutable access to the object
+                let mut store_mut = store.borrow_mut();
+                let (data, _) = store_mut.get_mut(handle_id).ok_or_else(|| {
+                    format!("foreign-call: stale handle {} ({})", handle_id, type_name)
+                })?;
+
+                let method_ctx = MethodContext { ctx };
+                method_fn(data, &method_ctx, &call_args)
+                    .map_err(|e| format!("{}.{}: {}", type_name, method_name, e))
+            }
+            MethodLookup::Ext { func, .. } => {
+                // ext methods receive raw sexp args — no Value conversion needed.
+                // they use the API table to extract types themselves.
+                let mut store_mut = store.borrow_mut();
+                let (data, _) = store_mut.get_mut(handle_id).ok_or_else(|| {
+                    format!("foreign-call: stale handle {} ({})", handle_id, type_name)
+                })?;
+
+                // build_ext_api() is in context.rs — access it via a thread-local
+                let api = crate::context::EXT_API.with(|cell| cell.get());
+                if api.is_null() {
+                    return Err(
+                        "foreign-call: ext API not available (not in load_extension context)"
+                            .to_string(),
+                    );
+                }
+
+                // count args for n parameter
+                let mut n: std::ffi::c_long = 0;
+                let mut cur = args_rest;
+                while ffi::sexp_pairp(cur) != 0 {
+                    n += 1;
+                    cur = ffi::sexp_cdr(cur);
+                }
+
+                let result = func(
+                    data as *mut dyn Any as *mut std::ffi::c_void,
+                    ctx as *mut tein_ext::OpaqueCtx,
+                    api,
+                    n,
+                    args_rest as *mut tein_ext::OpaqueVal,
+                );
+
+                Value::from_raw(ctx, result as ffi::sexp)
+                    .map_err(|e| format!("{}.{}: {}", type_name, method_name, e))
+            }
+        }
     }
 }

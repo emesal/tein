@@ -1,0 +1,12 @@
+[package]
+name = "tein-test-ext"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tein-ext = { path = "../tein-ext" }
+tein-macros = { path = "../tein-macros" }
