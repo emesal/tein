@@ -44,8 +44,14 @@ pub enum TokenKind {
     DatumComment,
     /// integer literal
     Integer(i64),
+    /// bignum literal (integer that overflows i64)
+    Bignum(String),
+    /// rational literal (`numerator`, `denominator` as decimal strings)
+    Rational(String, String),
     /// float literal
     Float(f64),
+    /// `#u8(`
+    HashU8Paren,
     /// string literal (content, escapes resolved)
     String(String),
     /// symbol / identifier
@@ -412,6 +418,21 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Ok(TokenKind::HashParen)
             }
+            Some('u') => {
+                // check for #u8(
+                self.advance(); // consume u
+                if self.peek_char() == Some('8') {
+                    self.advance(); // consume 8
+                    if self.peek_char() == Some('(') {
+                        self.advance(); // consume (
+                        return Ok(TokenKind::HashU8Paren);
+                    }
+                }
+                Err(ParseError::new(
+                    "unexpected character after #: 'u'",
+                    self.span_from(start_pos, start_line, start_col),
+                ))
+            }
             Some('\\') => {
                 self.advance();
                 self.lex_char_literal(start_pos, start_line, start_col)
@@ -734,20 +755,41 @@ impl<'a> Lexer<'a> {
                     },
                 )
             })?;
-            Ok(TokenKind::Float(val))
-        } else {
-            let val: i64 = text.parse().map_err(|_| {
-                ParseError::new(
-                    format!("invalid integer literal: {text}"),
-                    Span {
-                        offset: start,
-                        len: self.pos - start,
-                        line: self.line,
-                        column: self.column,
-                    },
-                )
-            })?;
-            Ok(TokenKind::Integer(val))
+            return Ok(TokenKind::Float(val));
+        }
+
+        // check for rational: integer `/` integer (no whitespace allowed)
+        if self.peek_char() == Some('/') {
+            let slash_pos = self.pos;
+            self.advance(); // consume /
+            let den_start = self.pos;
+            // optional sign on denominator
+            if self.peek_char() == Some('+') || self.peek_char() == Some('-') {
+                self.advance();
+            }
+            let den_digits_start = self.pos;
+            while let Some(c) = self.peek_char() {
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if self.pos > den_digits_start {
+                let num_str = self.input[start..slash_pos].to_string();
+                let den_str = self.input[den_start..self.pos].to_string();
+                return Ok(TokenKind::Rational(num_str, den_str));
+            } else {
+                // no digits after / — backtrack, treat / as part of next token
+                self.pos = slash_pos;
+                // revert any sign character we may have consumed
+            }
+        }
+
+        // integer or bignum
+        match text.parse::<i64>() {
+            Ok(val) => Ok(TokenKind::Integer(val)),
+            Err(_) => Ok(TokenKind::Bignum(text.to_string())),
         }
     }
 
@@ -1215,5 +1257,38 @@ mod tests {
     fn lex_whitespace_only() {
         let kinds = lex_kinds("   \n\t  ").unwrap();
         assert!(kinds.is_empty());
+    }
+
+    // --- numeric tower ---
+
+    #[test]
+    fn lex_bignum() {
+        let kinds = lex_kinds("99999999999999999999999999").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Bignum(s) if s == "99999999999999999999999999"));
+    }
+
+    #[test]
+    fn lex_negative_bignum() {
+        let kinds = lex_kinds("-99999999999999999999999999").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Bignum(s) if s == "-99999999999999999999999999"));
+    }
+
+    #[test]
+    fn lex_rational() {
+        let kinds = lex_kinds("3/4").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Rational(n, d) if n == "3" && d == "4"));
+    }
+
+    #[test]
+    fn lex_negative_rational() {
+        let kinds = lex_kinds("-1/2").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Rational(n, d) if n == "-1" && d == "2"));
+    }
+
+    #[test]
+    fn lex_bytevector_prefix() {
+        let kinds = lex_kinds("#u8(1 2 3)").unwrap();
+        assert_eq!(kinds[0], TokenKind::HashU8Paren);
+        assert_eq!(kinds[1], TokenKind::Integer(1));
     }
 }
