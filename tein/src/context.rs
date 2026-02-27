@@ -5983,4 +5983,174 @@ mod tests {
         let err = ctx2.evaluate("(import (tein drop-test))").unwrap_err();
         assert!(matches!(err, Error::EvalError(_)));
     }
+
+    // --- numeric tower: from_raw ---
+
+    #[test]
+    fn test_bignum_from_scheme() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(expt 2 100)").expect("evaluation failed");
+        match &result {
+            Value::Bignum(s) => assert_eq!(s, "1267650600228229401496703205376"),
+            other => panic!("expected Bignum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bignum_negative() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(- (expt 2 100))").expect("evaluation failed");
+        match &result {
+            Value::Bignum(s) => assert!(s.starts_with('-'), "expected negative, got {s}"),
+            other => panic!("expected Bignum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rational_from_scheme() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(/ 1 3)").expect("evaluation failed");
+        match &result {
+            Value::Rational(n, d) => {
+                assert_eq!(**n, Value::Integer(1));
+                assert_eq!(**d, Value::Integer(3));
+            }
+            other => panic!("expected Rational, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rational_display() {
+        let v = Value::Rational(Box::new(Value::Integer(1)), Box::new(Value::Integer(3)));
+        assert_eq!(v.to_string(), "1/3");
+    }
+
+    #[test]
+    fn test_complex_from_scheme() {
+        // make-rectangular requires standard env (r7rs)
+        let ctx = Context::new_standard().expect("failed to create context");
+        let result = ctx
+            .evaluate("(make-rectangular 1 2)")
+            .expect("evaluation failed");
+        match &result {
+            Value::Complex(r, i) => {
+                assert_eq!(**r, Value::Integer(1));
+                assert_eq!(**i, Value::Integer(2));
+            }
+            other => panic!("expected Complex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_complex_display() {
+        let v = Value::Complex(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
+        assert_eq!(v.to_string(), "1+2i");
+    }
+
+    #[test]
+    fn test_complex_negative_imag_display() {
+        let v = Value::Complex(Box::new(Value::Integer(1)), Box::new(Value::Integer(-2)));
+        assert_eq!(v.to_string(), "1-2i");
+    }
+
+    #[test]
+    fn test_bignum_display() {
+        let v = Value::Bignum("1267650600228229401496703205376".to_string());
+        assert_eq!(v.to_string(), "1267650600228229401496703205376");
+    }
+
+    #[test]
+    fn test_rational_with_bignum_components() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx
+            .evaluate("(/ (expt 2 100) (expt 3 50))")
+            .expect("evaluation failed");
+        match &result {
+            Value::Rational(_, _) => {} // just verify it parses as rational
+            other => panic!("expected Rational, got {:?}", other),
+        }
+    }
+
+    // --- numeric tower: to_raw round-trips ---
+
+    #[test]
+    fn test_bignum_to_raw_roundtrip() {
+        unsafe extern "C" fn get_bignum(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let val = Value::Bignum("1267650600228229401496703205376".to_string());
+                val.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn_variadic("get-bignum", get_bignum)
+            .expect("failed to define fn");
+        let result = ctx.evaluate("(get-bignum)").expect("evaluation failed");
+        match &result {
+            Value::Bignum(s) => assert_eq!(s, "1267650600228229401496703205376"),
+            other => panic!("expected Bignum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rational_to_raw_roundtrip() {
+        unsafe extern "C" fn get_rational(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let val = Value::Rational(Box::new(Value::Integer(1)), Box::new(Value::Integer(3)));
+                val.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn_variadic("get-rational", get_rational)
+            .expect("failed to define fn");
+        let result = ctx.evaluate("(get-rational)").expect("evaluation failed");
+        match &result {
+            Value::Rational(n, d) => {
+                assert_eq!(**n, Value::Integer(1));
+                assert_eq!(**d, Value::Integer(3));
+            }
+            other => panic!("expected Rational, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_complex_to_raw_roundtrip() {
+        unsafe extern "C" fn get_complex(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let val = Value::Complex(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
+                val.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn_variadic("get-complex", get_complex)
+            .expect("failed to define fn");
+        let result = ctx.evaluate("(get-complex)").expect("evaluation failed");
+        match &result {
+            Value::Complex(r, i) => {
+                assert_eq!(**r, Value::Integer(1));
+                assert_eq!(**i, Value::Integer(2));
+            }
+            other => panic!("expected Complex, got {:?}", other),
+        }
+    }
 }

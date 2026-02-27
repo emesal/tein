@@ -11,6 +11,9 @@
 //! |---------|------------|-----------------|
 //! | `Integer(i64)` | fixnum | `as_integer()` |
 //! | `Float(f64)` | flonum | `as_float()` |
+//! | `Bignum(String)` | bignum (arbitrary precision) | `as_bignum()` |
+//! | `Rational(Box, Box)` | exact ratio `n/d` | `as_rational()` |
+//! | `Complex(Box, Box)` | complex `a+bi` | `as_complex()` |
 //! | `String(String)` | string | `as_str()` |
 //! | `Symbol(String)` | symbol | `as_symbol()` |
 //! | `Boolean(bool)` | `#t` / `#f` | `as_bool()` |
@@ -30,8 +33,9 @@
 //! # Conversion
 //!
 //! `Value::from_raw()` converts Chibi sexps to safe values. Type checking
-//! order matters: flonum is checked *before* integer because Chibi's
-//! integer predicate matches flonums like `4.0`.
+//! order matters: `complex → ratio → bignum → flonum → integer` (broadest first).
+//! Chibi's integer predicate matches flonums like `4.0`, so flonum must come
+//! before integer. Complex/ratio/bignum must precede flonum for similar reasons.
 //!
 //! `Value::to_raw()` converts back to Chibi sexps for calling into Scheme.
 
@@ -91,6 +95,25 @@ pub enum Value {
 
     /// Floating point value.
     Float(f64),
+
+    /// Bignum (arbitrary-precision integer, stored as decimal string).
+    ///
+    /// Chibi-scheme bignums are converted to their decimal representation
+    /// for safe transport across the FFI boundary. Use `to_raw()` to
+    /// convert back to a chibi bignum via `string->number`.
+    Bignum(String),
+
+    /// Rational number (exact ratio of two integers).
+    ///
+    /// Components are exact integers (`Integer` or `Bignum`).
+    /// Displayed as `n/d` (e.g. `1/3`).
+    Rational(Box<Value>, Box<Value>),
+
+    /// Complex number with real and imaginary parts.
+    ///
+    /// Components are real numbers (`Integer`, `Float`, `Bignum`, or `Rational`).
+    /// Displayed as `a+bi` (e.g. `1+2i`).
+    Complex(Box<Value>, Box<Value>),
 
     /// String value.
     String(String),
@@ -173,6 +196,40 @@ impl Value {
         unsafe {
             if ffi::sexp_exceptionp(raw) != 0 {
                 return Err(Self::extract_exception_error(ctx, raw));
+            }
+
+            // --- numeric tower: check broadest first ---
+
+            // complex numbers (real + imaginary)
+            if ffi::sexp_complexp(raw) != 0 {
+                // root raw — recursive from_raw_depth calls may allocate
+                let _root = ffi::GcRoot::new(ctx, raw);
+                let real_part = ffi::sexp_complex_real(raw);
+                let imag_part = ffi::sexp_complex_imag(raw);
+                let real = Value::from_raw_depth(ctx, real_part, depth + 1)?;
+                let imag = Value::from_raw_depth(ctx, imag_part, depth + 1)?;
+                return Ok(Value::Complex(Box::new(real), Box::new(imag)));
+            }
+
+            // rational numbers (numerator / denominator)
+            if ffi::sexp_ratiop(raw) != 0 {
+                // root raw — recursive from_raw_depth calls may allocate
+                let _root = ffi::GcRoot::new(ctx, raw);
+                let num = ffi::sexp_ratio_numerator(raw);
+                let den = ffi::sexp_ratio_denominator(raw);
+                let numerator = Value::from_raw_depth(ctx, num, depth + 1)?;
+                let denominator = Value::from_raw_depth(ctx, den, depth + 1)?;
+                return Ok(Value::Rational(Box::new(numerator), Box::new(denominator)));
+            }
+
+            // bignums (arbitrary-precision integers)
+            if ffi::sexp_bignump(raw) != 0 {
+                let str_sexp = ffi::sexp_bignum_to_string(ctx, raw);
+                let str_ptr = ffi::sexp_string_data(str_sexp);
+                let str_len = ffi::sexp_string_size(str_sexp);
+                let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
+                let s = String::from_utf8(bytes.to_vec())?;
+                return Ok(Value::Bignum(s));
             }
 
             // check floats before integers because sexp_integerp matches some floats
@@ -450,6 +507,32 @@ impl Value {
             match self {
                 Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
                 Value::Float(f) => Ok(ffi::sexp_make_flonum(ctx, *f)),
+                Value::Bignum(s) => {
+                    let c_str = std::ffi::CString::new(s.as_str()).map_err(|_| {
+                        Error::TypeError("bignum string contains null bytes".to_string())
+                    })?;
+                    let str_sexp =
+                        ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t);
+                    let result = ffi::sexp_string_to_number(ctx, str_sexp, 10);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return Err(Error::TypeError(format!("invalid bignum string: {s}")));
+                    }
+                    Ok(result)
+                }
+                Value::Rational(n, d) => {
+                    let num = n.to_raw_depth(ctx, depth + 1)?;
+                    // root num — converting denominator may allocate
+                    let _num_root = ffi::GcRoot::new(ctx, num);
+                    let den = d.to_raw_depth(ctx, depth + 1)?;
+                    Ok(ffi::sexp_make_ratio(ctx, num, den))
+                }
+                Value::Complex(r, i) => {
+                    let real = r.to_raw_depth(ctx, depth + 1)?;
+                    // root real — converting imag may allocate
+                    let _real_root = ffi::GcRoot::new(ctx, real);
+                    let imag = i.to_raw_depth(ctx, depth + 1)?;
+                    Ok(ffi::sexp_make_complex(ctx, real, imag))
+                }
                 Value::Boolean(b) => Ok(ffi::sexp_make_boolean(*b)),
                 Value::String(s) => {
                     let c_str = std::ffi::CString::new(s.as_str())
@@ -641,6 +724,30 @@ impl Value {
         }
     }
 
+    /// Extract as bignum string, if this is a `Bignum`.
+    pub fn as_bignum(&self) -> Option<&str> {
+        match self {
+            Value::Bignum(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Extract rational components, if this is a `Rational`.
+    pub fn as_rational(&self) -> Option<(&Value, &Value)> {
+        match self {
+            Value::Rational(n, d) => Some((n.as_ref(), d.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// Extract complex components, if this is a `Complex`.
+    pub fn as_complex(&self) -> Option<(&Value, &Value)> {
+        match self {
+            Value::Complex(r, i) => Some((r.as_ref(), i.as_ref())),
+            _ => None,
+        }
+    }
+
     /// Extract the raw sexp pointer, if this value is a `Port`.
     ///
     /// The returned pointer is opaque — pass it back to Scheme via [`crate::Context::call`].
@@ -736,6 +843,9 @@ impl PartialEq for Value {
             (Value::Unspecified, Value::Unspecified) => true,
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Bytevector(a), Value::Bytevector(b)) => a == b,
+            (Value::Bignum(a), Value::Bignum(b)) => a == b,
+            (Value::Rational(an, ad), Value::Rational(bn, bd)) => an == bn && ad == bd,
+            (Value::Complex(ar, ai), Value::Complex(br, bi)) => ar == br && ai == bi,
             (Value::Port(a), Value::Port(b)) => std::ptr::eq(*a, *b),
             (Value::HashTable(a), Value::HashTable(b)) => std::ptr::eq(*a, *b),
             // procedure equality is raw pointer identity (same scheme object)
@@ -818,6 +928,18 @@ impl fmt::Display for Value {
                     write!(f, "{}", b)?;
                 }
                 write!(f, ")")
+            }
+            Value::Bignum(s) => write!(f, "{s}"),
+            Value::Rational(n, d) => write!(f, "{n}/{d}"),
+            Value::Complex(r, i) => {
+                write!(f, "{r}")?;
+                // check if imaginary part displays with a leading sign
+                let imag_str = format!("{i}");
+                if imag_str.starts_with('-') || imag_str.starts_with('+') {
+                    write!(f, "{imag_str}i")
+                } else {
+                    write!(f, "+{imag_str}i")
+                }
             }
             Value::Port(_) => write!(f, "#<port>"),
             Value::HashTable(_) => write!(f, "#<hash-table>"),
