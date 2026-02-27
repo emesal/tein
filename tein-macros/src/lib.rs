@@ -97,9 +97,12 @@ pub fn tein_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// override with `#[tein_fn(name = "scheme-name")]` or `#[tein_type(name = "scheme-name")]`.
 #[proc_macro_attribute]
 pub fn tein_module(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let module_name = parse_macro_input!(attr as syn::LitStr).value();
     let mod_item = parse_macro_input!(item as ItemMod);
-    match parse_and_generate_module(module_name, mod_item) {
+    let (module_name, ext) = match parse_module_attr(attr.into()) {
+        Ok(v) => v,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    match parse_and_generate_module(module_name, ext, mod_item) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }
@@ -238,6 +241,8 @@ fn extract_doc_comments(attrs: &[syn::Attribute]) -> Vec<String> {
 struct ModuleInfo {
     /// module name as it appears in scheme, e.g. `"json"`
     name: String,
+    /// whether this is a cdylib extension module (`ext = true`)
+    ext: bool,
     /// the original mod item (preserved in output, with tein attrs stripped)
     mod_item: ItemMod,
     /// free functions annotated with `#[tein_fn]`
@@ -294,15 +299,62 @@ struct ConstInfo {
 
 // ── module parsing ────────────────────────────────────────────────────────────
 
+/// parse the `#[tein_module(...)]` attribute arguments.
+///
+/// accepts either `"name"` or `"name", ext = true`.
+fn parse_module_attr(tokens: proc_macro2::TokenStream) -> syn::Result<(String, bool)> {
+    let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+    let args = syn::parse::Parser::parse2(parser, tokens)?;
+    let mut iter = args.iter();
+
+    // first arg: string literal (module name)
+    let name_expr = iter.next().ok_or_else(|| {
+        syn::Error::new(Span::call_site(), "expected module name string")
+    })?;
+    let name = match name_expr {
+        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => s.value(),
+        _ => return Err(syn::Error::new_spanned(name_expr, "expected string literal for module name")),
+    };
+
+    // optional second arg: ext = true
+    let mut ext = false;
+    if let Some(ext_expr) = iter.next() {
+        match ext_expr {
+            syn::Expr::Assign(assign) => {
+                let key = assign.left.as_ref();
+                if let syn::Expr::Path(p) = key
+                    && p.path.is_ident("ext")
+                {
+                    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(b), .. }) = assign.right.as_ref() {
+                        ext = b.value();
+                    } else {
+                        return Err(syn::Error::new_spanned(&assign.right, "expected `true` or `false`"));
+                    }
+                } else {
+                    return Err(syn::Error::new_spanned(key, "expected `ext`"));
+                }
+            }
+            _ => return Err(syn::Error::new_spanned(ext_expr, "expected `ext = true`")),
+        }
+    }
+
+    if iter.next().is_some() {
+        return Err(syn::Error::new(Span::call_site(), "unexpected extra arguments"));
+    }
+
+    Ok((name, ext))
+}
+
 fn parse_and_generate_module(
     module_name: String,
+    ext: bool,
     mod_item: ItemMod,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let info = parse_module_info(module_name, mod_item)?;
+    let info = parse_module_info(module_name, ext, mod_item)?;
     generate_module(info)
 }
 
-fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<ModuleInfo> {
+fn parse_module_info(module_name: String, ext: bool, mod_item: ItemMod) -> syn::Result<ModuleInfo> {
     let (brace, items) = mod_item.content.as_ref().ok_or_else(|| {
         syn::Error::new_spanned(&mod_item, "#[tein_module] requires an inline mod body")
     })?;
@@ -416,6 +468,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
 
     Ok(ModuleInfo {
         name: module_name,
+        ext,
         mod_item: clean_mod,
         free_fns,
         consts,
@@ -1189,6 +1242,7 @@ mod tests {
     fn test_generate_vfs_scm_with_docs() {
         let info = ModuleInfo {
             name: "test".to_string(),
+            ext: false,
             mod_item: syn::parse_quote! { mod test {} },
             free_fns: vec![],
             types: vec![],
@@ -1234,6 +1288,7 @@ mod tests {
     fn test_generate_vfs_scm_no_docs() {
         let info = ModuleInfo {
             name: "plain".to_string(),
+            ext: false,
             mod_item: syn::parse_quote! { mod plain {} },
             free_fns: vec![],
             types: vec![],
@@ -1265,6 +1320,7 @@ mod tests {
     fn test_generate_vfs_docs_sld() {
         let info = ModuleInfo {
             name: "uuid".to_string(),
+            ext: false,
             mod_item: syn::parse_quote! { mod uuid {} },
             free_fns: vec![],
             types: vec![],
@@ -1284,6 +1340,7 @@ mod tests {
     fn test_generate_vfs_docs_scm_full() {
         let info = ModuleInfo {
             name: "mymod".to_string(),
+            ext: false,
             mod_item: syn::parse_quote! { mod mymod {} },
             free_fns: vec![FreeFnInfo {
                 func: syn::parse_quote! { fn do_thing(x: i64) -> i64 { x } },
@@ -1325,6 +1382,7 @@ mod tests {
     fn test_generate_vfs_docs_scm_empty_docs() {
         let info = ModuleInfo {
             name: "bare".to_string(),
+            ext: false,
             mod_item: syn::parse_quote! { mod bare {} },
             free_fns: vec![FreeFnInfo {
                 func: syn::parse_quote! { fn noop() -> i64 { 0 } },
@@ -1349,6 +1407,7 @@ mod tests {
     fn test_generate_vfs_docs_scm_multiline_doc() {
         let info = ModuleInfo {
             name: "ml".to_string(),
+            ext: false,
             mod_item: syn::parse_quote! { mod ml {} },
             free_fns: vec![],
             consts: vec![ConstInfo {
@@ -1362,5 +1421,21 @@ mod tests {
         let scm = generate_vfs_docs_scm(&info);
         // multi-line docs joined with space
         assert!(scm.contains("(x . \"first line. second line.\")"));
+    }
+
+    #[test]
+    fn test_parse_module_attr_basic() {
+        let tokens: proc_macro2::TokenStream = quote! { "testmod" };
+        let (name, ext) = parse_module_attr(tokens).unwrap();
+        assert_eq!(name, "testmod");
+        assert!(!ext);
+    }
+
+    #[test]
+    fn test_parse_module_attr_ext() {
+        let tokens: proc_macro2::TokenStream = quote! { "testmod", ext = true };
+        let (name, ext) = parse_module_attr(tokens).unwrap();
+        assert_eq!(name, "testmod");
+        assert!(ext);
     }
 }
