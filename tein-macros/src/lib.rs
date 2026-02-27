@@ -214,19 +214,18 @@ fn extract_doc_comments(attrs: &[syn::Attribute]) -> Vec<String> {
             if !attr.path().is_ident("doc") {
                 return None;
             }
-            if let syn::Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(syn::ExprLit {
+            if let syn::Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(syn::ExprLit {
                     lit: syn::Lit::Str(s),
                     ..
                 }) = &nv.value
-                {
-                    return Some(
-                        s.value()
-                            .strip_prefix(' ')
-                            .unwrap_or(&s.value())
-                            .to_string(),
-                    );
-                }
+            {
+                return Some(
+                    s.value()
+                        .strip_prefix(' ')
+                        .unwrap_or(&s.value())
+                        .to_string(),
+                );
             }
             None
         })
@@ -255,7 +254,8 @@ struct FreeFnInfo {
     func: ItemFn,
     /// scheme name (derived from module+fn name, or overridden via `name = "..."`)
     scheme_name: String,
-    /// `///` doc comments from the original item
+    /// `///` doc comments from the original item — consumed by #61 (docs alist)
+    #[allow(dead_code)]
     doc: Vec<String>,
 }
 
@@ -267,7 +267,8 @@ struct TypeInfo {
     scheme_type_name: String,
     /// methods from the `#[tein_methods]` impl block
     methods: Vec<MethodInfo>,
-    /// `///` doc comments from the original item
+    /// `///` doc comments from the original item — consumed by #61 (docs alist)
+    #[allow(dead_code)]
     doc: Vec<String>,
 }
 
@@ -279,7 +280,8 @@ struct MethodInfo {
     scheme_name: String,
     /// whether the method takes `&mut self`
     is_mut: bool,
-    /// `///` doc comments from the original item
+    /// `///` doc comments from the original item — consumed by #61 (docs alist)
+    #[allow(dead_code)]
     doc: Vec<String>,
 }
 

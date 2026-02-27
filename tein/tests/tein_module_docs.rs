@@ -8,6 +8,7 @@
 use tein::{Context, Value, tein_module};
 
 #[tein_module("dc")]
+#[allow(dead_code)]
 mod dc {
     /// a friendly greeting
     #[tein_const]
@@ -55,20 +56,12 @@ fn test_doc_fn_still_works() {
 
 #[test]
 fn test_vfs_scm_contains_doc_comments() {
-    // the generated .scm content is embedded as a string literal in the register fn.
-    // we can check it by reading the VFS entry after registration.
+    // verify the generated .scm (with ;; comments) registers and imports cleanly.
+    // the exact comment content is verified by the unit test on generate_vfs_scm.
+    // loading the module implicitly parses the .scm file, so valid scheme is confirmed.
     let ctx = Context::builder().standard_env().build().expect("ctx");
     dc::register_module_dc(&ctx).expect("register");
-
-    // evaluate the .scm file content via VFS — the file is registered at lib/tein/dc.scm
-    // we can read it by loading the raw VFS content
-    let scm = ctx.evaluate("(include \"lib/tein/dc.scm\")");
-
-    // alternative: check the scheme side effects.
-    // since we can't easily read raw VFS content from rust, we verify by checking
-    // that the module loads correctly (the ;; comments are syntactically valid scheme).
-    // the actual comment content is verified by the unit test on generate_vfs_scm.
-    assert!(scm.is_ok() || true); // module loads = comments are valid scheme
+    ctx.evaluate("(import (tein dc))").expect("import");
 }
 
 // ── doc preservation: verify doc attrs survive macro expansion ────────────────
@@ -76,6 +69,7 @@ fn test_vfs_scm_contains_doc_comments() {
 /// verify that doc comments on tein items survive macro expansion.
 /// this module exists to be compiled — if it compiles, doc attrs are preserved.
 #[tein_module("dp")]
+#[allow(dead_code)]
 mod dp {
     /// documented constant
     #[tein_const]
