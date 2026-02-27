@@ -386,10 +386,9 @@ fn parse_number_string(s: &str) -> Sexp {
     // only try f64 for strings that look like floats; integer-shaped strings that
     // overflow i64 are bignums, not floats (e.g. "99999999999999999999999999")
     let looks_like_float = s.contains('.') || s.contains('e') || s.contains('E');
-    if looks_like_float
-        && let Ok(f) = s.parse::<f64>() {
-            return Sexp::float(f);
-        }
+    if looks_like_float && let Ok(f) = s.parse::<f64>() {
+        return Sexp::float(f);
+    }
     Sexp::bignum(s)
 }
 
