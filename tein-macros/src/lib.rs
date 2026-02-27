@@ -250,6 +250,8 @@ struct FreeFnInfo {
     func: ItemFn,
     /// scheme name (derived from module+fn name, or overridden via `name = "..."`)
     scheme_name: String,
+    /// `///` doc comments from the original item
+    doc: Vec<String>,
 }
 
 /// a `#[tein_type]` struct together with its `#[tein_methods]` impl block
@@ -260,6 +262,8 @@ struct TypeInfo {
     scheme_type_name: String,
     /// methods from the `#[tein_methods]` impl block
     methods: Vec<MethodInfo>,
+    /// `///` doc comments from the original item
+    doc: Vec<String>,
 }
 
 /// a single method from a `#[tein_methods]` impl block
@@ -270,6 +274,8 @@ struct MethodInfo {
     scheme_name: String,
     /// whether the method takes `&mut self`
     is_mut: bool,
+    /// `///` doc comments from the original item
+    doc: Vec<String>,
 }
 
 /// a `#[tein_const]` constant inside a module
@@ -278,6 +284,8 @@ struct ConstInfo {
     scheme_name: String,
     /// scheme literal representation (e.g. `"\"hello\""`, `42`, `#t`)
     scheme_literal: String,
+    /// `///` doc comments from the original item
+    doc: Vec<String>,
 }
 
 // ── module parsing ────────────────────────────────────────────────────────────
@@ -316,6 +324,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                 free_fns.push(FreeFnInfo {
                     func: clean_func,
                     scheme_name,
+                    doc: extract_doc_comments(&func.attrs),
                 });
                 // don't push to clean_items — generate_scheme_fn emits the fn + wrapper
             }
@@ -327,6 +336,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                 consts.push(ConstInfo {
                     scheme_name,
                     scheme_literal,
+                    doc: extract_doc_comments(&c.attrs),
                 });
                 let mut clean_const = c.clone();
                 clean_const
@@ -348,6 +358,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                     struct_item: clean_struct.clone(),
                     scheme_type_name,
                     methods: Vec::new(),
+                    doc: extract_doc_comments(&s.attrs),
                 });
                 clean_items.push(Item::Struct(clean_struct));
             }
@@ -377,6 +388,7 @@ fn parse_module_info(module_name: String, mod_item: ItemMod) -> syn::Result<Modu
                             method: method.clone(),
                             scheme_name,
                             is_mut,
+                            doc: extract_doc_comments(&method.attrs),
                         });
                     }
                 }
