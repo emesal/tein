@@ -810,6 +810,11 @@ unsafe extern "C" fn json_parse_trampoline(
 
 /// Trampoline for `json-stringify`: takes one scheme value, returns JSON string.
 ///
+/// Works directly on raw chibi sexps via `json::json_stringify_raw` to preserve
+/// alist structure. `Value::from_raw` would collapse dotted pairs into proper lists
+/// when the cdr is a proper list (e.g. `("x" . (("y" . 1)))` → `("x" ("y" . 1))`),
+/// losing the structural cue needed to detect alists.
+///
 /// On conversion error, returns a scheme string with the error message.
 /// This matches tein's convention for native function errors (see AGENTS.md).
 unsafe extern "C" fn json_stringify_trampoline(
@@ -820,20 +825,13 @@ unsafe extern "C" fn json_stringify_trampoline(
 ) -> ffi::sexp {
     unsafe {
         let val_sexp = ffi::sexp_car(args);
-        match Value::from_raw(ctx, val_sexp) {
-            Ok(value) => match crate::json::json_stringify(&value) {
-                Ok(json) => {
-                    let c_json = CString::new(json.as_str()).unwrap_or_default();
-                    ffi::sexp_c_str(ctx, c_json.as_ptr(), json.len() as ffi::sexp_sint_t)
-                }
-                Err(e) => {
-                    let msg = format!("{e}");
-                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
-                }
-            },
+        match crate::json::json_stringify_raw(ctx, val_sexp) {
+            Ok(json) => {
+                let c_json = CString::new(json.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_json.as_ptr(), json.len() as ffi::sexp_sint_t)
+            }
             Err(e) => {
-                let msg = format!("json-stringify: {e}");
+                let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
                 ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }

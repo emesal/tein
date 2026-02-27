@@ -1,9 +1,11 @@
 //! `(tein json)` — bidirectional JSON ↔ scheme value conversion.
 //!
 //! JSON parsing goes through `serde_json::Value` (preserving `null` vs `[]`/`{}`)
-//! then maps to scheme `Value`. JSON stringifying goes through the `sexp_bridge` and
-//! `tein_sexp::Sexp`'s serde `Serialize` impl. the `'null` symbol distinguishes JSON
-//! null from scheme `'()` (empty list/array).
+//! then maps to scheme `Value`. JSON stringifying works directly on raw chibi sexps
+//! (bypassing `Value::from_raw`) to preserve alist structure — chibi's pair representation
+//! collapses `(key . val)` into a proper list when val is itself a proper list, which would
+//! lose the dotted-pair structure needed to detect alists. the `'null` symbol distinguishes
+//! JSON null from scheme `'()` (empty list/array).
 //!
 //! ## representation
 //!
@@ -17,8 +19,7 @@
 //! | `true/false` | `#t / #f`                 |
 //! | `null`       | `'null` symbol            |
 
-use crate::sexp_bridge;
-use crate::{Error, Result, Value};
+use crate::{Error, Result, Value, ffi};
 use tein_sexp::{Sexp, SexpKind};
 
 /// parse a JSON string into a scheme `Value`.
@@ -36,11 +37,182 @@ pub fn json_parse(input: &str) -> Result<Value> {
 ///
 /// `Value::Symbol("null")` becomes JSON `null`. values that can't be
 /// represented in JSON (procedures, ports, etc.) produce an error.
+///
+/// note: this path is for rust callers using `Value` directly. the scheme
+/// trampoline uses `json_stringify_raw` to preserve alist structure.
 pub fn json_stringify(value: &Value) -> Result<String> {
+    use crate::sexp_bridge;
+    use tein_sexp::Sexp;
     let sexp = sexp_bridge::value_to_sexp(value)?;
     let sexp = remap_null_symbol_to_nil(sexp);
     serde_json::to_string(&sexp)
         .map_err(|e| Error::EvalError(format!("json-stringify: {e}")))
+}
+
+/// stringify a raw chibi sexp as JSON.
+///
+/// works directly on raw sexps to preserve alist structure. chibi's pair
+/// representation collapses dotted pairs into proper lists when the cdr is
+/// a proper list (e.g. `("x" . (("y" . 1)))` → proper list `("x" ("y" . 1))`
+/// after `Value::from_raw` — losing the pair structure). this function
+/// detects alist entries at the chibi level by checking the car's type.
+///
+/// an alist is detected when a proper list's every element is a cons pair
+/// whose car is a string or symbol.
+///
+/// # safety
+/// ctx and sexp must be valid chibi sexp pointers. called from trampoline.
+pub unsafe fn json_stringify_raw(ctx: ffi::sexp, sexp: ffi::sexp) -> Result<String> {
+    unsafe { json_sexp_to_value(ctx, sexp, 0) }
+}
+
+/// maximum nesting depth for recursive sexp-to-json conversion.
+const MAX_DEPTH: usize = 10_000;
+
+/// convert a chibi sexp directly to a JSON string, preserving alist structure.
+///
+/// alist detection: a proper list is an alist iff every element is a cons pair
+/// with a string or symbol car. scheme's `(key . val)` is stored as a cons pair
+/// regardless of whether val is a proper list, so `sexp_pairp(car)` and
+/// `sexp_stringp(sexp_car(car))` reliably detects alist entries.
+unsafe fn json_sexp_to_value(
+    ctx: ffi::sexp,
+    sexp: ffi::sexp,
+    depth: usize,
+) -> Result<String> {
+    if depth > MAX_DEPTH {
+        return Err(Error::EvalError(
+            "json-stringify: maximum nesting depth exceeded".to_string(),
+        ));
+    }
+    unsafe {
+        if ffi::sexp_booleanp(sexp) != 0 {
+            if sexp == ffi::sexp_make_boolean(true) {
+                return Ok("true".to_string());
+            } else {
+                return Ok("false".to_string());
+            }
+        }
+        if ffi::sexp_nullp(sexp) != 0 {
+            // scheme '() (empty list/empty object) → JSON null
+            return Ok("null".to_string());
+        }
+        if ffi::sexp_symbolp(sexp) != 0 {
+            // check for 'null symbol → JSON null
+            let sym_ptr = ffi::sexp_string_data(ffi::sexp_symbol_to_string(ctx, sexp));
+            let sym_len = ffi::sexp_string_size(ffi::sexp_symbol_to_string(ctx, sexp)) as usize;
+            let sym = std::str::from_utf8(std::slice::from_raw_parts(sym_ptr as *const u8, sym_len))
+                .map_err(|e| Error::EvalError(format!("json-stringify: symbol UTF-8 error: {e}")))?;
+            if sym == "null" {
+                return Ok("null".to_string());
+            }
+            return Err(Error::TypeError(format!(
+                "json-stringify: cannot convert symbol '{sym}' to JSON (only 'null is allowed)"
+            )));
+        }
+        if ffi::sexp_stringp(sexp) != 0 {
+            let ptr = ffi::sexp_string_data(sexp);
+            let len = ffi::sexp_string_size(sexp) as usize;
+            let s = std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                .map_err(|e| Error::EvalError(format!("json-stringify: string UTF-8 error: {e}")))?;
+            return serde_json::to_string(s)
+                .map_err(|e| Error::EvalError(format!("json-stringify: {e}")));
+        }
+        if ffi::sexp_integerp(sexp) != 0 && ffi::sexp_flonump(sexp) == 0 {
+            let n = ffi::sexp_unbox_fixnum(sexp);
+            return Ok(n.to_string());
+        }
+        if ffi::sexp_flonump(sexp) != 0 {
+            let f = ffi::sexp_flonum_value(sexp);
+            return serde_json::to_string(&f)
+                .map_err(|e| Error::EvalError(format!("json-stringify: {e}")));
+        }
+        if ffi::sexp_pairp(sexp) != 0 {
+            // collect the list elements to decide: alist or array?
+            let mut elems: Vec<ffi::sexp> = Vec::new();
+            let mut cur = sexp;
+            let mut is_proper = true;
+            while ffi::sexp_pairp(cur) != 0 {
+                elems.push(ffi::sexp_car(cur));
+                cur = ffi::sexp_cdr(cur);
+            }
+            if ffi::sexp_nullp(cur) == 0 {
+                is_proper = false;
+            }
+
+            if is_proper && !elems.is_empty() {
+                // check if every element is a cons pair with a string/symbol car → alist (JSON object)
+                let all_alist = elems.iter().all(|&elem| {
+                    ffi::sexp_pairp(elem) != 0 && {
+                        let k = ffi::sexp_car(elem);
+                        ffi::sexp_stringp(k) != 0 || ffi::sexp_symbolp(k) != 0
+                    }
+                });
+
+                if all_alist {
+                    // JSON object: { "key": val, ... }
+                    let mut out = String::from("{");
+                    for (i, &elem) in elems.iter().enumerate() {
+                        let k = ffi::sexp_car(elem);
+                        let v = ffi::sexp_cdr(elem);
+                        // key: string or symbol
+                        let key = if ffi::sexp_stringp(k) != 0 {
+                            let ptr = ffi::sexp_string_data(k);
+                            let len = ffi::sexp_string_size(k) as usize;
+                            std::str::from_utf8(
+                                std::slice::from_raw_parts(ptr as *const u8, len),
+                            )
+                            .map_err(|e| Error::EvalError(format!("json-stringify: key UTF-8: {e}")))?
+                            .to_string()
+                        } else {
+                            // symbol key
+                            let ss = ffi::sexp_symbol_to_string(ctx, k);
+                            let ptr = ffi::sexp_string_data(ss);
+                            let len = ffi::sexp_string_size(ss) as usize;
+                            std::str::from_utf8(
+                                std::slice::from_raw_parts(ptr as *const u8, len),
+                            )
+                            .map_err(|e| Error::EvalError(format!("json-stringify: key UTF-8: {e}")))?
+                            .to_string()
+                        };
+                        let key_json = serde_json::to_string(&key)
+                            .map_err(|e| Error::EvalError(format!("json-stringify: {e}")))?;
+                        let val_json = json_sexp_to_value(ctx, v, depth + 1)?;
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&key_json);
+                        out.push(':');
+                        out.push_str(&val_json);
+                    }
+                    out.push('}');
+                    return Ok(out);
+                }
+            }
+
+            if is_proper {
+                // JSON array: [ elem, ... ]
+                let mut out = String::from("[");
+                for (i, &elem) in elems.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&json_sexp_to_value(ctx, elem, depth + 1)?);
+                }
+                out.push(']');
+                return Ok(out);
+            }
+
+            // improper list (dotted pair) — not valid JSON
+            return Err(Error::TypeError(
+                "json-stringify: cannot convert improper list (dotted pair) to JSON".to_string(),
+            ));
+        }
+
+        Err(Error::TypeError(format!(
+            "json-stringify: cannot convert scheme value to JSON"
+        )))
+    }
 }
 
 /// convert a `serde_json::Value` into a scheme `Value`, preserving null vs empty.
