@@ -152,6 +152,11 @@ fn test_scheme_numbers_extended() {
 }
 
 #[test]
+fn test_scheme_numeric_tower() {
+    run_scheme_test(include_str!("scheme/numeric_tower.scm"));
+}
+
+#[test]
 fn test_scheme_scheme_eval() {
     run_scheme_test(include_str!("scheme/scheme_eval.scm"));
 }
