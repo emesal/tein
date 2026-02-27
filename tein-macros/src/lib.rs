@@ -479,6 +479,14 @@ fn parse_module_info(module_name: String, ext: bool, mod_item: ItemMod) -> syn::
 // ── module codegen ────────────────────────────────────────────────────────────
 
 fn generate_module(info: ModuleInfo) -> syn::Result<proc_macro2::TokenStream> {
+    if info.ext {
+        generate_module_ext(info)
+    } else {
+        generate_module_internal(info)
+    }
+}
+
+fn generate_module_internal(info: ModuleInfo) -> syn::Result<proc_macro2::TokenStream> {
     let mod_name = &info.mod_item.ident;
     let mod_vis = &info.mod_item.vis;
     let mod_attrs = &info.mod_item.attrs;
@@ -507,6 +515,641 @@ fn generate_module(info: ModuleInfo) -> syn::Result<proc_macro2::TokenStream> {
             #register_fn
         }
     })
+}
+
+// ── ext-mode codegen ──────────────────────────────────────────────────────────
+
+/// generate the ext-mode module — emits `tein_ext_init` instead of `register_module_*`.
+fn generate_module_ext(info: ModuleInfo) -> syn::Result<proc_macro2::TokenStream> {
+    let mod_name = &info.mod_item.ident;
+    let mod_vis = &info.mod_item.vis;
+    let mod_attrs = &info.mod_item.attrs;
+    let (_, items) = info.mod_item.content.as_ref().unwrap();
+
+    let fn_wrappers: Vec<proc_macro2::TokenStream> = info
+        .free_fns
+        .iter()
+        .map(|f| generate_scheme_fn_ext(f.func.clone()))
+        .collect::<syn::Result<_>>()?;
+
+    let type_descs: Vec<proc_macro2::TokenStream> = info
+        .types
+        .iter()
+        .map(generate_ext_type_desc)
+        .collect::<syn::Result<_>>()?;
+
+    let init_fn = generate_ext_init_fn(&info);
+
+    // thread-local for the API pointer — set at init time and available to wrappers
+    let api_tls = quote! {
+        std::thread_local! {
+            static __TEIN_API: std::cell::Cell<*const tein_ext::TeinExtApi> =
+                const { std::cell::Cell::new(std::ptr::null()) };
+        }
+    };
+
+    Ok(quote! {
+        #(#mod_attrs)*
+        #mod_vis mod #mod_name {
+            #(#items)*
+            #api_tls
+            #(#type_descs)*
+            #(#fn_wrappers)*
+            #init_fn
+        }
+    })
+}
+
+/// generate the `tein_ext_init` entry point for a cdylib extension.
+///
+/// registers VFS entries, foreign types, and free functions through the API vtable.
+fn generate_ext_init_fn(info: &ModuleInfo) -> proc_macro2::TokenStream {
+    let sld_content = generate_vfs_sld(info);
+    let scm_content = generate_vfs_scm(info);
+    let sld_path = format!("lib/tein/{}.sld", info.name);
+    let scm_path = format!("lib/tein/{}.scm", info.name);
+    let docs_sld_content = generate_vfs_docs_sld(info);
+    let docs_scm_content = generate_vfs_docs_scm(info);
+    let docs_sld_path = format!("lib/tein/{}/docs.sld", info.name);
+    let docs_scm_path = format!("lib/tein/{}/docs.scm", info.name);
+
+    let vfs_entries: Vec<proc_macro2::TokenStream> = [
+        (&sld_path, &sld_content),
+        (&scm_path, &scm_content),
+        (&docs_sld_path, &docs_sld_content),
+        (&docs_scm_path, &docs_scm_content),
+    ]
+    .iter()
+    .map(|(path, content)| {
+        quote! {
+            {
+                static PATH: &[u8] = #path.as_bytes();
+                static CONTENT: &[u8] = #content.as_bytes();
+                let rc = ((*api).register_vfs_module)(
+                    ctx,
+                    PATH.as_ptr() as *const ::std::ffi::c_char, PATH.len(),
+                    CONTENT.as_ptr() as *const ::std::ffi::c_char, CONTENT.len(),
+                );
+                if rc != 0 { return tein_ext::TEIN_EXT_ERR_INIT; }
+            }
+        }
+    })
+    .collect();
+
+    let type_registrations: Vec<proc_macro2::TokenStream> = info
+        .types
+        .iter()
+        .map(|t| {
+            let desc_ident = syn::Ident::new(
+                &format!("__TEIN_TYPE_DESC_{}", t.struct_item.ident.to_string().to_uppercase()),
+                t.struct_item.ident.span(),
+            );
+            quote! {
+                {
+                    let rc = ((*api).register_foreign_type)(ctx, &#desc_ident);
+                    if rc != 0 { return tein_ext::TEIN_EXT_ERR_INIT; }
+                }
+            }
+        })
+        .collect();
+
+    let fn_registrations: Vec<proc_macro2::TokenStream> = info
+        .free_fns
+        .iter()
+        .map(|f| {
+            let wrapper_ident = syn::Ident::new(
+                &format!("__tein_{}", f.func.sig.ident),
+                f.func.sig.ident.span(),
+            );
+            let scheme_name = &f.scheme_name;
+            quote! {
+                {
+                    static NAME: &[u8] = #scheme_name.as_bytes();
+                    let rc = ((*api).define_fn_variadic)(
+                        ctx,
+                        NAME.as_ptr() as *const ::std::ffi::c_char, NAME.len(),
+                        #wrapper_ident,
+                    );
+                    if rc != 0 { return tein_ext::TEIN_EXT_ERR_INIT; }
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        /// Extension entry point — called by the tein host at load time.
+        ///
+        /// # Safety
+        ///
+        /// Must be called with a valid context pointer and API table.
+        /// Only called by `Context::load_extension`.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn tein_ext_init(
+            ctx: *mut tein_ext::OpaqueCtx,
+            api: *const tein_ext::TeinExtApi,
+        ) -> i32 {
+            unsafe {
+                // version check
+                if (*api).version < tein_ext::TEIN_EXT_API_VERSION {
+                    return tein_ext::TEIN_EXT_ERR_VERSION;
+                }
+
+                // store API pointer for wrappers to use
+                __TEIN_API.with(|cell| cell.set(api));
+
+                // register VFS entries
+                #(#vfs_entries)*
+
+                // register foreign types
+                #(#type_registrations)*
+
+                // register free functions
+                #(#fn_registrations)*
+
+                tein_ext::TEIN_EXT_OK
+            }
+        }
+    }
+}
+
+/// generate a static `TeinTypeDesc` (+ method array + method wrappers) for an ext-mode type.
+fn generate_ext_type_desc(type_info: &TypeInfo) -> syn::Result<proc_macro2::TokenStream> {
+    let struct_name = &type_info.struct_item.ident;
+    let scheme_type_name = &type_info.scheme_type_name;
+    let desc_ident = syn::Ident::new(
+        &format!("__TEIN_TYPE_DESC_{}", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+    let methods_ident = syn::Ident::new(
+        &format!("__TEIN_METHODS_{}", struct_name.to_string().to_uppercase()),
+        struct_name.span(),
+    );
+
+    let method_wrappers: Vec<proc_macro2::TokenStream> = type_info
+        .methods
+        .iter()
+        .map(|m| generate_ext_method_wrapper(m, struct_name))
+        .collect::<syn::Result<_>>()?;
+
+    let method_descs: Vec<proc_macro2::TokenStream> = type_info
+        .methods
+        .iter()
+        .map(|m| {
+            let method_ident = &m.method.sig.ident;
+            let wrapper_ident = syn::Ident::new(
+                &format!("__tein_ext_method_{}_{}", struct_name, method_ident),
+                method_ident.span(),
+            );
+            let scheme_name = &m.scheme_name;
+            let is_mut = m.is_mut;
+            quote! {
+                tein_ext::TeinMethodDesc {
+                    name: #scheme_name.as_ptr() as *const ::std::ffi::c_char,
+                    name_len: #scheme_name.len(),
+                    func: #wrapper_ident,
+                    is_mut: #is_mut,
+                }
+            }
+        })
+        .collect();
+
+    let method_count = method_descs.len();
+
+    Ok(quote! {
+        #(#method_wrappers)*
+
+        static #methods_ident: [tein_ext::TeinMethodDesc; #method_count] = [
+            #(#method_descs),*
+        ];
+
+        static #desc_ident: tein_ext::TeinTypeDesc = tein_ext::TeinTypeDesc {
+            type_name: #scheme_type_name.as_ptr() as *const ::std::ffi::c_char,
+            type_name_len: #scheme_type_name.len(),
+            methods: #methods_ident.as_ptr(),
+            method_count: #method_count,
+        };
+    })
+}
+
+/// generate an `extern "C"` method wrapper matching `TeinMethodFn`.
+fn generate_ext_method_wrapper(
+    m: &MethodInfo,
+    struct_name: &syn::Ident,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let method_ident = &m.method.sig.ident;
+    let wrapper_ident = syn::Ident::new(
+        &format!("__tein_ext_method_{}_{}", struct_name, method_ident),
+        method_ident.span(),
+    );
+
+    // collect non-self args
+    let args: Vec<(&syn::Ident, &Type)> = m
+        .method
+        .sig
+        .inputs
+        .iter()
+        .skip(1) // skip self
+        .map(|arg| {
+            if let FnArg::Typed(pt) = arg
+                && let Pat::Ident(pi) = pt.pat.as_ref()
+            {
+                return Ok((&pi.ident, pt.ty.as_ref()));
+            }
+            Err(syn::Error::new_spanned(
+                arg,
+                "expected named argument in #[tein_methods] method",
+            ))
+        })
+        .collect::<syn::Result<_>>()?;
+
+    let extractions: Vec<proc_macro2::TokenStream> = args
+        .iter()
+        .enumerate()
+        .map(|(i, (name, ty))| gen_arg_extraction_ext(name, ty, i, "api"))
+        .collect::<syn::Result<_>>()?;
+
+    let arg_names: Vec<&syn::Ident> = args.iter().map(|(n, _)| *n).collect();
+
+    let cast = if m.is_mut {
+        quote! { let __tein_this = &mut *(obj as *mut #struct_name); }
+    } else {
+        quote! { let __tein_this = &*(obj as *const #struct_name); }
+    };
+
+    let call_expr = quote! { #struct_name::#method_ident(__tein_this, #(#arg_names),*) };
+
+    let return_conv = gen_return_conversion_ext(&m.method.sig.output, call_expr, "api")?;
+
+    Ok(quote! {
+        unsafe extern "C" fn #wrapper_ident(
+            obj: *mut ::std::ffi::c_void,
+            ctx: *mut tein_ext::OpaqueCtx,
+            api: *const tein_ext::TeinExtApi,
+            _n: ::std::ffi::c_long,
+            args: *mut tein_ext::OpaqueVal,
+        ) -> *mut tein_ext::OpaqueVal {
+            let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                unsafe {
+                    #cast
+                    let mut __tein_current_args = args;
+                    #(#extractions)*
+                    #return_conv
+                }
+            }));
+            match result {
+                Ok(val) => val,
+                Err(_) => unsafe {
+                    let msg = concat!("rust panic in method ", stringify!(#method_ident));
+                    let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                    ((*api).sexp_c_str)(
+                        ctx, c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// generate the extern "C" wrapper for a free function in ext mode.
+///
+/// same `SexpFn` ABI as internal mode, but uses the `__TEIN_API` thread-local
+/// for all value operations instead of `tein::raw::*`.
+fn generate_scheme_fn_ext(input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let fn_name = &input.sig.ident;
+    let wrapper_name = syn::Ident::new(&format!("__tein_{}", fn_name), fn_name.span());
+
+    let mut arg_names = Vec::new();
+    let mut arg_types = Vec::new();
+
+    for arg in &input.sig.inputs {
+        match arg {
+            FnArg::Typed(pat_type) => {
+                let name = match pat_type.pat.as_ref() {
+                    Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            arg,
+                            "expected simple argument name",
+                        ));
+                    }
+                };
+                arg_names.push(name);
+                arg_types.push(pat_type.ty.as_ref().clone());
+            }
+            FnArg::Receiver(_) => {
+                return Err(syn::Error::new_spanned(
+                    arg,
+                    "tein_fn does not support self parameters",
+                ));
+            }
+        }
+    }
+
+    let extractions: Vec<proc_macro2::TokenStream> = arg_names
+        .iter()
+        .zip(arg_types.iter())
+        .enumerate()
+        .map(|(i, (name, ty))| gen_arg_extraction_ext(name, ty, i, "__tein_api"))
+        .collect::<syn::Result<_>>()?;
+
+    let call_args = &arg_names;
+    let call_expr = quote! { #fn_name(#(#call_args),*) };
+
+    let return_conversion = gen_return_conversion_ext_fn(&input.sig.output, call_expr)?;
+
+    Ok(quote! {
+        #input
+
+        /// generated ffi wrapper for [`#fn_name`] — called via TeinExtApi vtable
+        #[allow(non_snake_case)]
+        unsafe extern "C" fn #wrapper_name(
+            ctx: *mut tein_ext::OpaqueVal,
+            _self: *mut tein_ext::OpaqueVal,
+            _n: ::std::ffi::c_long,
+            args: *mut tein_ext::OpaqueVal,
+        ) -> *mut tein_ext::OpaqueVal {
+            let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                unsafe {
+                    let __tein_api = __TEIN_API.with(|cell| cell.get());
+                    let mut __tein_current_args = args;
+                    #(#extractions)*
+                    #return_conversion
+                }
+            }));
+            match result {
+                Ok(val) => val,
+                Err(_) => unsafe {
+                    let __tein_api = __TEIN_API.with(|cell| cell.get());
+                    let msg = concat!("rust panic in ", stringify!(#fn_name));
+                    let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                    ((*__tein_api).sexp_c_str)(
+                        ctx as *mut tein_ext::OpaqueCtx,
+                        c_msg.as_ptr(),
+                        msg.len() as ::std::ffi::c_long,
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// generate arg extraction code using the api vtable pointer named `api_ptr_name`.
+///
+/// <!-- extensibility: add a match arm here for new types. -->
+fn gen_arg_extraction_ext(
+    arg_name: &syn::Ident,
+    ty: &Type,
+    index: usize,
+    api_ptr_name: &str,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let type_str = type_name_str(ty).unwrap_or_default();
+    let err_msg = format!(
+        "argument {} ({}): expected {}",
+        index + 1,
+        arg_name,
+        type_str
+    );
+    let api: syn::Expr = syn::parse_str(api_ptr_name).unwrap();
+
+    let extraction = match type_str.as_str() {
+        "i64" => quote! {
+            let #arg_name: i64 = {
+                let raw = ((*#api).sexp_car)(__tein_current_args);
+                if ((*#api).sexp_integerp)(raw) == 0 {
+                    let msg = #err_msg;
+                    let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                    return ((*#api).sexp_c_str)(
+                        ctx as *mut tein_ext::OpaqueCtx,
+                        c_msg.as_ptr(), c_msg.as_bytes().len() as ::std::ffi::c_long,
+                    );
+                }
+                ((*#api).sexp_unbox_fixnum)(raw) as i64
+            };
+            __tein_current_args = ((*#api).sexp_cdr)(__tein_current_args);
+        },
+        "f64" => quote! {
+            let #arg_name: f64 = {
+                let raw = ((*#api).sexp_car)(__tein_current_args);
+                if ((*#api).sexp_flonump)(raw) != 0 {
+                    ((*#api).sexp_flonum_value)(raw)
+                } else if ((*#api).sexp_integerp)(raw) != 0 {
+                    ((*#api).sexp_unbox_fixnum)(raw) as f64
+                } else {
+                    let msg = #err_msg;
+                    let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                    return ((*#api).sexp_c_str)(
+                        ctx as *mut tein_ext::OpaqueCtx,
+                        c_msg.as_ptr(), c_msg.as_bytes().len() as ::std::ffi::c_long,
+                    );
+                }
+            };
+            __tein_current_args = ((*#api).sexp_cdr)(__tein_current_args);
+        },
+        "String" => quote! {
+            let #arg_name: String = {
+                let raw = ((*#api).sexp_car)(__tein_current_args);
+                if ((*#api).sexp_stringp)(raw) == 0 {
+                    let msg = #err_msg;
+                    let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                    return ((*#api).sexp_c_str)(
+                        ctx as *mut tein_ext::OpaqueCtx,
+                        c_msg.as_ptr(), c_msg.as_bytes().len() as ::std::ffi::c_long,
+                    );
+                }
+                let ptr = ((*#api).sexp_string_data)(raw);
+                let len = ((*#api).sexp_string_size)(raw) as usize;
+                let bytes = ::std::slice::from_raw_parts(ptr as *const u8, len);
+                match ::std::string::String::from_utf8(bytes.to_vec()) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        let msg = "argument: invalid utf-8 in string";
+                        let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                        return ((*#api).sexp_c_str)(
+                            ctx as *mut tein_ext::OpaqueCtx,
+                            c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
+                        );
+                    }
+                }
+            };
+            __tein_current_args = ((*#api).sexp_cdr)(__tein_current_args);
+        },
+        "bool" => quote! {
+            let #arg_name: bool = {
+                let raw = ((*#api).sexp_car)(__tein_current_args);
+                if ((*#api).sexp_booleanp)(raw) == 0 {
+                    let msg = #err_msg;
+                    let c_msg = ::std::ffi::CString::new(msg).unwrap();
+                    return ((*#api).sexp_c_str)(
+                        ctx as *mut tein_ext::OpaqueCtx,
+                        c_msg.as_ptr(), c_msg.as_bytes().len() as ::std::ffi::c_long,
+                    );
+                }
+                raw == ((*#api).get_true)()
+            };
+            __tein_current_args = ((*#api).sexp_cdr)(__tein_current_args);
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                format!("unsupported argument type: '{}'. supported: i64, f64, String, bool", type_str),
+            ));
+        }
+    };
+    Ok(extraction)
+}
+
+/// generate return conversion for ext-mode free functions (SexpFn ABI, ctx is *mut OpaqueVal).
+///
+/// `ctx` in a free fn wrapper is `*mut OpaqueVal` so we cast to `*mut OpaqueCtx` for api calls.
+///
+/// <!-- extensibility: add a match arm here for new return types. -->
+fn gen_return_conversion_ext_fn(
+    output: &ReturnType,
+    call_expr: proc_macro2::TokenStream,
+) -> syn::Result<proc_macro2::TokenStream> {
+    match output {
+        ReturnType::Default => Ok(quote! {
+            #call_expr;
+            ((*__tein_api).get_void)()
+        }),
+        ReturnType::Type(_, ret_type) => {
+            if let Some(inner) = extract_result_inner(ret_type) {
+                let ok_conv = gen_return_conversion_ext_value_fn(inner, quote! { __tein_ok })?;
+                Ok(quote! {
+                    match #call_expr {
+                        Ok(__tein_ok) => #ok_conv,
+                        Err(__tein_err) => {
+                            let msg = __tein_err.to_string();
+                            let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
+                            ((*__tein_api).sexp_c_str)(
+                                ctx as *mut tein_ext::OpaqueCtx,
+                                c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
+                            )
+                        }
+                    }
+                })
+            } else {
+                let conv = gen_return_conversion_ext_value_fn(ret_type, quote! { __tein_result })?;
+                Ok(quote! {
+                    let __tein_result = #call_expr;
+                    #conv
+                })
+            }
+        }
+    }
+}
+
+/// convert a rust value expression to `*mut OpaqueVal` for free fn wrappers.
+///
+/// in free fn wrappers, `ctx` is `*mut OpaqueVal` so needs casting to `*mut OpaqueCtx`.
+///
+/// <!-- extensibility: add a match arm for new return types. -->
+fn gen_return_conversion_ext_value_fn(
+    ty: &Type,
+    expr: proc_macro2::TokenStream,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let type_str = type_name_str(ty).unwrap_or_default();
+    let conv = match type_str.as_str() {
+        "i64" => quote! { ((*__tein_api).sexp_make_fixnum)(#expr as ::std::ffi::c_long) },
+        "f64" => quote! { ((*__tein_api).sexp_make_flonum)(ctx as *mut tein_ext::OpaqueCtx, #expr) },
+        "String" => quote! {
+            {
+                let __tein_s = #expr;
+                let __tein_c = ::std::ffi::CString::new(__tein_s.as_str()).unwrap_or_default();
+                ((*__tein_api).sexp_c_str)(
+                    ctx as *mut tein_ext::OpaqueCtx,
+                    __tein_c.as_ptr(), __tein_s.len() as ::std::ffi::c_long,
+                )
+            }
+        },
+        "bool" => quote! {
+            ((*__tein_api).sexp_make_boolean)(if #expr { 1 } else { 0 })
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                format!(
+                    "unsupported ext fn return type: '{}'. supported: i64, f64, String, bool, ()",
+                    type_str
+                ),
+            ));
+        }
+    };
+    Ok(conv)
+}
+
+/// generate return conversion for ext-mode method wrappers (TeinMethodFn ABI, ctx is *mut OpaqueCtx).
+fn gen_return_conversion_ext(
+    output: &ReturnType,
+    call_expr: proc_macro2::TokenStream,
+    api_ptr_name: &str,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let api: syn::Expr = syn::parse_str(api_ptr_name).unwrap();
+    match output {
+        ReturnType::Default => Ok(quote! {
+            #call_expr;
+            ((*#api).get_void)()
+        }),
+        ReturnType::Type(_, ret_type) => {
+            if let Some(inner) = extract_result_inner(ret_type) {
+                let ok_conv = gen_return_conversion_ext_value(inner, quote! { __tein_ok }, api_ptr_name)?;
+                Ok(quote! {
+                    match #call_expr {
+                        Ok(__tein_ok) => #ok_conv,
+                        Err(__tein_err) => {
+                            let msg = __tein_err.to_string();
+                            let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
+                            ((*#api).sexp_c_str)(
+                                ctx, c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
+                            )
+                        }
+                    }
+                })
+            } else {
+                let conv = gen_return_conversion_ext_value(ret_type, quote! { __tein_result }, api_ptr_name)?;
+                Ok(quote! {
+                    let __tein_result = #call_expr;
+                    #conv
+                })
+            }
+        }
+    }
+}
+
+/// convert a rust value expression to `*mut OpaqueVal` using the api vtable.
+///
+/// <!-- extensibility: add a match arm for new return types. -->
+fn gen_return_conversion_ext_value(
+    ty: &Type,
+    expr: proc_macro2::TokenStream,
+    api_ptr_name: &str,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let type_str = type_name_str(ty).unwrap_or_default();
+    let api: syn::Expr = syn::parse_str(api_ptr_name).unwrap();
+    let conv = match type_str.as_str() {
+        "i64" => quote! { ((*#api).sexp_make_fixnum)(#expr as ::std::ffi::c_long) },
+        "f64" => quote! { ((*#api).sexp_make_flonum)(ctx, #expr) },
+        "String" => quote! {
+            {
+                let __tein_s = #expr;
+                let __tein_c = ::std::ffi::CString::new(__tein_s.as_str()).unwrap_or_default();
+                ((*#api).sexp_c_str)(ctx, __tein_c.as_ptr(), __tein_s.len() as ::std::ffi::c_long)
+            }
+        },
+        "bool" => quote! {
+            ((*#api).sexp_make_boolean)(if #expr { 1 } else { 0 })
+        },
+        _ => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                format!(
+                    "unsupported ext method return type: '{}'. supported: i64, f64, String, bool, ()",
+                    type_str
+                ),
+            ));
+        }
+    };
+    Ok(conv)
 }
 
 // ── ForeignType codegen ───────────────────────────────────────────────────────
