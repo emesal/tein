@@ -233,3 +233,37 @@ fn test_scheme_tein_module() {
 fn test_scheme_docs() {
     run_scheme_test_with_module(include_str!("scheme/docs.scm"));
 }
+
+// ── ext module tests ──────────────────────────────────────────────────────────
+
+/// resolve the test extension shared library path.
+///
+/// prefers `CARGO_TARGET_DIR` env var (set by the project's cargo alias),
+/// falls back to `<workspace>/target/` as the conventional default.
+fn ext_lib_path() -> std::path::PathBuf {
+    let target_dir = if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+        std::path::PathBuf::from(dir)
+    } else {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.pop(); // tein/ → workspace root
+        path.push("target");
+        path
+    };
+    let mut path = target_dir;
+    path.push(if cfg!(debug_assertions) { "debug" } else { "release" });
+    #[cfg(target_os = "linux")]
+    path.push("libtein_test_ext.so");
+    #[cfg(target_os = "macos")]
+    path.push("libtein_test_ext.dylib");
+    #[cfg(target_os = "windows")]
+    path.push("tein_test_ext.dll");
+    path
+}
+
+#[test]
+fn test_scheme_ext_module() {
+    let ctx = Context::new_standard().expect("context");
+    ctx.load_extension(ext_lib_path()).expect("load ext");
+    ctx.evaluate(include_str!("scheme/ext_module.scm"))
+        .expect("scheme ext module test failed");
+}
