@@ -60,6 +60,9 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Build test extension
+        run: cargo build -p tein-test-ext
+
       - name: Run tests
         run: cargo test --all-targets
 
