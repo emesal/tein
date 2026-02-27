@@ -11,10 +11,16 @@
 **Design doc:** `docs/plans/2026-02-27-type-parity-design.md`
 **Issue:** #71
 **Base branch:** dev
+**Branch:** `feature/numeric-tower-2602`
+
+**Progress:** tasks 1-5 done (commit `43df9a0`). tasks 6-10 remain.
+**Notes:** tasks 3-5 combined in one commit (value.rs non-exhaustive match forced all three together). `test_complex_from_scheme` uses `Context::new_standard()` — `make-rectangular` requires standard env.
 
 ---
 
-### Task 1: chibi shim — numeric tower predicates & extractors
+### ~~Task 1: chibi shim — numeric tower predicates & extractors~~ ✓
+
+> done: pushed to emesal/chibi-scheme emesal-tein, rebuilt clean.
 
 **Files:**
 - Modify: `target/chibi-scheme/tein_shim.c` (chibi fork, branch `emesal-tein`)
@@ -97,7 +103,7 @@ Expected: clean build, no errors.
 
 ---
 
-### Task 2: ffi.rs — safe wrappers for numeric tower
+### ~~Task 2: ffi.rs — safe wrappers for numeric tower~~ ✓
 
 **Files:**
 - Modify: `tein/src/ffi.rs`
@@ -210,7 +216,7 @@ feat(ffi): safe wrappers for numeric tower — bignum, rational, complex (#71)
 
 ---
 
-### Task 3: Value enum — new variants + Display + PartialEq + accessors
+### ~~Task 3: Value enum — new variants + Display + PartialEq + accessors~~ ✓
 
 **Files:**
 - Modify: `tein/src/value.rs`
@@ -306,7 +312,7 @@ feat(value): add Bignum, Rational, Complex variants with Display + accessors (#7
 
 ---
 
-### Task 4: Value — from_raw for numeric tower
+### ~~Task 4: Value — from_raw for numeric tower~~ ✓
 
 **Files:**
 - Modify: `tein/src/value.rs` (the `from_raw_depth` function)
@@ -468,7 +474,7 @@ feat(value): from_raw for bignum, rational, complex — broadest-first type chec
 
 ---
 
-### Task 5: Value — to_raw for numeric tower
+### ~~Task 5: Value — to_raw for numeric tower~~ ✓
 
 **Files:**
 - Modify: `tein/src/value.rs` (the `to_raw_depth` function)
