@@ -1645,6 +1645,11 @@ impl Context {
             .map_err(|_| Error::EvalError("function name contains null bytes".to_string()))?;
 
         unsafe {
+            // registers into the top-level env, NOT a library env — so after
+            // `(import (tein mod))`, chibi emits "importing undefined variable"
+            // warnings for these names (they're not in the library's env), but
+            // they ARE callable because chibi falls back to the top-level env.
+            // the warnings are harmless. same behaviour in ext mode.
             let env = ffi::sexp_context_env(self.ctx);
             let result = ffi::sexp_define_foreign_proc(
                 self.ctx,

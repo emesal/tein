@@ -405,6 +405,8 @@ fn parse_module_info(module_name: String, ext: bool, mod_item: ItemMod) -> syn::
             Item::Const(c) if has_tein_attr(&c.attrs, "tein_const") => {
                 let override_name = extract_name_override(&c.attrs, "tein_const")?;
                 let rust_name = c.ident.to_string();
+                // constants get no module prefix — GREETING in module "foo" → "greeting",
+                // not "foo-greeting". this differs from free fns. same in internal and ext mode.
                 let scheme_name = override_name.unwrap_or_else(|| screaming_to_kebab(&rust_name));
                 let scheme_literal = const_to_scheme_literal(&c.expr)?;
                 consts.push(ConstInfo {
@@ -568,6 +570,9 @@ fn generate_module_ext(info: ModuleInfo) -> syn::Result<proc_macro2::TokenStream
 
     Ok(quote! {
         #(#mod_attrs)*
+        // dead_code: const items appear unused to rustc (they're consumed by VFS codegen at
+        //   macro expansion time, not at runtime). non_snake_case: method wrapper names like
+        //   __tein_ext_method_Counter_get embed the PascalCase struct name by design.
         #[allow(dead_code, non_snake_case)]
         #mod_vis mod #mod_name {
             #(#items)*
@@ -1047,6 +1052,8 @@ fn gen_return_conversion_ext_fn(
                 Ok(quote! {
                     match #call_expr {
                         Ok(__tein_ok) => #ok_conv,
+                        // Result::Err returns a scheme string, not an exception. callers
+                        // receive Value::String(msg). (test-error ...) won't catch it.
                         Err(__tein_err) => {
                             let msg = __tein_err.to_string();
                             let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
@@ -1813,6 +1820,9 @@ fn generate_scheme_fn(input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 quote! {
                     match #call_expr {
                         Ok(__tein_ok) => { #success_conv }
+                        // Result::Err returns a scheme string, not an exception. callers
+                        // receive Value::String(msg), not Err(...). (test-error ...) won't
+                        // catch it; match on Value::String instead. same in ext mode.
                         Err(__tein_err) => {
                             let msg = __tein_err.to_string();
                             let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
