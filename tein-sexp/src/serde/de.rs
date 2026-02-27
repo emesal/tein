@@ -65,8 +65,8 @@ impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
             SexpKind::Char(c) => visitor.visit_char(*c),
             SexpKind::Nil => visitor.visit_unit(),
             SexpKind::List(items) => {
-                // heuristic: if all items are dotted pairs with symbol car, treat as map
-                if is_alist(items) {
+                // heuristic: if all items are dotted pairs with symbol/string key, treat as map
+                if self.sexp.is_alist() {
                     visitor.visit_map(AlistMapAccess::new(items))
                 } else {
                     visitor.visit_seq(SexpSeqAccess::new(items))
@@ -79,6 +79,26 @@ impl<'de, 'a> de::Deserializer<'de> for SexpDeserializer<'a> {
                 visitor.visit_seq(SexpSeqAccess::new_owned(all))
             }
             SexpKind::Vector(items) => visitor.visit_seq(SexpSeqAccess::new(items)),
+            // numeric tower: bignums serialize as strings, rational/complex as maps
+            SexpKind::Bignum(s) => visitor.visit_string(s.clone()),
+            SexpKind::Rational(n, d) => {
+                let entries = vec![
+                    Sexp::dotted_list(vec![Sexp::string("numerator")], *n.clone()),
+                    Sexp::dotted_list(vec![Sexp::string("denominator")], *d.clone()),
+                ];
+                visitor.visit_map(OwnedAlistMapAccess::new(entries))
+            }
+            SexpKind::Complex(r, i) => {
+                let entries = vec![
+                    Sexp::dotted_list(vec![Sexp::string("real")], *r.clone()),
+                    Sexp::dotted_list(vec![Sexp::string("imag")], *i.clone()),
+                ];
+                visitor.visit_map(OwnedAlistMapAccess::new(entries))
+            }
+            SexpKind::Bytevector(bytes) => {
+                let items: Vec<Sexp> = bytes.iter().map(|&b| Sexp::integer(b as i64)).collect();
+                visitor.visit_seq(SexpSeqAccess::new_owned(items))
+            }
         }
     }
 
@@ -390,6 +410,42 @@ impl<'de, 'a> de::MapAccess<'de> for AlistMapAccess<'a> {
     }
 }
 
+/// owned variant of [`AlistMapAccess`] for synthetic alist entries (e.g. rational/complex).
+struct OwnedAlistMapAccess {
+    items: Vec<Sexp>,
+    index: usize,
+}
+
+impl OwnedAlistMapAccess {
+    fn new(items: Vec<Sexp>) -> Self {
+        Self { items, index: 0 }
+    }
+}
+
+impl<'de> de::MapAccess<'de> for OwnedAlistMapAccess {
+    type Error = ParseError;
+
+    fn next_key_seed<K: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, ParseError> {
+        if self.index >= self.items.len() {
+            return Ok(None);
+        }
+        let key = alist_key(&self.items[self.index])?;
+        seed.deserialize(SexpDeserializer { sexp: key }).map(Some)
+    }
+
+    fn next_value_seed<V: de::DeserializeSeed<'de>>(
+        &mut self,
+        seed: V,
+    ) -> Result<V::Value, ParseError> {
+        let val = alist_value(&self.items[self.index])?;
+        self.index += 1;
+        seed.deserialize(SexpDeserializer { sexp: val })
+    }
+}
+
 /// extract the key from an alist entry (dotted pair)
 fn alist_key(entry: &Sexp) -> Result<&Sexp, ParseError> {
     match &entry.kind {
@@ -412,22 +468,6 @@ fn alist_value(entry: &Sexp) -> Result<&Sexp, ParseError> {
             entry.span,
         )),
     }
-}
-
-/// heuristic: check if a list looks like an alist (all dotted pairs with symbol or string keys)
-///
-/// accepts both symbol keys (e.g. from struct serialisation) and string keys (e.g. from
-/// `BTreeMap<String, V>`), so `deserialize_any` can detect both as maps rather than sequences.
-fn is_alist(items: &[Sexp]) -> bool {
-    if items.is_empty() {
-        return false;
-    }
-    items.iter().all(|item| match &item.kind {
-        SexpKind::DottedList(keys, _) if keys.len() == 1 => {
-            matches!(&keys[0].kind, SexpKind::Symbol(_) | SexpKind::String(_))
-        }
-        _ => false,
-    })
 }
 
 // --- enum access ---
@@ -595,7 +635,7 @@ mod tests {
 
     #[test]
     fn deserialize_empty_vec() {
-        assert_eq!(from_str::<Vec<i32>>("()").unwrap(), vec![]);
+        assert_eq!(from_str::<Vec<i32>>("()").unwrap(), Vec::<i32>::new());
     }
 
     #[test]

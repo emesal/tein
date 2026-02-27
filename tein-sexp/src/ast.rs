@@ -294,6 +294,26 @@ impl Sexp {
         matches!(self.kind, SexpKind::Nil)
     }
 
+    /// returns true if this list looks like an association list.
+    ///
+    /// an alist is a non-empty list where every element is a dotted pair `(key . val)`
+    /// with a symbol or string key. returns false for non-list values and empty lists.
+    ///
+    /// used by the serde `Serialize` impl to emit alists as maps rather than sequences,
+    /// ensuring round-trip fidelity with map-based formats like JSON.
+    pub fn is_alist(&self) -> bool {
+        let items = match &self.kind {
+            SexpKind::List(items) if !items.is_empty() => items,
+            _ => return false,
+        };
+        items.iter().all(|item| match &item.kind {
+            SexpKind::DottedList(keys, _) if keys.len() == 1 => {
+                matches!(&keys[0].kind, SexpKind::Symbol(_) | SexpKind::String(_))
+            }
+            _ => false,
+        })
+    }
+
     /// extract as bignum string, if this is a `Bignum`
     pub fn as_bignum(&self) -> Option<&str> {
         match &self.kind {
@@ -565,6 +585,16 @@ impl serde::Serialize for Sexp {
             SexpKind::Boolean(b) => serializer.serialize_bool(*b),
             SexpKind::Char(c) => serializer.serialize_char(*c),
             SexpKind::Nil => serializer.serialize_unit(),
+            SexpKind::List(items) if self.is_alist() => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(items.len()))?;
+                for item in items {
+                    // is_alist guarantees: DottedList with exactly one symbol/string key
+                    let (keys, tail) = item.as_dotted_list().unwrap();
+                    map.serialize_entry(&keys[0], tail)?;
+                }
+                map.end()
+            }
             SexpKind::List(items) => {
                 let mut seq = serializer.serialize_seq(Some(items.len()))?;
                 for item in items {
@@ -1008,5 +1038,142 @@ mod tests {
             Sexp::rational(Sexp::integer(1), Sexp::integer(3)),
         );
         assert_eq!(Sexp::bytevector(vec![1, 2]), Sexp::bytevector(vec![1, 2]));
+    }
+
+    // --- is_alist tests ---
+
+    #[test]
+    fn is_alist_symbol_keys() {
+        let alist = Sexp::list(vec![
+            Sexp::dotted_list(vec![Sexp::symbol("a")], Sexp::integer(1)),
+            Sexp::dotted_list(vec![Sexp::symbol("b")], Sexp::integer(2)),
+        ]);
+        assert!(alist.is_alist());
+    }
+
+    #[test]
+    fn is_alist_string_keys() {
+        let alist = Sexp::list(vec![Sexp::dotted_list(
+            vec![Sexp::string("name")],
+            Sexp::string("alice"),
+        )]);
+        assert!(alist.is_alist());
+    }
+
+    #[test]
+    fn is_alist_empty_list() {
+        assert!(!Sexp::nil().is_alist());
+    }
+
+    #[test]
+    fn is_alist_plain_list() {
+        let plain = Sexp::list(vec![Sexp::integer(1), Sexp::integer(2)]);
+        assert!(!plain.is_alist());
+    }
+
+    #[test]
+    fn is_alist_non_list() {
+        assert!(!Sexp::integer(42).is_alist());
+        assert!(!Sexp::string("hi").is_alist());
+    }
+
+    #[test]
+    fn is_alist_mixed_not_alist() {
+        // one proper entry, one plain integer — not an alist
+        let mixed = Sexp::list(vec![
+            Sexp::dotted_list(vec![Sexp::symbol("a")], Sexp::integer(1)),
+            Sexp::integer(2),
+        ]);
+        assert!(!mixed.is_alist());
+    }
+
+    #[test]
+    fn is_alist_integer_key_not_alist() {
+        // dotted pair with non-symbol/string key
+        let bad = Sexp::list(vec![Sexp::dotted_list(
+            vec![Sexp::integer(1)],
+            Sexp::integer(2),
+        )]);
+        assert!(!bad.is_alist());
+    }
+}
+
+/// JSON round-trip tests proving alists serialize as objects, not arrays.
+///
+/// requires the `serde` feature and the `serde_json` dev-dependency.
+#[cfg(all(test, feature = "serde"))]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn alist_round_trips_as_json_object() {
+        // alist → json object → alist
+        let alist = Sexp::list(vec![
+            Sexp::dotted_list(vec![Sexp::string("name")], Sexp::string("tein")),
+            Sexp::dotted_list(vec![Sexp::string("version")], Sexp::integer(1)),
+        ]);
+        let json = serde_json::to_string(&alist).unwrap();
+        assert_eq!(json, r#"{"name":"tein","version":1}"#);
+        let restored: Sexp = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, alist);
+    }
+
+    #[test]
+    fn plain_list_round_trips_as_json_array() {
+        let list = Sexp::list(vec![Sexp::integer(1), Sexp::integer(2), Sexp::integer(3)]);
+        let json = serde_json::to_string(&list).unwrap();
+        assert_eq!(json, "[1,2,3]");
+        let restored: Sexp = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, list);
+    }
+
+    #[test]
+    fn nested_object_round_trip() {
+        let inner = Sexp::list(vec![Sexp::dotted_list(
+            vec![Sexp::string("x")],
+            Sexp::integer(10),
+        )]);
+        let outer = Sexp::list(vec![Sexp::dotted_list(vec![Sexp::string("nested")], inner)]);
+        let json = serde_json::to_string(&outer).unwrap();
+        assert_eq!(json, r#"{"nested":{"x":10}}"#);
+        let restored: Sexp = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, outer);
+    }
+
+    #[test]
+    fn json_null_becomes_nil() {
+        let sexp: Sexp = serde_json::from_str("null").unwrap();
+        assert!(sexp.is_nil());
+    }
+
+    #[test]
+    fn json_boolean_round_trip() {
+        let t: Sexp = serde_json::from_str("true").unwrap();
+        assert_eq!(t, Sexp::boolean(true));
+        assert_eq!(serde_json::to_string(&t).unwrap(), "true");
+    }
+
+    #[test]
+    fn json_empty_object_becomes_nil() {
+        // {} has no entries → empty alist → Nil (via Sexp::list(vec![]))
+        let sexp: Sexp = serde_json::from_str("{}").unwrap();
+        assert!(sexp.is_nil());
+    }
+
+    #[test]
+    fn json_empty_array_becomes_nil() {
+        let sexp: Sexp = serde_json::from_str("[]").unwrap();
+        assert!(sexp.is_nil());
+    }
+
+    #[test]
+    fn symbol_keyed_alist_as_json_object() {
+        // symbol keys also serialize as JSON object (symbols → strings in JSON)
+        let alist = Sexp::list(vec![Sexp::dotted_list(
+            vec![Sexp::symbol("key")],
+            Sexp::integer(42),
+        )]);
+        let json = serde_json::to_string(&alist).unwrap();
+        assert_eq!(json, r#"{"key":42}"#);
     }
 }
