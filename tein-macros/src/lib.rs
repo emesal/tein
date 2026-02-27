@@ -308,12 +308,20 @@ fn parse_module_attr(tokens: proc_macro2::TokenStream) -> syn::Result<(String, b
     let mut iter = args.iter();
 
     // first arg: string literal (module name)
-    let name_expr = iter.next().ok_or_else(|| {
-        syn::Error::new(Span::call_site(), "expected module name string")
-    })?;
+    let name_expr = iter
+        .next()
+        .ok_or_else(|| syn::Error::new(Span::call_site(), "expected module name string"))?;
     let name = match name_expr {
-        syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) => s.value(),
-        _ => return Err(syn::Error::new_spanned(name_expr, "expected string literal for module name")),
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => s.value(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                name_expr,
+                "expected string literal for module name",
+            ));
+        }
     };
 
     // optional second arg: ext = true
@@ -325,10 +333,17 @@ fn parse_module_attr(tokens: proc_macro2::TokenStream) -> syn::Result<(String, b
                 if let syn::Expr::Path(p) = key
                     && p.path.is_ident("ext")
                 {
-                    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(b), .. }) = assign.right.as_ref() {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Bool(b),
+                        ..
+                    }) = assign.right.as_ref()
+                    {
                         ext = b.value();
                     } else {
-                        return Err(syn::Error::new_spanned(&assign.right, "expected `true` or `false`"));
+                        return Err(syn::Error::new_spanned(
+                            &assign.right,
+                            "expected `true` or `false`",
+                        ));
                     }
                 } else {
                     return Err(syn::Error::new_spanned(key, "expected `ext`"));
@@ -339,7 +354,10 @@ fn parse_module_attr(tokens: proc_macro2::TokenStream) -> syn::Result<(String, b
     }
 
     if iter.next().is_some() {
-        return Err(syn::Error::new(Span::call_site(), "unexpected extra arguments"));
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "unexpected extra arguments",
+        ));
     }
 
     Ok((name, ext))
@@ -602,7 +620,10 @@ fn generate_ext_init_fn(info: &ModuleInfo) -> proc_macro2::TokenStream {
         .iter()
         .map(|t| {
             let desc_ident = syn::Ident::new(
-                &format!("__TEIN_TYPE_DESC_{}", t.struct_item.ident.to_string().to_uppercase()),
+                &format!(
+                    "__TEIN_TYPE_DESC_{}",
+                    t.struct_item.ident.to_string().to_uppercase()
+                ),
                 t.struct_item.ident.span(),
             );
             quote! {
@@ -678,7 +699,10 @@ fn generate_ext_type_desc(type_info: &TypeInfo) -> syn::Result<proc_macro2::Toke
     let struct_name = &type_info.struct_item.ident;
     let scheme_type_name = &type_info.scheme_type_name;
     let desc_ident = syn::Ident::new(
-        &format!("__TEIN_TYPE_DESC_{}", struct_name.to_string().to_uppercase()),
+        &format!(
+            "__TEIN_TYPE_DESC_{}",
+            struct_name.to_string().to_uppercase()
+        ),
         struct_name.span(),
     );
     let methods_ident = syn::Ident::new(
@@ -993,7 +1017,10 @@ fn gen_arg_extraction_ext(
         _ => {
             return Err(syn::Error::new_spanned(
                 ty,
-                format!("unsupported argument type: '{}'. supported: i64, f64, String, bool", type_str),
+                format!(
+                    "unsupported argument type: '{}'. supported: i64, f64, String, bool",
+                    type_str
+                ),
             ));
         }
     };
@@ -1053,7 +1080,9 @@ fn gen_return_conversion_ext_value_fn(
     let type_str = type_name_str(ty).unwrap_or_default();
     let conv = match type_str.as_str() {
         "i64" => quote! { ((*__tein_api).sexp_make_fixnum)(#expr as ::std::ffi::c_long) },
-        "f64" => quote! { ((*__tein_api).sexp_make_flonum)(ctx as *mut tein_ext::OpaqueCtx, #expr) },
+        "f64" => {
+            quote! { ((*__tein_api).sexp_make_flonum)(ctx as *mut tein_ext::OpaqueCtx, #expr) }
+        }
         "String" => quote! {
             {
                 let __tein_s = #expr;
@@ -1094,7 +1123,8 @@ fn gen_return_conversion_ext(
         }),
         ReturnType::Type(_, ret_type) => {
             if let Some(inner) = extract_result_inner(ret_type) {
-                let ok_conv = gen_return_conversion_ext_value(inner, quote! { __tein_ok }, api_ptr_name)?;
+                let ok_conv =
+                    gen_return_conversion_ext_value(inner, quote! { __tein_ok }, api_ptr_name)?;
                 Ok(quote! {
                     match #call_expr {
                         Ok(__tein_ok) => #ok_conv,
@@ -1108,7 +1138,11 @@ fn gen_return_conversion_ext(
                     }
                 })
             } else {
-                let conv = gen_return_conversion_ext_value(ret_type, quote! { __tein_result }, api_ptr_name)?;
+                let conv = gen_return_conversion_ext_value(
+                    ret_type,
+                    quote! { __tein_result },
+                    api_ptr_name,
+                )?;
                 Ok(quote! {
                     let __tein_result = #call_expr;
                     #conv

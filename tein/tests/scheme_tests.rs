@@ -250,7 +250,11 @@ fn ext_lib_path() -> std::path::PathBuf {
         path
     };
     let mut path = target_dir;
-    path.push(if cfg!(debug_assertions) { "debug" } else { "release" });
+    path.push(if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    });
     #[cfg(target_os = "linux")]
     path.push("libtein_test_ext.so");
     #[cfg(target_os = "macos")]

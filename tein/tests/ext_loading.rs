@@ -29,7 +29,11 @@ fn ext_lib_path() -> std::path::PathBuf {
     };
 
     let mut path = target_dir;
-    path.push(if cfg!(debug_assertions) { "debug" } else { "release" });
+    path.push(if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    });
 
     #[cfg(target_os = "linux")]
     path.push("libtein_test_ext.so");
@@ -155,7 +159,8 @@ fn test_ext_load_nonexistent() {
 fn test_ext_docs_sublibrary() {
     let ctx = Context::new_standard().expect("context");
     ctx.load_extension(ext_lib_path()).expect("load");
-    ctx.evaluate("(import (tein testext))").expect("import testext");
+    ctx.evaluate("(import (tein testext))")
+        .expect("import testext");
     ctx.evaluate("(import (tein testext docs))")
         .expect("import docs sub-library");
     let result = ctx.evaluate("testext-docs").expect("eval docs alist");

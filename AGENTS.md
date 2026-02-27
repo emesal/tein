@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (211 lib + 12 tein_fn + 24 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 9 tein-macros + doc-tests)
+just test                         # all tests (211 lib + 12 tein_fn + 24 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 9 tein-macros + 11 ext_loading + 1 scheme_ext + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 just lint                          # lint (cargo fmt + cargo clippy)
@@ -22,6 +22,8 @@ cargo fmt --check                  # format check
 cargo run --example basic          # run an example (basic|floats|ffi|debug|sandbox|foreign_types|managed)
 cargo test --features debug-chibi   # tests with chibi GC instrumentation (slower)
 just clean && cargo build         # nuclear option if ffi gets weird
+cargo build -p tein-test-ext       # build test cdylib extension
+cargo test -p tein -- ext          # run extension integration tests
 ```
 
 ## architecture
@@ -31,7 +33,8 @@ src/
   lib.rs       — public api re-exports (Context, ContextBuilder, TimeoutContext,
                  ThreadLocalContext, Mode, Value, Error,
                  ForeignType, MethodFn, MethodContext)
-  context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests
+  context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests;
+                 load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII
   value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
                  variants: Integer, Float, String, Symbol, Boolean, List, Pair,
                  Vector, Char, Bytevector, Port (opaque), HashTable (opaque,
@@ -41,12 +44,20 @@ src/
                  StepLimitExceeded, Timeout, SandboxViolation)
   ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
   foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore handle-map,
-                 dispatch_foreign_call — the foreign type protocol engine
+                 dispatch_foreign_call — the foreign type protocol engine;
+                 ExtMethodEntry, ExtTypeEntry for dynamic ext-type registration,
+                 MethodLookup (Static | Ext), find_method_any
   managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
   sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions for env restriction
   thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
   port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
+tein-ext/      — stable C ABI types for cdylib extensions (no chibi dependency):
+  src/lib.rs   — TeinExtApi vtable, OpaqueCtx/OpaqueVal, TeinTypeDesc/TeinMethodDesc,
+                 SexpFn/TeinMethodFn/TeinExtInitFn type aliases, error codes, API version
+tein-test-ext/ — in-tree test cdylib extension (publish = false):
+  src/lib.rs   — #[tein_module("testext", ext = true)] with free fns, consts, Counter type;
+                 used by tein/tests/ext_loading.rs integration tests
 target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
                  env_copy_named (rename-aware binding copy), error construction,
@@ -91,6 +102,10 @@ tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-le
 **reader dispatch flow**: `ctx.register_reader('j', &handler)` or scheme `(import (tein reader)) (set-reader! #\j handler)` → `ffi::reader_dispatch_set(c, proc)` → stores proc in thread-local `tein_reader_dispatch[128]` table. when chibi's reader encounters `#j`, patched `sexp.c` calls `tein_reader_dispatch_get(c1)` → finds handler → `sexp_apply1(ctx, handler, in)` → handler receives input port, reads further if needed, returns datum → reader returns datum to evaluator. scheme-level fns are registered by the C static library init (`reader.c`) when `(import (tein reader))` loads the module via `include-shared`. dispatch table cleared on `Context::drop()`. reserved r7rs chars (`#t`, `#f`, `#\`, `#(`, numeric prefixes, etc.) cannot be overridden.
 
 **macro expansion hook flow**: `ctx.set_macro_expand_hook(&proc)` or scheme `(import (tein macro)) (set-macro-expand-hook! proc)` → `ffi::macro_expand_hook_set(ctx, proc)` → stores proc in thread-local `tein_macro_expand_hook` with GC preservation. when chibi's `analyze_macro_once()` expands a macro (patched eval.c D), checks hook → if set and not already active, sets `tein_macro_expand_hook_active` recursion guard → calls `sexp_apply(ctx, hook, (name unexpanded expanded env))` → hook return value replaces expanded form → `goto loop` reanalyses (replace-and-reanalyse semantics). scheme-level fns are registered by the C static library init (`macro.c`) when `(import (tein macro))` loads the module via `include-shared`. hook cleared on `Context::drop()`.
+
+**cdylib extension flow**: `ctx.load_extension(path)` → `libloading::Library::new(path)` → resolves `tein_ext_init` symbol → builds `TeinExtApi` vtable populated with trampolines into `ffi::*` → sets `FOREIGN_STORE_PTR` + `EXT_API` thread-locals → calls `tein_ext_init(ctx, &api)`. the extension's generated init fn (from `#[tein_module("name", ext = true)]`) checks API version, stores api pointer in `__TEIN_API` thread-local, calls `register_vfs_module`/`register_foreign_type`/`define_fn_variadic` through vtable. for ext foreign types, `ext_trampoline_register_type` builds `ExtTypeEntry` in `ForeignStore` with `TeinMethodFn` pointers; dispatch routes through `MethodLookup::Ext { func, is_mut }` passing `*mut c_void` and the api table. the shared library is leaked (no unload). `EXT_API` is also set during `evaluate()`/`call()` so ext method dispatch has access to the vtable at any time.
+
+**dependency graph**: extension crates depend on `tein-ext` + `tein-macros`, never on `tein`. the macro emits `tein_ext::*` references resolved at extension compile time. the host (`tein`) depends on `tein-ext` for the vtable types.
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. ThreadLocalContext generalises this pattern with persistent/fresh modes. fuel counters are thread-local.
 
