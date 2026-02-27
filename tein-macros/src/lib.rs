@@ -220,7 +220,12 @@ fn extract_doc_comments(attrs: &[syn::Attribute]) -> Vec<String> {
                     ..
                 }) = &nv.value
                 {
-                    return Some(s.value().strip_prefix(' ').unwrap_or(&s.value()).to_string());
+                    return Some(
+                        s.value()
+                            .strip_prefix(' ')
+                            .unwrap_or(&s.value())
+                            .to_string(),
+                    );
                 }
             }
             None
@@ -1082,10 +1087,7 @@ mod tests {
             parse_quote!(#[doc = " line one"]),
             parse_quote!(#[doc = " line two"]),
         ];
-        assert_eq!(
-            extract_doc_comments(&attrs),
-            vec!["line one", "line two"]
-        );
+        assert_eq!(extract_doc_comments(&attrs), vec!["line one", "line two"]);
 
         // mixed with non-doc attrs
         let attrs: Vec<syn::Attribute> = vec![

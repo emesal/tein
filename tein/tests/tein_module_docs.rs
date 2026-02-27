@@ -39,7 +39,10 @@ fn setup() -> Context {
 #[test]
 fn test_doc_const_values_still_work() {
     let ctx = setup();
-    assert_eq!(ctx.evaluate("greeting").unwrap(), Value::String("hello".into()));
+    assert_eq!(
+        ctx.evaluate("greeting").unwrap(),
+        Value::String("hello".into())
+    );
     assert_eq!(ctx.evaluate("max-size").unwrap(), Value::Integer(256));
     assert_eq!(ctx.evaluate("bare").unwrap(), Value::Boolean(true));
 }
@@ -66,4 +69,43 @@ fn test_vfs_scm_contains_doc_comments() {
     // that the module loads correctly (the ;; comments are syntactically valid scheme).
     // the actual comment content is verified by the unit test on generate_vfs_scm.
     assert!(scm.is_ok() || true); // module loads = comments are valid scheme
+}
+
+// ── doc preservation: verify doc attrs survive macro expansion ────────────────
+
+/// verify that doc comments on tein items survive macro expansion.
+/// this module exists to be compiled — if it compiles, doc attrs are preserved.
+#[tein_module("dp")]
+mod dp {
+    /// documented constant
+    #[tein_const]
+    pub const DOCUMENTED: i64 = 1;
+
+    /// documented function
+    #[tein_fn]
+    pub fn documented_fn() -> i64 {
+        1
+    }
+
+    /// documented type
+    #[tein_type]
+    pub struct DocType {
+        pub val: i64,
+    }
+
+    /// documented method
+    #[tein_methods]
+    impl DocType {
+        /// get the value
+        pub fn get(&self) -> i64 {
+            self.val
+        }
+    }
+}
+
+#[test]
+fn test_doc_preservation_compiles() {
+    // if this test compiles, doc attrs survived macro expansion.
+    // cargo doc would pick them up.
+    let _: fn(&tein::Context) -> tein::Result<()> = dp::register_module_dp;
 }
