@@ -1,6 +1,20 @@
 # cdylib extension system implementation plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+>
+> **Progress:** Tasks 1–3 complete. Resume from Task 4.
+>
+> **Implementation notes (deviations from original plan):**
+> - `type_names()` returns `Vec<String>` (owned) rather than `Vec<&'static str>` — ext type names are owned `String`, not `'static`.
+> - `sexp_string_size` and `sexp_bytes_length` return `sexp_uint_t` (unsigned), not `sexp_sint_t` — needed dedicated trampolines `ext_trampoline_string_size` / `ext_trampoline_bytes_length` / `ext_trampoline_make_bytes`.
+> - `sexp_make_boolean` takes `bool` in the rust wrapper but `c_int` in C ABI — `ext_trampoline_make_boolean` handles the bridge.
+> - `ext_trampoline_register_type` is split into a thin `extern "C"` shim + `ext_register_type_impl` (plain fn) for clarity.
+> - `EXT_API` thread-local added to `context.rs` (pub(crate)) — set during `evaluate()`, `call()`, `evaluate_port()`, and `load_extension()` so ext method dispatch always has access to the vtable.
+> - `Context` gained `ext_api: RefCell<Option<Box<tein_ext::TeinExtApi>>>` — stable Box pointer for the thread-local.
+> - `ExtApiGuard` RAII added alongside `ForeignStoreGuard`.
+> - `ForeignStore::find_method` kept (marked `#[allow(dead_code)]`) — superseded by `find_method_any` for dispatch, but still valid internal API.
+> - `MethodLookup::Ext.is_mut` marked `#[allow(dead_code)]` — reserved for future read-only dispatch optimisation.
+> - License: ISC (not MIT OR Apache-2.0 as originally written in plan).
 
 **Goal:** Enable tein modules to be compiled as cdylib shared libraries and hot-loaded at runtime via a stable C ABI.
 

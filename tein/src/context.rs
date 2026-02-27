@@ -61,6 +61,15 @@ impl Drop for ForeignStoreGuard {
     }
 }
 
+/// RAII guard that clears the EXT_API thread-local on drop.
+struct ExtApiGuard;
+
+impl Drop for ExtApiGuard {
+    fn drop(&mut self) {
+        EXT_API.with(|c| c.set(std::ptr::null()));
+    }
+}
+
 // --- original proc thread-locals for IO wrappers ---
 //
 // when file_read() or file_write() is configured, we capture the original
@@ -107,6 +116,9 @@ impl Drop for PortStoreGuard {
 // !Send + !Sync and the pointer is only live during evaluation.
 thread_local! {
     static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
+    /// current TeinExtApi pointer — set during load_extension() so ext method dispatch
+    /// can call back into the host. null outside of ext loading and ext method calls.
+    pub(crate) static EXT_API: Cell<*const tein_ext::TeinExtApi> = const { Cell::new(std::ptr::null()) };
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -194,7 +206,7 @@ unsafe extern "C" fn foreign_types_wrapper(
         let names = store.borrow().type_names();
         let mut result = ffi::get_null();
         for name in names.iter().rev() {
-            let c_name = match CString::new(*name) {
+            let c_name = match CString::new(name.clone()) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -249,6 +261,374 @@ unsafe extern "C" fn foreign_type_methods_wrapper(
             result = ffi::sexp_cons(ctx, sym, result);
         }
         result
+    }
+}
+
+// --- cdylib extension trampolines ---
+
+/// Build a `TeinExtApi` vtable populated with trampolines into tein's FFI layer.
+///
+/// All function pointer fields are filled with thin shims that cast opaque
+/// pointer types back to `ffi::sexp` and forward to the real chibi wrappers.
+/// Predicates, extractors, constructors, and sentinels are direct transmutes —
+/// `sexp = *mut c_void` and `*mut OpaqueVal` have identical ABI.
+fn build_ext_api() -> tein_ext::TeinExtApi {
+    use std::ffi::c_int;
+    use tein_ext::{OpaqueCtx, OpaqueVal, TEIN_EXT_API_VERSION, TeinExtApi};
+
+    // Safety: we are transmuting between fn(*mut c_void) and fn(*mut OpaqueVal)
+    // (or fn(*mut OpaqueCtx)). Both are pointer-sized, same representation.
+    // The ABI is identical — this is purely a type-level trick.
+    unsafe {
+        TeinExtApi {
+            version: TEIN_EXT_API_VERSION,
+
+            // high-level trampolines (non-trivial, defined below)
+            register_vfs_module: ext_trampoline_register_vfs,
+            define_fn_variadic: ext_trampoline_define_fn,
+            register_foreign_type: ext_trampoline_register_type,
+
+            // type predicates — transmute fn(*mut c_void) → fn(*mut OpaqueVal)
+            sexp_integerp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_integerp),
+            sexp_flonump: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_flonump),
+            sexp_stringp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_stringp),
+            sexp_booleanp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_booleanp),
+            sexp_symbolp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_symbolp),
+            sexp_pairp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_pairp),
+            sexp_nullp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_nullp),
+            sexp_charp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_charp),
+            sexp_bytesp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_bytesp),
+            sexp_vectorp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_vectorp),
+            sexp_portp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_portp),
+            sexp_exceptionp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_exceptionp),
+
+            // value extractors
+            sexp_unbox_fixnum: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> ffi::sexp_sint_t,
+                unsafe extern "C" fn(*mut OpaqueVal) -> std::ffi::c_long,
+            >(ffi::sexp_unbox_fixnum),
+            sexp_flonum_value: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> f64,
+                unsafe extern "C" fn(*mut OpaqueVal) -> f64,
+            >(ffi::sexp_flonum_value),
+            sexp_string_data: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> *const std::ffi::c_char,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *const std::ffi::c_char,
+            >(ffi::sexp_string_data),
+            // sexp_string_size returns sexp_uint_t; API table uses c_long (signed)
+            // need a trampoline to handle the sign difference
+            sexp_string_size: ext_trampoline_string_size,
+            sexp_unbox_character: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_unbox_character),
+            // sexp_bytes_data returns *mut c_char; API table uses *const c_char (read-only)
+            sexp_bytes_data: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> *mut std::ffi::c_char,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *const std::ffi::c_char,
+            >(ffi::sexp_bytes_data),
+            // sexp_bytes_length returns sexp_uint_t; API table uses c_long (signed)
+            sexp_bytes_length: ext_trampoline_bytes_length,
+            sexp_car: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> ffi::sexp,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *mut OpaqueVal,
+            >(ffi::sexp_car),
+            sexp_cdr: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> ffi::sexp,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *mut OpaqueVal,
+            >(ffi::sexp_cdr),
+
+            // value constructors
+            sexp_make_fixnum: std::mem::transmute::<
+                unsafe fn(ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(std::ffi::c_long) -> *mut OpaqueVal,
+            >(ffi::sexp_make_fixnum),
+            sexp_make_flonum: std::mem::transmute::<
+                unsafe fn(ffi::sexp, f64) -> ffi::sexp,
+                unsafe extern "C" fn(*mut OpaqueCtx, f64) -> *mut OpaqueVal,
+            >(ffi::sexp_make_flonum),
+            // sexp_make_boolean: ffi wrapper takes bool; C ABI uses c_int
+            sexp_make_boolean: ext_trampoline_make_boolean,
+            sexp_make_character: std::mem::transmute::<
+                unsafe fn(c_int) -> ffi::sexp,
+                unsafe extern "C" fn(c_int) -> *mut OpaqueVal,
+            >(ffi::sexp_make_character),
+            sexp_c_str: std::mem::transmute::<
+                unsafe fn(ffi::sexp, *const std::ffi::c_char, ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *const std::ffi::c_char,
+                    std::ffi::c_long,
+                ) -> *mut OpaqueVal,
+            >(ffi::sexp_c_str),
+            sexp_cons: std::mem::transmute::<
+                unsafe fn(ffi::sexp, ffi::sexp, ffi::sexp) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *mut OpaqueVal,
+                    *mut OpaqueVal,
+                ) -> *mut OpaqueVal,
+            >(ffi::sexp_cons),
+            // sexp_make_bytes takes sexp_uint_t; API table uses c_long (signed)
+            sexp_make_bytes: ext_trampoline_make_bytes,
+
+            // sentinels
+            get_null: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_null),
+            get_true: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_true),
+            get_false: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_false),
+            get_void: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_void),
+        }
+    }
+}
+
+/// Trampoline: boolean constructor bridging `bool` (rust) ↔ `c_int` (C ABI).
+unsafe extern "C" fn ext_trampoline_make_boolean(b: std::ffi::c_int) -> *mut tein_ext::OpaqueVal {
+    unsafe { std::mem::transmute(ffi::sexp_make_boolean(b != 0)) }
+}
+
+/// Trampoline: string size bridging `sexp_uint_t` (unsigned) ↔ `c_long` (signed).
+unsafe extern "C" fn ext_trampoline_string_size(x: *mut tein_ext::OpaqueVal) -> std::ffi::c_long {
+    unsafe { ffi::sexp_string_size(x as ffi::sexp) as std::ffi::c_long }
+}
+
+/// Trampoline: bytevector length bridging `sexp_uint_t` ↔ `c_long`.
+unsafe extern "C" fn ext_trampoline_bytes_length(x: *mut tein_ext::OpaqueVal) -> std::ffi::c_long {
+    unsafe { ffi::sexp_bytes_length(x as ffi::sexp) as std::ffi::c_long }
+}
+
+/// Trampoline: bytevector constructor bridging `c_long` ↔ `sexp_uint_t`.
+unsafe extern "C" fn ext_trampoline_make_bytes(
+    ctx: *mut tein_ext::OpaqueCtx,
+    len: std::ffi::c_long,
+    init: u8,
+) -> *mut tein_ext::OpaqueVal {
+    unsafe {
+        std::mem::transmute(ffi::sexp_make_bytes(
+            ctx as ffi::sexp,
+            len as ffi::sexp_uint_t,
+            init,
+        ))
+    }
+}
+
+/// Trampoline: register a VFS module path+content from an extension.
+unsafe extern "C" fn ext_trampoline_register_vfs(
+    _ctx: *mut tein_ext::OpaqueCtx,
+    path: *const std::ffi::c_char,
+    path_len: usize,
+    content: *const std::ffi::c_char,
+    content_len: usize,
+) -> i32 {
+    unsafe {
+        let path_str =
+            match std::str::from_utf8(std::slice::from_raw_parts(path as *const u8, path_len)) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+        let full_path = format!("/vfs/{path_str}");
+        let c_path = match CString::new(full_path) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        ffi::tein_vfs_register(c_path.as_ptr(), content, content_len as std::ffi::c_uint);
+        0
+    }
+}
+
+/// Trampoline: register a variadic scheme function from an extension.
+unsafe extern "C" fn ext_trampoline_define_fn(
+    ctx: *mut tein_ext::OpaqueCtx,
+    name: *const std::ffi::c_char,
+    name_len: usize,
+    f: tein_ext::SexpFn,
+) -> i32 {
+    unsafe {
+        let name_str =
+            match std::str::from_utf8(std::slice::from_raw_parts(name as *const u8, name_len)) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+        let c_name = match CString::new(name_str) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let ctx_sexp: ffi::sexp = ctx as ffi::sexp;
+        let env = ffi::sexp_context_env(ctx_sexp);
+        // transmute SexpFn to the type sexp_define_foreign_proc expects
+        let f_typed: Option<
+            unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+        > = Some(std::mem::transmute::<
+            tein_ext::SexpFn,
+            unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+        >(f));
+        let result = ffi::sexp_define_foreign_proc(
+            ctx_sexp,
+            env,
+            c_name.as_ptr(),
+            0,
+            ffi::SEXP_PROC_VARIADIC,
+            c_name.as_ptr(),
+            f_typed,
+        );
+        if ffi::sexp_exceptionp(result) != 0 {
+            -1
+        } else {
+            0
+        }
+    }
+}
+
+/// Trampoline: register a foreign type from a TeinTypeDesc.
+///
+/// Full implementation in task 3 (requires ForeignStore::register_ext_type).
+/// Body is filled in after foreign.rs is extended.
+unsafe extern "C" fn ext_trampoline_register_type(
+    ctx: *mut tein_ext::OpaqueCtx,
+    desc: *const tein_ext::TeinTypeDesc,
+) -> i32 {
+    ext_register_type_impl(ctx, desc)
+}
+
+/// Real implementation of ext_trampoline_register_type.
+///
+/// Reads TeinTypeDesc, registers the ext type in ForeignStore, then generates
+/// scheme convenience procs (predicate + method wrappers) via sexp_eval_string.
+fn ext_register_type_impl(
+    ctx: *mut tein_ext::OpaqueCtx,
+    desc: *const tein_ext::TeinTypeDesc,
+) -> i32 {
+    use crate::foreign::ExtMethodEntry;
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() || desc.is_null() {
+            return -1;
+        }
+
+        let type_name_bytes =
+            std::slice::from_raw_parts((*desc).type_name as *const u8, (*desc).type_name_len);
+        let type_name = match std::str::from_utf8(type_name_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return -1,
+        };
+
+        let method_slice = std::slice::from_raw_parts((*desc).methods, (*desc).method_count);
+        let mut methods = Vec::with_capacity(method_slice.len());
+        for m in method_slice {
+            let name_bytes = std::slice::from_raw_parts(m.name as *const u8, m.name_len);
+            let name = match std::str::from_utf8(name_bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => return -1,
+            };
+            methods.push(ExtMethodEntry {
+                name,
+                func: m.func,
+                is_mut: m.is_mut,
+            });
+        }
+
+        let store = &*store_ptr;
+        if store
+            .borrow_mut()
+            .register_ext_type(type_name.clone(), methods)
+            .is_err()
+        {
+            return -1;
+        }
+
+        // generate convenience procs — same scheme code as register_foreign_type
+        let ctx_sexp: ffi::sexp = ctx as ffi::sexp;
+        let env = ffi::sexp_context_env(ctx_sexp);
+
+        let pred_code = format!(
+            "(define ({tn}? x) (and (foreign? x) (equal? (foreign-type x) \"{tn}\")))",
+            tn = type_name
+        );
+        let c_pred = match CString::new(pred_code.as_str()) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let pred_result = ffi::sexp_eval_string(ctx_sexp, c_pred.as_ptr(), -1, env);
+        if ffi::sexp_exceptionp(pred_result) != 0 {
+            return -1;
+        }
+
+        let method_names: Vec<String> = store
+            .borrow()
+            .ext_method_names(&type_name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for method_name in &method_names {
+            let wrapper_code = format!(
+                "(define ({tn}-{mn} obj . args) \
+                   (if (and (foreign? obj) (equal? (foreign-type obj) \"{tn}\")) \
+                       (apply foreign-call obj (quote {mn}) args) \
+                       (error \"{tn}-{mn}: expected {tn}, got\" \
+                              (if (foreign? obj) (foreign-type obj) obj))))",
+                tn = type_name,
+                mn = method_name
+            );
+            let c_wrapper = match CString::new(wrapper_code.as_str()) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+            let result = ffi::sexp_eval_string(ctx_sexp, c_wrapper.as_ptr(), -1, env);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return -1;
+            }
+        }
+
+        0
     }
 }
 
@@ -942,6 +1322,7 @@ impl ContextBuilder {
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
                 has_port_protocol: Cell::new(false),
+                ext_api: RefCell::new(None),
             };
 
             Ok(context)
@@ -1010,6 +1391,10 @@ pub struct Context {
     port_store: RefCell<PortStore>,
     /// whether port protocol dispatch functions are registered
     has_port_protocol: Cell<bool>,
+    /// cached TeinExtApi vtable — populated on first load_extension call.
+    /// Stored in a Box so the pointer is stable for ext method dispatch.
+    /// None until first extension is loaded.
+    ext_api: RefCell<Option<Box<tein_ext::TeinExtApi>>>,
 }
 
 impl Context {
@@ -1116,6 +1501,13 @@ impl Context {
         let _foreign_guard = ForeignStoreGuard;
         PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
         let _port_guard = PortStoreGuard;
+        // set EXT_API so ext-type method dispatch works during evaluation
+        let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
+            EXT_API.with(|c| c.set(api.as_ref() as *const _));
+            Some(ExtApiGuard)
+        } else {
+            None
+        };
         self.arm_fuel();
 
         unsafe {
@@ -1381,6 +1773,104 @@ impl Context {
             let (data, _) = s.get(id).unwrap();
             data.downcast_ref::<T>().unwrap()
         }))
+    }
+
+    /// Load a cdylib extension from the given path.
+    ///
+    /// The extension's `tein_ext_init` function is called immediately with a
+    /// populated `TeinExtApi` vtable. VFS entries, functions, and types
+    /// registered by the extension become available to scheme code.
+    ///
+    /// The shared library remains loaded for the process lifetime — there is
+    /// no unload path (dlclose during an active chibi heap is unsafe).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InitError`] if the library cannot be opened, the
+    /// `tein_ext_init` symbol is missing, the API version mismatches, or
+    /// the extension's init function returns a non-zero error code.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// ctx.load_extension("./libmy_extension.so")?;
+    /// ctx.evaluate("(import (tein my-extension))")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn load_extension(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let path = path.as_ref();
+
+        // ensure foreign protocol is registered so extensions can call foreign-call
+        if !self.has_foreign_protocol.get() {
+            self.register_foreign_protocol()?;
+            self.has_foreign_protocol.set(true);
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(path).map_err(|e| {
+                Error::InitError(format!(
+                    "failed to load extension '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+            let init: libloading::Symbol<tein_ext::TeinExtInitFn> =
+                lib.get(b"tein_ext_init\0").map_err(|e| {
+                    Error::InitError(format!(
+                        "extension '{}' has no tein_ext_init symbol: {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+
+            // populate FOREIGN_STORE_PTR so ext_trampoline_register_type can access
+            // the store during init (extensions register types synchronously)
+            FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+            let _foreign_guard = ForeignStoreGuard;
+
+            // build (or reuse) the API table — stored in context for future ext method dispatch
+            let api_box = {
+                let mut api_ref = self.ext_api.borrow_mut();
+                if api_ref.is_none() {
+                    *api_ref = Some(Box::new(build_ext_api()));
+                }
+                // return raw pointer to the stable Box<TeinExtApi>
+                api_ref.as_ref().unwrap().as_ref() as *const tein_ext::TeinExtApi
+            };
+            // set EXT_API so ext_trampoline_register_type and method dispatch can access it
+            EXT_API.with(|c| c.set(api_box));
+            let _ext_api_guard = ExtApiGuard;
+
+            let result = init(self.ctx as *mut tein_ext::OpaqueCtx, api_box);
+
+            match result {
+                tein_ext::TEIN_EXT_OK => {}
+                tein_ext::TEIN_EXT_ERR_VERSION => {
+                    return Err(Error::InitError(format!(
+                        "extension '{}': API version mismatch (host v{}, extension requires newer)",
+                        path.display(),
+                        tein_ext::TEIN_EXT_API_VERSION
+                    )));
+                }
+                code => {
+                    return Err(Error::InitError(format!(
+                        "extension '{}': init failed with code {}",
+                        path.display(),
+                        code
+                    )));
+                }
+            }
+
+            // leak the library handle — no unload
+            Box::leak(Box::new(lib));
+        }
+        Ok(())
     }
 
     /// Register the custom port protocol dispatch functions.
@@ -1711,6 +2201,12 @@ impl Context {
         let _port_guard = PortStoreGuard;
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
+            EXT_API.with(|c| c.set(api.as_ref() as *const _));
+            Some(ExtApiGuard)
+        } else {
+            None
+        };
         self.arm_fuel();
 
         unsafe {
@@ -1809,6 +2305,12 @@ impl Context {
         let _foreign_guard = ForeignStoreGuard;
         PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
         let _port_guard = PortStoreGuard;
+        let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
+            EXT_API.with(|c| c.set(api.as_ref() as *const _));
+            Some(ExtApiGuard)
+        } else {
+            None
+        };
         self.arm_fuel();
 
         unsafe {

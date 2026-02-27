@@ -11,6 +11,8 @@ categories = ["embedded", "parser-implementations"]
 
 [dependencies]
 tein-macros = { path = "../tein-macros" }
+tein-ext = { path = "../tein-ext" }
+libloading = "0.8"
 
 [dev-dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
