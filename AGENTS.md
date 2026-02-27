@@ -135,3 +135,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 - lowercase style, casual but precise
 - norse mythology naming theme
 - see ARCHITECTURE.md for full architecture docs, TODO.md for roadmap
+
+
+## license
+- ISC
