@@ -128,7 +128,7 @@ unsafe fn sexp_to_toml_value(
         }
         if ffi::sexp_integerp(sexp) != 0 && ffi::sexp_flonump(sexp) == 0 {
             let n = ffi::sexp_unbox_fixnum(sexp);
-            return Ok(toml_crate::Value::Integer(n));
+            return Ok(toml_crate::Value::Integer(n as i64));
         }
         if ffi::sexp_flonump(sexp) != 0 {
             let f = ffi::sexp_flonum_value(sexp);
