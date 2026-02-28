@@ -1,11 +1,11 @@
 ## what is tein?
 
-embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11. safe rust api wrapping unsafe c ffi. zero runtime dependencies.
+embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11. safe rust api wrapping unsafe c ffi. zero runtime dependencies. tein's scheme environment is designed with coding agents in mind.
 
 ## principles
 
 - establish patterns now that scale well, refactor liberally when beneficial.
-- backwards compatibility not a priority, legacy code unwanted. (pre-alpha.)
+- backwards compatibility not a priority, legacy code unwanted.
 - self-documenting code; keep symbols, comments, and docs consistent.
 - missing or incorrect documentation including code comments are critical bugs.
 - comprehensive tests including edge cases.
