@@ -4662,6 +4662,119 @@ mod tests {
     }
 
     #[test]
+    fn test_module_policy_vfs_all() {
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .vfs_all()
+            .build()
+            .expect("standard + sandbox + vfs_all");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(cell.get(), POLICY_VFS_ALL);
+        });
+
+        // (chibi string) is in VFS but not in SAFE_MODULES — should work under VfsAll
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(r.is_ok(), "(import (chibi string)) should succeed under VfsAll: {:?}", r.err());
+
+        // filesystem module should still fail
+        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        assert!(matches!(err, Error::SandboxViolation(_)),
+            "filesystem import should fail under VfsAll: {:?}", err);
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_allow_module() {
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .allow_module("chibi/string")
+            .build()
+            .expect("standard + sandbox + allow_module");
+
+        MODULE_POLICY.with(|cell| {
+            assert_eq!(cell.get(), POLICY_ALLOWLIST);
+        });
+
+        // chibi/string was explicitly allowed
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(r.is_ok(), "(import (chibi string)) should succeed: {:?}", r.err());
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_allow_only_modules() {
+        use crate::sandbox::*;
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .allow_only_modules(&["chibi/string"])
+            .build()
+            .expect("standard + sandbox + allow_only");
+
+        // chibi/string was explicitly listed — should work (it's also in IMPLICIT_DEPS)
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(r.is_ok(), "(import (chibi string)) should succeed: {:?}", r.err());
+
+        // scheme/write is NOT in the custom list
+        let err = ctx.evaluate("(import (scheme write))").unwrap_err();
+        assert!(matches!(err, Error::SandboxViolation(_)),
+            "(import (scheme write)) should fail with allow_only: {:?}", err);
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_module_policy_allowlist_raii() {
+        use crate::sandbox::*;
+        // verify allowlist is restored, not just the policy level
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .preset(&ARITHMETIC)
+                .allow(&["import"])
+                .allow_module("chibi/string")
+                .build()
+                .expect("context with extended allowlist");
+        }
+        // after drop, allowlist should be empty (previous was empty)
+        MODULE_ALLOWLIST.with(|cell| {
+            assert!(cell.borrow().is_empty(),
+                "allowlist should be restored to empty after drop");
+        });
+    }
+
+    #[test]
+    fn test_module_policy_transitive_deps() {
+        use crate::sandbox::*;
+        // allow_only_modules always includes IMPLICIT_DEPS automatically,
+        // so (chibi string) works even when not explicitly listed — it's in IMPLICIT_DEPS.
+        let ctx = Context::builder()
+            .standard_env()
+            .preset(&ARITHMETIC)
+            .allow(&["import"])
+            .allow_only_modules(&["tein/foreign"])
+            .build()
+            .expect("minimal allowlist");
+
+        // chibi/string is in IMPLICIT_DEPS, not the explicit list — should still work
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(r.is_ok(),
+            "(chibi string) should load via IMPLICIT_DEPS even without explicit listing: {:?}", r.err());
+
+        drop(ctx);
+    }
+
+    #[test]
     fn test_standard_env_import() {
         // user-facing (import ...) in a standard env context.
         // works with default 8MB heap now that evaluate() gc-protects its
