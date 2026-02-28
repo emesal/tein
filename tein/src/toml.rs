@@ -18,7 +18,7 @@
 //! | `true/false`    | `#t / #f`                                    |
 //! | datetime        | `(toml-datetime "...")`  tagged list          |
 
-use crate::{ffi, Error, Result, Value};
+use crate::{Error, Result, Value, ffi};
 
 /// the symbol tag used for TOML datetime values.
 ///
@@ -54,8 +54,7 @@ fn toml_value_to_value(tv: toml_crate::Value) -> Result<Value> {
             if arr.is_empty() {
                 Ok(Value::Nil)
             } else {
-                let items: Result<Vec<Value>> =
-                    arr.into_iter().map(toml_value_to_value).collect();
+                let items: Result<Vec<Value>> = arr.into_iter().map(toml_value_to_value).collect();
                 Ok(Value::List(items?))
             }
         }
@@ -91,8 +90,9 @@ pub unsafe fn toml_stringify_raw(ctx: ffi::sexp, sexp: ffi::sexp) -> Result<Stri
     let tv = unsafe { sexp_to_toml_value(ctx, sexp, 0)? };
     // toml_crate::to_string requires a Table at the top level
     match tv {
-        toml_crate::Value::Table(t) => toml_crate::to_string(&t)
-            .map_err(|e| Error::EvalError(format!("toml-stringify: {e}"))),
+        toml_crate::Value::Table(t) => {
+            toml_crate::to_string(&t).map_err(|e| Error::EvalError(format!("toml-stringify: {e}")))
+        }
         _ => Err(Error::TypeError(
             "toml-stringify: top-level value must be a table (alist)".to_string(),
         )),
@@ -212,13 +212,11 @@ unsafe fn is_datetime_tagged(ctx: ffi::sexp, sexp: ffi::sexp) -> bool {
         let sym_str = ffi::sexp_symbol_to_string(ctx, car);
         let sym_ptr = ffi::sexp_string_data(sym_str);
         let sym_len = ffi::sexp_string_size(sym_str) as usize;
-        let sym = match std::str::from_utf8(std::slice::from_raw_parts(
-            sym_ptr as *const u8,
-            sym_len,
-        )) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
+        let sym =
+            match std::str::from_utf8(std::slice::from_raw_parts(sym_ptr as *const u8, sym_len)) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
         if sym != DATETIME_TAG {
             return false;
         }
@@ -279,10 +277,10 @@ mod tests {
 
     #[test]
     fn parse_float() {
-        let v = toml_parse("x = 3.14").unwrap();
+        let v = toml_parse("x = 1.5").unwrap();
         match &v {
             Value::List(items) => match &items[0] {
-                Value::Pair(_, v) => assert_eq!(**v, Value::Float(3.14)),
+                Value::Pair(_, v) => assert_eq!(**v, Value::Float(1.5)),
                 other => panic!("expected pair, got {other:?}"),
             },
             other => panic!("expected list, got {other:?}"),
@@ -329,10 +327,7 @@ mod tests {
                 Value::Pair(_, val) => match val.as_ref() {
                     Value::List(inner) => {
                         assert_eq!(inner[0], Value::Symbol("toml-datetime".to_string()));
-                        assert_eq!(
-                            inner[1],
-                            Value::String("1979-05-27T07:32:00".to_string())
-                        );
+                        assert_eq!(inner[1], Value::String("1979-05-27T07:32:00".to_string()));
                     }
                     other => panic!("expected tagged list, got {other:?}"),
                 },
@@ -478,30 +473,27 @@ mod tests {
             Value::Nil => Ok(toml_crate::Value::Array(vec![])),
             Value::List(items) => {
                 // check for datetime tag
-                if items.len() == 2 {
-                    if let Value::Symbol(tag) = &items[0] {
-                        if tag == DATETIME_TAG {
-                            if let Value::String(s) = &items[1] {
-                                let dt: toml_crate::value::Datetime =
-                                    s.parse().map_err(|e| {
-                                        Error::EvalError(format!("toml-stringify: {e}"))
-                                    })?;
-                                return Ok(toml_crate::Value::Datetime(dt));
-                            }
-                        }
-                    }
+                if items.len() == 2
+                    && let Value::Symbol(tag) = &items[0]
+                    && tag == DATETIME_TAG
+                    && let Value::String(s) = &items[1]
+                {
+                    let dt: toml_crate::value::Datetime = s
+                        .parse()
+                        .map_err(|e| Error::EvalError(format!("toml-stringify: {e}")))?;
+                    return Ok(toml_crate::Value::Datetime(dt));
                 }
                 // alist check
-                let is_alist = items.iter().all(|v| {
-                    matches!(v, Value::Pair(k, _) if matches!(k.as_ref(), Value::String(_)))
-                });
+                let is_alist = items.iter().all(
+                    |v| matches!(v, Value::Pair(k, _) if matches!(k.as_ref(), Value::String(_))),
+                );
                 if is_alist {
                     let mut table = toml_crate::map::Map::new();
                     for item in items {
-                        if let Value::Pair(k, v) = item {
-                            if let Value::String(key) = k.as_ref() {
-                                table.insert(key.clone(), value_to_toml_value(v)?);
-                            }
+                        if let Value::Pair(k, v) = item
+                            && let Value::String(key) = k.as_ref()
+                        {
+                            table.insert(key.clone(), value_to_toml_value(v)?);
                         }
                     }
                     Ok(toml_crate::Value::Table(table))

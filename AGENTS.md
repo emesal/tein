@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (274 lib + 12 tein_fn + 27 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 9 tein-macros + 11 ext_loading + 1 scheme_ext + doc-tests)
+just test                         # all tests (299 lib + 12 tein_fn + 28 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 11 tein-macros + 11 ext_loading + 1 scheme_ext + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 just lint                          # lint (cargo fmt + cargo clippy)
@@ -56,6 +56,9 @@ src/
   json.rs      — json_parse (JSON string → Value) + json_stringify_raw (raw sexp → JSON string);
                  registered as json-parse/json-stringify via trampolines in context.rs.
                  stringify works at raw sexp level to preserve alist structure through chibi round-trips
+  toml.rs      — toml_parse (TOML string → Value) + toml_stringify_raw (raw sexp → TOML string);
+                 datetimes as tagged lists (toml-datetime "iso-string"). registered via trampolines in context.rs.
+                 feature-gated behind `toml` cargo feature
   sexp_bridge.rs — Value ↔ Sexp bidirectional conversion; shared layer for format modules (json, toml, yaml)
 tein-ext/      — stable C ABI types for cdylib extensions (no chibi dependency):
   src/lib.rs   — TeinExtApi vtable, OpaqueCtx/OpaqueVal, TeinTypeDesc/TeinMethodDesc,
@@ -86,6 +89,8 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   lib/tein/test.scm  — pure-scheme assertion framework: test-equal, test-true, test-false, test-error
   lib/tein/json.sld  — (tein json) library definition + exports json-parse, json-stringify
   lib/tein/json.scm  — module documentation (trampolines registered by rust runtime)
+  lib/tein/toml.sld  — (tein toml) library definition + exports toml-parse, toml-stringify
+  lib/tein/toml.scm  — module documentation (trampolines registered by rust runtime)
 build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-level tests)

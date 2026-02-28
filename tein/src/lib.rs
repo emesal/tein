@@ -40,9 +40,10 @@
 //! | Feature | Default | Description |
 //! |---------|---------|-------------|
 //! | `json`  | yes     | Enables `(tein json)` module with `json-parse` and `json-stringify`. Pulls in `serde` + `serde_json`. |
+//! | `toml`  | yes     | Enables `(tein toml)` module with `toml-parse` and `toml-stringify`. Pulls in `toml` crate. |
 //!
 //! Disable default features with `default-features = false` for a minimal build
-//! without serde dependencies.
+//! without format-module dependencies.
 //!
 //! ## Safety model
 //!
@@ -60,14 +61,14 @@ pub mod foreign;
 #[cfg(feature = "json")]
 mod json;
 pub mod managed;
-#[cfg(feature = "toml")]
-mod toml;
 mod port;
 pub mod sandbox;
 #[cfg(feature = "json")]
 mod sexp_bridge;
 mod thread;
 mod timeout;
+#[cfg(feature = "toml")]
+mod toml;
 mod value;
 
 pub use context::{Context, ContextBuilder};
