@@ -710,7 +710,10 @@ extern "C" fn tein_module_allowlist_check(path: *const c_char) -> c_int {
 
     MODULE_ALLOWLIST.with(|cell| {
         let list = cell.borrow();
-        if list.iter().any(|prefix| suffix.starts_with(prefix.as_str())) {
+        if list
+            .iter()
+            .any(|prefix| suffix.starts_with(prefix.as_str()))
+        {
             1
         } else {
             0

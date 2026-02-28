@@ -463,7 +463,8 @@ impl Value {
             // or "couldn't find file in module path" from eval.c (C level).
             if message == "couldn't find import" || message == "couldn't find file in module path" {
                 use crate::sandbox::MODULE_POLICY;
-                let is_sandboxed = MODULE_POLICY.with(|cell| cell.get() != crate::sandbox::POLICY_UNRESTRICTED);
+                let is_sandboxed =
+                    MODULE_POLICY.with(|cell| cell.get() != crate::sandbox::POLICY_UNRESTRICTED);
                 if is_sandboxed {
                     let module = irritant_str.as_deref().unwrap_or("unknown");
                     return Error::SandboxViolation(format!(

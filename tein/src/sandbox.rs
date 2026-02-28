@@ -259,16 +259,28 @@ pub const SAFE_MODULES: &[&str] = &[
 /// must pass the gate when the module system resolves transitive deps.
 pub(crate) const IMPLICIT_DEPS: &[&str] = &[
     // r7rs ambient substrate — expected to be available without explicit import
-    "scheme/base", "scheme/write",
-    "srfi/9", "srfi/11", "srfi/16", "srfi/38", "srfi/39",
-    "srfi/69", "srfi/151",
-    "chibi/char-set/", "chibi/equiv", "chibi/string",
-    "chibi/ast", "chibi/io", "chibi/iset/",
+    "scheme/base",
+    "scheme/write",
+    "srfi/9",
+    "srfi/11",
+    "srfi/16",
+    "srfi/38",
+    "srfi/39",
+    "srfi/69",
+    "srfi/151",
+    "chibi/char-set/",
+    "chibi/equiv",
+    "chibi/string",
+    "chibi/ast",
+    "chibi/io",
+    "chibi/iset/",
 ];
 
 /// build the default allowlist from SAFE_MODULES + IMPLICIT_DEPS.
 pub(crate) fn default_allowlist() -> Vec<String> {
-    SAFE_MODULES.iter().chain(IMPLICIT_DEPS.iter())
+    SAFE_MODULES
+        .iter()
+        .chain(IMPLICIT_DEPS.iter())
         .map(|s| s.to_string())
         .collect()
 }
