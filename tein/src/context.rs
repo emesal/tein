@@ -1632,6 +1632,12 @@ impl Context {
                     return Value::from_raw(self.ctx, expr);
                 }
 
+                // gc-root expr across sexp_evaluate: sexp_compile_op calls
+                // sexp_make_eval_context immediately, which may trigger GC.
+                // the parsed expression is only a rust local (invisible to
+                // chibi's precise GC) until we hand it to the evaluator.
+                let _expr_guard = ffi::GcRoot::new(self.ctx, expr);
+
                 // evaluate the expression
                 result = ffi::sexp_evaluate(self.ctx, expr, env);
 
@@ -1651,6 +1657,7 @@ impl Context {
             // precise (no conservative stack scan), so rust locals are invisible to it.
             // most visible in sandboxed contexts where the heap is more pressure-loaded.
             let _result_root = ffi::GcRoot::new(self.ctx, result);
+
             Value::from_raw(self.ctx, result)
         }
     }
