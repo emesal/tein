@@ -6472,10 +6472,7 @@ mod tests {
             Value::List(items) => {
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0], Value::Symbol("toml-datetime".to_string()));
-                assert_eq!(
-                    items[1],
-                    Value::String("1979-05-27T07:32:00Z".to_string())
-                );
+                assert_eq!(items[1], Value::String("1979-05-27T07:32:00Z".to_string()));
             }
             other => panic!("expected tagged list, got {other:?}"),
         }
@@ -6501,9 +6498,7 @@ mod tests {
         let ctx = Context::new_standard().expect("context");
         ctx.evaluate("(import (tein toml))").expect("import");
         let result = ctx
-            .evaluate(
-                "(cdr (car (toml-parse (toml-stringify '((\"x\" . 42))))))",
-            )
+            .evaluate("(cdr (car (toml-parse (toml-stringify '((\"x\" . 42))))))")
             .expect("round-trip");
         assert_eq!(result, Value::Integer(42));
     }
