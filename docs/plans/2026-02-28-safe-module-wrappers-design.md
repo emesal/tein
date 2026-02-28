@@ -62,9 +62,10 @@ standard-env contexts. `file-exists?` and `delete-file` registered via
 **implementation**: single rust trampoline. takes a filename string, restricts
 to VFS paths only.
 
-**mechanism**: trampoline checks path starts with `/vfs/`. if so, uses chibi's
-`sexp_open_input_file` (VFS-patched) to get an input port, loops read+eval
-like `evaluate_port`. non-VFS paths return a sandbox violation error string.
+**mechanism**: trampoline checks path starts with `/vfs/`. if so, calls
+`tein_vfs_lookup` (newly exposed in ffi.rs) to get the embedded content string,
+then `sexp_open_input_string` → read+eval loop (same pattern as `evaluate()`).
+non-VFS paths return a sandbox violation error string.
 
 **rationale**: `load` evaluates arbitrary code. even with FsPolicy, allowing
 load on user-accessible paths lets sandboxed code execute anything readable.
@@ -104,14 +105,21 @@ returning the exit value to the rust caller.
 - `(exit #t)` → returns `Value::Integer(0)` (r7rs: success)
 - `(exit #f)` → returns `Value::Integer(1)` (r7rs: failure)
 
-**mechanism** (thread-local flag, not exceptions — avoids interaction with
-`guard`/`with-exception-handler`):
+**mechanism** (exception + thread-local flag):
 
 1. `exit` trampoline sets `EXIT_REQUESTED: Cell<bool>` +
-   `EXIT_VALUE: Cell<sexp>` thread-locals, GC-roots the value
-2. trampoline sets fuel to 0, forcing immediate VM return
-3. `check_fuel()` in `evaluate()` sees exit flag → clears it → returns
-   stashed value instead of `StepLimitExceeded`
+   `EXIT_VALUE: Cell<sexp>` thread-locals, GC-roots the value via
+   `sexp_preserve_object`
+2. trampoline returns a scheme exception via `make_error` — this
+   immediately stops the VM (no 500-instruction delay from fuel quantum)
+3. in the eval loop (`evaluate`, `evaluate_port`, `call`), before
+   converting exceptions to errors, check the exit flag — if set, clear
+   it, release the GC root, convert the stashed value to `Value`, and
+   return `Ok(value)` instead of propagating the exception
+
+user-level `guard`/`with-exception-handler` cannot catch this because the
+exception is returned from a foreign function call, not raised via scheme's
+`raise` — chibi propagates it directly without invoking handlers.
 
 **dynamic-wind**: not invoked. this is immediate-bail semantics (like
 `emergency-exit`). correct for an embedded eval escape hatch — the rust
