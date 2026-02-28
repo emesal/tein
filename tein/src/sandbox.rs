@@ -214,7 +214,7 @@ thread_local! {
 /// to allow all VFS modules.
 pub const SAFE_MODULES: &[&str] = &[
     "tein/",
-    // r7rs standard libraries (safe subset — excludes file, process-context, load, repl, eval, r5rs)
+    // r7rs standard libraries (safe subset — excludes file, process-context, load, r5rs)
     "scheme/base",
     "scheme/bitwise",
     "scheme/box",
@@ -227,6 +227,7 @@ pub const SAFE_MODULES: &[&str] = &[
     "scheme/cxr",
     "scheme/division",
     "scheme/ephemeron",
+    "scheme/eval",
     "scheme/fixnum",
     "scheme/flonum",
     "scheme/generator",
@@ -241,6 +242,7 @@ pub const SAFE_MODULES: &[&str] = &[
     "scheme/mapping",
     "scheme/read",
     "scheme/regex",
+    "scheme/repl",
     "scheme/rlist",
     "scheme/set",
     "scheme/show",
