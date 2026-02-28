@@ -1645,6 +1645,12 @@ impl Context {
                 }
             }
 
+            // root result before from_raw. any allocation inside from_raw (e.g.
+            // sexp_symbol_to_string, sexp_bignum_to_string) can trigger a GC cycle that
+            // will collect `result` if it isn't explicitly preserved — chibi's GC is
+            // precise (no conservative stack scan), so rust locals are invisible to it.
+            // most visible in sandboxed contexts where the heap is more pressure-loaded.
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
             Value::from_raw(self.ctx, result)
         }
     }
@@ -2257,6 +2263,8 @@ impl Context {
             if ffi::sexp_eofp(result) != 0 {
                 return Ok(Value::Unspecified);
             }
+            // root result before from_raw (see evaluate() for rationale)
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
             if ffi::sexp_exceptionp(result) != 0 {
                 return Value::from_raw(self.ctx, result);
             }
@@ -2318,6 +2326,8 @@ impl Context {
                 }
                 let result = ffi::sexp_evaluate(self.ctx, expr, env);
                 self.check_fuel()?;
+                // root result before from_raw (see evaluate() for rationale)
+                let _result_root = ffi::GcRoot::new(self.ctx, result);
                 if ffi::sexp_exceptionp(result) != 0 {
                     return Value::from_raw(self.ctx, result);
                 }
@@ -2433,6 +2443,10 @@ impl Context {
 
             // check fuel before exception status
             self.check_fuel()?;
+
+            // root result — from_raw may allocate (sexp_symbol_to_string, etc.)
+            // which can trigger GC and collect an unrooted result sexp.
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
 
             if ffi::sexp_exceptionp(result) != 0 {
                 return Value::from_raw(self.ctx, result);
