@@ -6444,4 +6444,81 @@ mod tests {
             other => panic!("expected error string, got {other:?}"),
         }
     }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_table() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(toml-parse \"name = \\\"tein\\\"\\nversion = 1\")")
+            .expect("parse");
+        match result {
+            Value::List(items) => assert_eq!(items.len(), 2),
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_datetime() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(cdr (car (toml-parse \"dt = 1979-05-27T07:32:00Z\")))")
+            .expect("parse");
+        // should be a tagged list (toml-datetime "1979-05-27T07:32:00Z")
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], Value::Symbol("toml-datetime".to_string()));
+                assert_eq!(
+                    items[1],
+                    Value::String("1979-05-27T07:32:00Z".to_string())
+                );
+            }
+            other => panic!("expected tagged list, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_stringify_table() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(toml-stringify '((\"name\" . \"tein\")))")
+            .expect("stringify");
+        match result {
+            Value::String(s) => assert!(s.contains("name = \"tein\"")),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_round_trip_via_scheme() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate(
+                "(cdr (car (toml-parse (toml-stringify '((\"x\" . 42))))))",
+            )
+            .expect("round-trip");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_invalid() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(toml-parse \"not valid {{toml\")")
+            .expect("parse");
+        match result {
+            Value::String(msg) => assert!(msg.contains("toml-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
 }

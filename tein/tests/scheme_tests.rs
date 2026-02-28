@@ -172,6 +172,12 @@ fn test_scheme_json() {
     run_scheme_test(include_str!("scheme/json.scm"));
 }
 
+#[cfg(feature = "toml")]
+#[test]
+fn test_scheme_toml() {
+    run_scheme_test(include_str!("scheme/toml.scm"));
+}
+
 #[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
