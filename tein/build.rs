@@ -85,10 +85,10 @@ const VFS_FILES: &[&str] = &[
     // tein documentation accessors
     "lib/tein/docs.sld",
     "lib/tein/docs.scm",
-    // tein json module
-    "lib/tein/json.sld",
-    "lib/tein/json.scm",
 ];
+
+/// VFS files gated behind the "json" cargo feature.
+const VFS_FILES_JSON: &[&str] = &["lib/tein/json.sld", "lib/tein/json.scm"];
 
 /// C-backed modules that need static linking.
 ///
@@ -178,11 +178,17 @@ fn main() {
     let include_dir = format!("{chibi_dir}/include");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
+    // build the combined VFS file list (base + feature-gated modules)
+    let mut vfs_files: Vec<&str> = VFS_FILES.to_vec();
+    if cfg!(feature = "json") {
+        vfs_files.extend_from_slice(VFS_FILES_JSON);
+    }
+
     // generate install.h (with VFS module path) into OUT_DIR/chibi/
     generate_install_h(&out_dir);
 
     // generate VFS data header (embedded .sld/.scm files) into OUT_DIR
-    generate_vfs_data(&chibi_dir, &out_dir);
+    generate_vfs_data(&chibi_dir, &out_dir, &vfs_files);
 
     // generate static C library table into OUT_DIR
     generate_clibs(&chibi_dir, &out_dir);
@@ -264,7 +270,7 @@ fn main() {
     for src in &sources {
         println!("cargo:rerun-if-changed={chibi_dir}/{src}");
     }
-    for f in VFS_FILES {
+    for f in &vfs_files {
         println!("cargo:rerun-if-changed={chibi_dir}/{f}");
     }
     for &(c_file, _, _) in CLIB_ENTRIES {
@@ -299,7 +305,7 @@ fn generate_install_h(out_dir: &str) {
 ///
 /// produces a lookup table mapping `"vfs://lib/..."` keys to file contents.
 /// all bytes are escaped as `\xNN` for safe C embedding (no encoding issues).
-fn generate_vfs_data(chibi_dir: &str, out_dir: &str) {
+fn generate_vfs_data(chibi_dir: &str, out_dir: &str, vfs_files: &[&str]) {
     let out_path = Path::new(out_dir).join("tein_vfs_data.h");
     let mut out = String::with_capacity(1024 * 1024);
 
@@ -309,7 +315,7 @@ fn generate_vfs_data(chibi_dir: &str, out_dir: &str) {
     // 16380-char string literal limit (C2026). adjacent string literals are
     // concatenated by the C preprocessor, so this is fully portable.
     const CHUNK_BYTES: usize = 1000; // each source byte → 4 chars (\xNN), so 4000 chars/chunk
-    for (i, rel_path) in VFS_FILES.iter().enumerate() {
+    for (i, rel_path) in vfs_files.iter().enumerate() {
         let full_path = format!("{chibi_dir}/{rel_path}");
         let content = fs::read(&full_path)
             .unwrap_or_else(|e| panic!("failed to read VFS file {full_path}: {e}"));
@@ -333,7 +339,7 @@ fn generate_vfs_data(chibi_dir: &str, out_dir: &str) {
     out.push_str("};\n\n");
 
     out.push_str("static const struct tein_vfs_entry tein_vfs_table[] = {\n");
-    for (i, rel_path) in VFS_FILES.iter().enumerate() {
+    for (i, rel_path) in vfs_files.iter().enumerate() {
         let full_path = format!("{chibi_dir}/{rel_path}");
         let len = fs::metadata(&full_path)
             .unwrap_or_else(|e| panic!("failed to stat VFS file {full_path}: {e}"))

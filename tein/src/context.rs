@@ -760,8 +760,9 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
-// --- json trampolines ---
+// --- json trampolines (gated behind "json" feature) ---
 
+#[cfg(feature = "json")]
 /// Trampoline for `json-parse`: takes one scheme string argument, returns parsed value.
 ///
 /// On parse error or type mismatch, returns a scheme string with the error message.
@@ -807,6 +808,7 @@ unsafe extern "C" fn json_parse_trampoline(
     }
 }
 
+#[cfg(feature = "json")]
 /// Trampoline for `json-stringify`: takes one scheme value, returns JSON string.
 ///
 /// Works directly on raw chibi sexps via `json::json_stringify_raw` to preserve
@@ -1407,6 +1409,7 @@ impl ContextBuilder {
 
             // register built-in module trampolines for standard-env contexts.
             // pure data conversion, no IO — always safe and cheap to register.
+            #[cfg(feature = "json")]
             if self.standard_env {
                 context.register_json_module()?;
             }
@@ -2381,6 +2384,7 @@ impl Context {
         Ok(())
     }
 
+    #[cfg(feature = "json")]
     /// Register `json-parse` and `json-stringify` native functions.
     ///
     /// Called during `build()` for standard-env contexts. the VFS module
@@ -6272,6 +6276,7 @@ mod tests {
 
     // --- (tein json) ---
 
+    #[cfg(feature = "json")]
     #[test]
     fn test_json_parse_object() {
         let ctx = Context::new_standard().expect("context");
@@ -6285,6 +6290,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn test_json_parse_array() {
         let ctx = Context::new_standard().expect("context");
@@ -6300,6 +6306,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn test_json_parse_null_is_symbol() {
         let ctx = Context::new_standard().expect("context");
@@ -6308,6 +6315,7 @@ mod tests {
         assert_eq!(result, Value::Symbol("null".to_string()));
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn test_json_stringify_alist() {
         let ctx = Context::new_standard().expect("context");
@@ -6318,6 +6326,7 @@ mod tests {
         assert_eq!(result, Value::String("{\"name\":\"tein\"}".to_string()));
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn test_json_round_trip_via_scheme() {
         let ctx = Context::new_standard().expect("context");
@@ -6328,6 +6337,7 @@ mod tests {
         assert_eq!(result, Value::String("{\"x\":42}".to_string()));
     }
 
+    #[cfg(feature = "json")]
     #[test]
     fn test_json_parse_invalid() {
         let ctx = Context::new_standard().expect("context");

@@ -166,6 +166,7 @@ fn test_scheme_tein_foreign() {
     run_scheme_test(include_str!("scheme/tein_foreign.scm"));
 }
 
+#[cfg(feature = "json")]
 #[test]
 fn test_scheme_json() {
     run_scheme_test(include_str!("scheme/json.scm"));
