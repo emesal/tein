@@ -252,35 +252,52 @@ fn json_value_to_value(jv: serde_json::Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sexp_bridge;
-    use tein_sexp::{Sexp, SexpKind};
 
-    /// stringify a `Value` as JSON via the sexp bridge (test-only rust path).
+    /// stringify a `Value` as JSON (test-only rust path).
     ///
-    /// `Value::Symbol("null")` → JSON `null`. for test assertions on hand-built
-    /// `Value`s where alist structure is preserved (no chibi round-trip needed).
+    /// converts directly to `serde_json::Value` — no `Sexp` intermediary — so
+    /// `Value::Symbol("null")` → JSON `null` and `Value::Nil` → JSON `[]`
+    /// both work correctly without accidental coupling to `Sexp` serde semantics.
     fn json_stringify(value: &Value) -> Result<String> {
-        let sexp = sexp_bridge::value_to_sexp(value)?;
-        let sexp = remap_null_symbol_to_nil(sexp);
-        serde_json::to_string(&sexp).map_err(|e| Error::EvalError(format!("json-stringify: {e}")))
+        let jv = value_to_json(value)?;
+        serde_json::to_string(&jv).map_err(|e| Error::EvalError(format!("json-stringify: {e}")))
     }
 
-    fn remap_null_symbol_to_nil(sexp: Sexp) -> Sexp {
-        match sexp.kind {
-            SexpKind::Symbol(ref s) if s == "null" => Sexp::nil(),
-            SexpKind::List(items) => {
-                Sexp::list(items.into_iter().map(remap_null_symbol_to_nil).collect())
+    fn value_to_json(value: &Value) -> Result<serde_json::Value> {
+        match value {
+            Value::Symbol(s) if s == "null" => Ok(serde_json::Value::Null),
+            Value::Nil => Ok(serde_json::Value::Array(vec![])),
+            Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+            Value::Integer(n) => Ok(serde_json::Value::Number((*n).into())),
+            Value::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| Error::EvalError(format!("json-stringify: non-finite float {f}"))),
+            Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+            Value::List(items) => {
+                // alist detection: every element is Pair(String/Symbol, val)
+                let is_alist = items.iter().all(|v| {
+                    matches!(v, Value::Pair(k, _) if matches!(k.as_ref(), Value::String(_) | Value::Symbol(_)))
+                });
+                if is_alist {
+                    let mut map = serde_json::Map::new();
+                    for item in items {
+                        if let Value::Pair(k, v) = item {
+                            let key = match k.as_ref() {
+                                Value::String(s) | Value::Symbol(s) => s.clone(),
+                                _ => unreachable!(),
+                            };
+                            map.insert(key, value_to_json(v)?);
+                        }
+                    }
+                    Ok(serde_json::Value::Object(map))
+                } else {
+                    let arr: Result<Vec<_>> = items.iter().map(value_to_json).collect();
+                    Ok(serde_json::Value::Array(arr?))
+                }
             }
-            SexpKind::DottedList(heads, tail) => Sexp::dotted_list(
-                heads.into_iter().map(remap_null_symbol_to_nil).collect(),
-                remap_null_symbol_to_nil(*tail),
-            ),
-            SexpKind::Vector(items) => {
-                // note: Vector case handled but JSON doesn't produce vectors,
-                // so null-in-vector is untested on this path.
-                Sexp::vector(items.into_iter().map(remap_null_symbol_to_nil).collect())
-            }
-            _ => sexp,
+            other => Err(Error::TypeError(format!(
+                "json-stringify: cannot convert {other} to JSON"
+            ))),
         }
     }
 
