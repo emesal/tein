@@ -458,14 +458,13 @@ impl Value {
                 return Error::SandboxViolation(rest.to_string());
             }
 
-            // module policy: detect import failures when VfsOnly is active.
+            // module policy: detect import failures when sandboxed (VfsAll or Allowlist).
             // chibi emits "couldn't find import" from meta-7.scm (scheme level)
             // or "couldn't find file in module path" from eval.c (C level).
             if message == "couldn't find import" || message == "couldn't find file in module path" {
                 use crate::sandbox::MODULE_POLICY;
-                use crate::sandbox::ModulePolicy;
-                let is_vfs_only = MODULE_POLICY.with(|cell| cell.get() == ModulePolicy::VfsOnly);
-                if is_vfs_only {
+                let is_sandboxed = MODULE_POLICY.with(|cell| cell.get() != crate::sandbox::POLICY_UNRESTRICTED);
+                if is_sandboxed {
                     let module = irritant_str.as_deref().unwrap_or("unknown");
                     return Error::SandboxViolation(format!(
                         "module import blocked: {} (not available in this sandbox)",

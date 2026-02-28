@@ -25,6 +25,7 @@
 #![allow(missing_docs)]
 #![allow(clippy::missing_safety_doc)]
 
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 
 // opaque types from chibi
@@ -688,10 +689,33 @@ pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
 }
 
 /// set the module import policy at C level.
-/// 0 = unrestricted (all modules), 1 = vfs-only.
+/// 0 = unrestricted, 1 = vfs-all, 2 = allowlist (rust callback).
 #[inline]
 pub unsafe fn module_policy_set(policy: i32) {
     unsafe { tein_module_policy_set(policy as c_int) }
+}
+
+/// called from C (`tein_shim.c`) when module policy is Allowlist (policy 2).
+/// checks the module path against the thread-local allowlist.
+///
+/// the path arrives as e.g. `/vfs/lib/tein/json.sld` or `/vfs/lib/srfi/69/hash`.
+/// we strip the `/vfs/lib/` prefix and check if any allowlist entry is a prefix
+/// of the remainder.
+#[unsafe(no_mangle)]
+extern "C" fn tein_module_allowlist_check(path: *const c_char) -> c_int {
+    use crate::sandbox::MODULE_ALLOWLIST;
+
+    let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
+    let suffix = path_str.strip_prefix("/vfs/lib/").unwrap_or(path_str);
+
+    MODULE_ALLOWLIST.with(|cell| {
+        let list = cell.borrow();
+        if list.iter().any(|prefix| suffix.starts_with(prefix.as_str())) {
+            1
+        } else {
+            0
+        }
+    })
 }
 
 /// RAII guard that roots a `sexp` on chibi's global preservatives list.

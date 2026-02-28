@@ -44,7 +44,10 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
+    sandbox::{
+        FS_POLICY, FsPolicy, MODULE_ALLOWLIST, MODULE_POLICY, ModulePolicy, Preset,
+        default_allowlist,
+    },
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -1126,6 +1129,7 @@ pub struct ContextBuilder {
     allowed_primitives: Option<Vec<&'static str>>,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
+    module_policy: Option<ModulePolicy>,
 }
 
 impl ContextBuilder {
@@ -1259,6 +1263,87 @@ impl ContextBuilder {
         self
     }
 
+    /// Set module policy to VfsAll — all curated VFS modules available.
+    ///
+    /// By default, sandboxed contexts use an allowlist ([`SAFE_MODULES`](crate::sandbox::SAFE_MODULES)
+    /// + transitive deps). Call this to widen access to all VFS modules while
+    /// still blocking filesystem module loading.
+    pub fn vfs_all(mut self) -> Self {
+        self.module_policy = Some(ModulePolicy::VfsAll);
+        self
+    }
+
+    /// Add a module prefix to the import allowlist.
+    ///
+    /// If no policy has been explicitly set, starts from [`SAFE_MODULES`](crate::sandbox::SAFE_MODULES)
+    /// + transitive deps. `prefix` is matched against module paths like
+    /// `"chibi/regexp"`, `"srfi/1"`, `"scheme/eval"`.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .safe()
+    ///     .allow(&["import"])
+    ///     .allow_module("chibi/regexp")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_module(mut self, prefix: &str) -> Self {
+        self.ensure_allowlist();
+        if let Some(ModulePolicy::Allowlist(ref mut list)) = self.module_policy {
+            let s = prefix.to_string();
+            if !list.contains(&s) {
+                list.push(s);
+            }
+        }
+        self
+    }
+
+    /// Replace the default safe set entirely. [`IMPLICIT_DEPS`](crate::sandbox::IMPLICIT_DEPS)
+    /// are always included so transitive module loading works.
+    ///
+    /// For building minimal allowlists from scratch.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .safe()
+    ///     .allow(&["import"])
+    ///     .allow_only_modules(&["tein/json"])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_only_modules(mut self, prefixes: &[&str]) -> Self {
+        use crate::sandbox::IMPLICIT_DEPS;
+        let mut list: Vec<String> = IMPLICIT_DEPS.iter().map(|s| s.to_string()).collect();
+        for p in prefixes {
+            let s = p.to_string();
+            if !list.contains(&s) {
+                list.push(s);
+            }
+        }
+        self.module_policy = Some(ModulePolicy::Allowlist(list));
+        self
+    }
+
+    fn ensure_allowlist(&mut self) {
+        if !matches!(self.module_policy, Some(ModulePolicy::Allowlist(_))) {
+            self.module_policy = Some(ModulePolicy::Allowlist(default_allowlist()));
+        }
+    }
+
     /// Check if a step limit has been configured.
     pub(crate) fn has_step_limit(&self) -> bool {
         self.step_limit.is_some()
@@ -1307,22 +1392,35 @@ impl ContextBuilder {
                 }
             }
 
-            // activate VFS-only module policy if both standard_env and
-            // sandbox (presets) are configured. this restricts (import ...)
-            // to only load modules from the embedded VFS, blocking
-            // filesystem-based modules like (chibi process).
-            // set early so it's active during sandbox setup (which may
-            // trigger transitive module loads).
-            let has_module_policy = self.standard_env && self.allowed_primitives.is_some();
+            // resolve module policy:
+            // - explicit policy from builder takes precedence
+            // - sandboxed standard-env defaults to Allowlist(SAFE_MODULES + IMPLICIT_DEPS)
+            // - everything else is Unrestricted
+            let has_sandbox = self.standard_env && self.allowed_primitives.is_some();
+            let resolved_policy = self.module_policy.take().unwrap_or_else(|| {
+                if has_sandbox {
+                    ModulePolicy::Allowlist(default_allowlist())
+                } else {
+                    ModulePolicy::Unrestricted
+                }
+            });
+            let has_module_policy = !matches!(resolved_policy, ModulePolicy::Unrestricted);
 
             // save current policy values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
             let prev_module_policy = MODULE_POLICY.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
+            let prev_module_allowlist = MODULE_ALLOWLIST.with(|cell| cell.borrow().clone());
 
             if has_module_policy {
-                MODULE_POLICY.with(|cell| cell.set(ModulePolicy::VfsOnly));
-                ffi::module_policy_set(ModulePolicy::VfsOnly as i32);
+                let level = resolved_policy.level();
+                MODULE_POLICY.with(|cell| cell.set(level));
+                ffi::module_policy_set(level as i32);
+                if let ModulePolicy::Allowlist(ref list) = resolved_policy {
+                    MODULE_ALLOWLIST.with(|cell| {
+                        *cell.borrow_mut() = list.clone();
+                    });
+                }
             }
 
             // extract IO prefixes before borrowing self for allowed_primitives
@@ -1478,6 +1576,7 @@ impl ContextBuilder {
                 has_module_policy,
                 prev_module_policy,
                 prev_fs_policy,
+                prev_module_allowlist,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
@@ -1551,10 +1650,12 @@ pub struct Context {
     step_limit: Option<u64>,
     has_io_wrappers: bool,
     has_module_policy: bool,
-    /// previous MODULE_POLICY value, restored on drop (save/restore RAII for sequential contexts)
-    prev_module_policy: ModulePolicy,
-    /// previous FS_POLICY value, restored on drop (save/restore RAII for sequential contexts)
+    /// previous MODULE_POLICY level, restored on drop
+    prev_module_policy: u8,
+    /// previous FS_POLICY value, restored on drop
     prev_fs_policy: Option<FsPolicy>,
+    /// previous MODULE_ALLOWLIST, restored on drop
+    prev_module_allowlist: Vec<String>,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -1600,6 +1701,7 @@ impl Context {
             allowed_primitives: None,
             file_read_prefixes: None,
             file_write_prefixes: None,
+            module_policy: None,
         }
     }
 
@@ -2579,6 +2681,9 @@ impl Drop for Context {
         if self.has_module_policy {
             MODULE_POLICY.with(|cell| cell.set(self.prev_module_policy));
             unsafe { ffi::module_policy_set(self.prev_module_policy as i32) };
+            MODULE_ALLOWLIST.with(|cell| {
+                *cell.borrow_mut() = std::mem::take(&mut self.prev_module_allowlist);
+            });
         }
 
         // restore previous FS_POLICY (typically None, unless sequential sandboxed contexts)
