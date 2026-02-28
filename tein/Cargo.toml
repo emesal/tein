@@ -13,15 +13,20 @@ categories = ["embedded", "parser-implementations"]
 [dependencies]
 tein-macros = { path = "../tein-macros" }
 tein-ext = { path = "../tein-ext" }
-tein-sexp = { path = "../tein-sexp", features = ["serde"] }
+tein-sexp = { path = "../tein-sexp" }
 libloading = "0.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
 
 [features]
+## json on by default — disable with `default-features = false` if you don't need it.
+default = ["json"]
+## enables `(tein json)` module with `json-parse` and `json-stringify`.
+## pulls in serde + serde_json.
+json = ["dep:serde_json", "dep:serde", "tein-sexp/serde"]
 ## enables chibi-scheme GC debugging instrumentation (+4 bytes/object overhead).
 ## adds magic-number header validation and pointer bounds checking before GC mark.
 ## useful for diagnosing heap corruption, dangling pointers, and unrooted locals.

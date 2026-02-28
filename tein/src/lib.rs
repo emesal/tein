@@ -35,6 +35,15 @@
 //!   with persistent or fresh-per-evaluation modes (see [`managed`])
 //! - **Timeouts** — Wall-clock deadlines via [`TimeoutContext`]
 //!
+//! ## Feature flags
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `json`  | yes     | Enables `(tein json)` module with `json-parse` and `json-stringify`. Pulls in `serde` + `serde_json`. |
+//!
+//! Disable default features with `default-features = false` for a minimal build
+//! without serde dependencies.
+//!
 //! ## Safety model
 //!
 //! [`Context`] is intentionally `!Send + !Sync`. Chibi-Scheme contexts are not
@@ -48,10 +57,12 @@ mod context;
 mod error;
 mod ffi;
 pub mod foreign;
+#[cfg(feature = "json")]
 mod json;
 pub mod managed;
 mod port;
 pub mod sandbox;
+#[cfg(feature = "json")]
 mod sexp_bridge;
 mod thread;
 mod timeout;
