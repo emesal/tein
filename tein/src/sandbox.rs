@@ -209,6 +209,13 @@ thread_local! {
 /// module path prefix matched against the path after `/vfs/lib/` — so
 /// `"tein/"` matches all `(tein ...)` modules.
 ///
+/// **excluded r7rs modules and rationale:**
+/// - `scheme/file` — filesystem access (`open-input-file`, `with-input-from-file`, etc.)
+/// - `scheme/process-context` — process control (`exit`, `get-environment-variable`, `command-line`)
+/// - `scheme/load` — loads and evaluates arbitrary files from the filesystem
+/// - `scheme/r5rs` — compatibility bundle that re-exports `interaction-environment` and other
+///   env-escaping primitives alongside `scheme/eval`; use individual modules instead
+///
 /// use [`ContextBuilder::allow_module()`](crate::ContextBuilder::allow_module)
 /// to add entries, or [`ContextBuilder::vfs_all()`](crate::ContextBuilder::vfs_all)
 /// to allow all VFS modules.
