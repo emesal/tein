@@ -1265,9 +1265,10 @@ impl ContextBuilder {
 
     /// Set module policy to VfsAll — all curated VFS modules available.
     ///
-    /// By default, sandboxed contexts use an allowlist ([`SAFE_MODULES`](crate::sandbox::SAFE_MODULES)
-    /// + transitive deps). Call this to widen access to all VFS modules while
-    /// still blocking filesystem module loading.
+    /// By default, sandboxed contexts use an allowlist
+    /// ([`SAFE_MODULES`](crate::sandbox::SAFE_MODULES) + transitive deps).
+    /// Call this to widen access to all VFS modules while still blocking
+    /// filesystem module loading.
     pub fn vfs_all(mut self) -> Self {
         self.module_policy = Some(ModulePolicy::VfsAll);
         self
@@ -1275,8 +1276,9 @@ impl ContextBuilder {
 
     /// Add a module prefix to the import allowlist.
     ///
-    /// If no policy has been explicitly set, starts from [`SAFE_MODULES`](crate::sandbox::SAFE_MODULES)
-    /// + transitive deps. `prefix` is matched against module paths like
+    /// If no policy has been explicitly set, starts from
+    /// [`SAFE_MODULES`](crate::sandbox::SAFE_MODULES) + transitive deps.
+    /// `prefix` is matched against module paths like
     /// `"chibi/regexp"`, `"srfi/1"`, `"scheme/eval"`.
     ///
     /// # examples
@@ -4678,12 +4680,19 @@ mod tests {
 
         // (chibi string) is in VFS but not in SAFE_MODULES — should work under VfsAll
         let r = ctx.evaluate("(import (chibi string))");
-        assert!(r.is_ok(), "(import (chibi string)) should succeed under VfsAll: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "(import (chibi string)) should succeed under VfsAll: {:?}",
+            r.err()
+        );
 
         // filesystem module should still fail
         let err = ctx.evaluate("(import (chibi process))").unwrap_err();
-        assert!(matches!(err, Error::SandboxViolation(_)),
-            "filesystem import should fail under VfsAll: {:?}", err);
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "filesystem import should fail under VfsAll: {:?}",
+            err
+        );
 
         drop(ctx);
     }
@@ -4705,7 +4714,11 @@ mod tests {
 
         // chibi/string was explicitly allowed
         let r = ctx.evaluate("(import (chibi string))");
-        assert!(r.is_ok(), "(import (chibi string)) should succeed: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "(import (chibi string)) should succeed: {:?}",
+            r.err()
+        );
 
         drop(ctx);
     }
@@ -4723,12 +4736,19 @@ mod tests {
 
         // tein/test was explicitly listed — should work
         let r = ctx.evaluate("(import (tein test))");
-        assert!(r.is_ok(), "(import (tein test)) should succeed: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "(import (tein test)) should succeed: {:?}",
+            r.err()
+        );
 
         // chibi/process is neither in IMPLICIT_DEPS nor the custom list
         let err = ctx.evaluate("(import (chibi process))").unwrap_err();
-        assert!(matches!(err, Error::SandboxViolation(_)),
-            "(import (chibi process)) should fail with allow_only: {:?}", err);
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "(import (chibi process)) should fail with allow_only: {:?}",
+            err
+        );
 
         drop(ctx);
     }
@@ -4748,8 +4768,10 @@ mod tests {
         }
         // after drop, allowlist should be empty (previous was empty)
         MODULE_ALLOWLIST.with(|cell| {
-            assert!(cell.borrow().is_empty(),
-                "allowlist should be restored to empty after drop");
+            assert!(
+                cell.borrow().is_empty(),
+                "allowlist should be restored to empty after drop"
+            );
         });
     }
 
@@ -4768,8 +4790,11 @@ mod tests {
 
         // chibi/string is in IMPLICIT_DEPS, not the explicit list — should still work
         let r = ctx.evaluate("(import (chibi string))");
-        assert!(r.is_ok(),
-            "(chibi string) should load via IMPLICIT_DEPS even without explicit listing: {:?}", r.err());
+        assert!(
+            r.is_ok(),
+            "(chibi string) should load via IMPLICIT_DEPS even without explicit listing: {:?}",
+            r.err()
+        );
 
         drop(ctx);
     }
