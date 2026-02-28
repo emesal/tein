@@ -584,7 +584,10 @@ impl serde::Serialize for Sexp {
             SexpKind::Symbol(s) => serializer.serialize_str(s),
             SexpKind::Boolean(b) => serializer.serialize_bool(*b),
             SexpKind::Char(c) => serializer.serialize_char(*c),
-            SexpKind::Nil => serializer.serialize_unit(),
+            SexpKind::Nil => {
+                let seq = serializer.serialize_seq(Some(0))?;
+                seq.end()
+            }
             SexpKind::List(items) if self.is_alist() => {
                 use serde::ser::SerializeMap;
                 let mut map = serializer.serialize_map(Some(items.len()))?;

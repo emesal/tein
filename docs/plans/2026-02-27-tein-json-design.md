@@ -2,7 +2,7 @@
 
 **issue**: #36
 **date**: 2026-02-27
-**status**: design approved, blocked on #71
+**status**: implemented
 
 ## overview
 

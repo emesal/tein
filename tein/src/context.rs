@@ -760,6 +760,84 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
+// --- json trampolines ---
+
+/// Trampoline for `json-parse`: takes one scheme string argument, returns parsed value.
+///
+/// On parse error or type mismatch, returns a scheme string with the error message.
+/// This matches tein's convention for native function errors (see AGENTS.md).
+unsafe extern "C" fn json_parse_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let str_sexp = ffi::sexp_car(args);
+        if ffi::sexp_stringp(str_sexp) == 0 {
+            let msg = "json-parse: expected string argument";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let data = ffi::sexp_string_data(str_sexp);
+        let len = ffi::sexp_string_size(str_sexp) as usize;
+        let input = match std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("json-parse: invalid UTF-8: {e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+        match crate::json::json_parse(input) {
+            Ok(value) => match value.to_raw(ctx) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    let msg = format!("json-parse: {e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                }
+            },
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// Trampoline for `json-stringify`: takes one scheme value, returns JSON string.
+///
+/// Works directly on raw chibi sexps via `json::json_stringify_raw` to preserve
+/// alist structure. `Value::from_raw` would collapse dotted pairs into proper lists
+/// when the cdr is a proper list (e.g. `("x" . (("y" . 1)))` → `("x" ("y" . 1))`),
+/// losing the structural cue needed to detect alists.
+///
+/// On conversion error, returns a scheme string with the error message.
+/// This matches tein's convention for native function errors (see AGENTS.md).
+unsafe extern "C" fn json_stringify_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let val_sexp = ffi::sexp_car(args);
+        match crate::json::json_stringify_raw(ctx, val_sexp) {
+            Ok(json) => {
+                let c_json = CString::new(json.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_json.as_ptr(), json.len() as ffi::sexp_sint_t)
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
 /// The 4 file-opening primitives we wrap with policy checks.
 #[derive(Clone, Copy)]
 #[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
@@ -1327,6 +1405,12 @@ impl ContextBuilder {
                 ext_api: RefCell::new(None),
             };
 
+            // register built-in module trampolines for standard-env contexts.
+            // pure data conversion, no IO — always safe and cheap to register.
+            if self.standard_env {
+                context.register_json_module()?;
+            }
+
             Ok(context)
         }
     }
@@ -1548,6 +1632,12 @@ impl Context {
                     return Value::from_raw(self.ctx, expr);
                 }
 
+                // gc-root expr across sexp_evaluate: sexp_compile_op calls
+                // sexp_make_eval_context immediately, which may trigger GC.
+                // the parsed expression is only a rust local (invisible to
+                // chibi's precise GC) until we hand it to the evaluator.
+                let _expr_guard = ffi::GcRoot::new(self.ctx, expr);
+
                 // evaluate the expression
                 result = ffi::sexp_evaluate(self.ctx, expr, env);
 
@@ -1560,6 +1650,13 @@ impl Context {
                     return Value::from_raw(self.ctx, result);
                 }
             }
+
+            // root result before from_raw. any allocation inside from_raw (e.g.
+            // sexp_symbol_to_string, sexp_bignum_to_string) can trigger a GC cycle that
+            // will collect `result` if it isn't explicitly preserved — chibi's GC is
+            // precise (no conservative stack scan), so rust locals are invisible to it.
+            // most visible in sandboxed contexts where the heap is more pressure-loaded.
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
 
             Value::from_raw(self.ctx, result)
         }
@@ -2173,6 +2270,8 @@ impl Context {
             if ffi::sexp_eofp(result) != 0 {
                 return Ok(Value::Unspecified);
             }
+            // root result before from_raw (see evaluate() for rationale)
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
             if ffi::sexp_exceptionp(result) != 0 {
                 return Value::from_raw(self.ctx, result);
             }
@@ -2234,6 +2333,8 @@ impl Context {
                 }
                 let result = ffi::sexp_evaluate(self.ctx, expr, env);
                 self.check_fuel()?;
+                // root result before from_raw (see evaluate() for rationale)
+                let _result_root = ffi::GcRoot::new(self.ctx, result);
                 if ffi::sexp_exceptionp(result) != 0 {
                     return Value::from_raw(self.ctx, result);
                 }
@@ -2277,6 +2378,17 @@ impl Context {
                    (error \"foreign-handle-id: expected foreign object, got\" x)))",
         )?;
 
+        Ok(())
+    }
+
+    /// Register `json-parse` and `json-stringify` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts. the VFS module
+    /// `(tein json)` exports these names, making them available via
+    /// `(import (tein json))`.
+    fn register_json_module(&self) -> Result<()> {
+        self.define_fn_variadic("json-parse", json_parse_trampoline)?;
+        self.define_fn_variadic("json-stringify", json_stringify_trampoline)?;
         Ok(())
     }
 
@@ -2338,6 +2450,10 @@ impl Context {
 
             // check fuel before exception status
             self.check_fuel()?;
+
+            // root result — from_raw may allocate (sexp_symbol_to_string, etc.)
+            // which can trigger GC and collect an unrooted result sexp.
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
 
             if ffi::sexp_exceptionp(result) != 0 {
                 return Value::from_raw(self.ctx, result);
@@ -6151,6 +6267,76 @@ mod tests {
                 assert_eq!(**i, Value::Integer(2));
             }
             other => panic!("expected Complex, got {:?}", other),
+        }
+    }
+
+    // --- (tein json) ---
+
+    #[test]
+    fn test_json_parse_object() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate(r#"(json-parse "{\"a\": 1, \"b\": \"two\"}")"#)
+            .expect("parse");
+        match result {
+            Value::List(items) => assert_eq!(items.len(), 2),
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_json_parse_array() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"[1, 2, 3]\")").expect("parse");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_json_parse_null_is_symbol() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"null\")").expect("parse");
+        assert_eq!(result, Value::Symbol("null".to_string()));
+    }
+
+    #[test]
+    fn test_json_stringify_alist() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate("(json-stringify '((\"name\" . \"tein\")))")
+            .expect("stringify");
+        assert_eq!(result, Value::String("{\"name\":\"tein\"}".to_string()));
+    }
+
+    #[test]
+    fn test_json_round_trip_via_scheme() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate(r#"(json-stringify (json-parse "{\"x\":42}"))"#)
+            .expect("round-trip");
+        assert_eq!(result, Value::String("{\"x\":42}".to_string()));
+    }
+
+    #[test]
+    fn test_json_parse_invalid() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"not json\")").expect("parse");
+        // per convention: errors return scheme strings (see AGENTS.md critical gotchas)
+        match result {
+            Value::String(msg) => assert!(msg.contains("json-parse")),
+            other => panic!("expected error string, got {other:?}"),
         }
     }
 }

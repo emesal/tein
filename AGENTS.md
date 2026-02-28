@@ -14,7 +14,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (211 lib + 12 tein_fn + 24 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 9 tein-macros + 11 ext_loading + 1 scheme_ext + doc-tests)
+just test                         # all tests (274 lib + 12 tein_fn + 27 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 9 tein-macros + 11 ext_loading + 1 scheme_ext + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 just lint                          # lint (cargo fmt + cargo clippy)
@@ -53,6 +53,10 @@ src/
   thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
   port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
+  json.rs      — json_parse (JSON string → Value) + json_stringify_raw (raw sexp → JSON string);
+                 registered as json-parse/json-stringify via trampolines in context.rs.
+                 stringify works at raw sexp level to preserve alist structure through chibi round-trips
+  sexp_bridge.rs — Value ↔ Sexp bidirectional conversion; shared layer for format modules (json, toml, yaml)
 tein-ext/      — stable C ABI types for cdylib extensions (no chibi dependency):
   src/lib.rs   — TeinExtApi vtable, OpaqueCtx/OpaqueVal, TeinTypeDesc/TeinMethodDesc,
                  SexpFn/TeinMethodFn/TeinExtInitFn type aliases, error codes, API version
@@ -80,6 +84,8 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   lib/tein/macro.c   — C static library init: set-macro-expand-hook!, unset-macro-expand-hook!, macro-expand-hook
   lib/tein/test.sld  — (tein test) library definition
   lib/tein/test.scm  — pure-scheme assertion framework: test-equal, test-true, test-false, test-error
+  lib/tein/json.sld  — (tein json) library definition + exports json-parse, json-stringify
+  lib/tein/json.scm  — module documentation (trampolines registered by rust runtime)
 build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-level tests)
@@ -141,6 +147,8 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **numeric tower shim functions**: `sexp_bignum_to_string(ctx, x)` — opens a string port, writes bignum in decimal, returns string sexp (allocates). `sexp_string_to_number(ctx, str, base)` — parses a scheme string as a number (used for `Bignum::to_raw`). `sexp_make_ratio(ctx, num, den)` / `sexp_make_complex(ctx, real, imag)` — constructors for to_raw; the first argument must be GC-rooted before calling (both may allocate).
 
 **chibi feature flags**: on linux, `SEXP_USE_GREEN_THREADS` defaults to 1, so the `threads` cond-expand feature is active (affects which VFS files are loaded, e.g. `srfi/39/syntax.scm` vs `syntax-no-threads.scm`). `full-unicode` is always enabled (affects `scheme/char.sld` path selection).
+
+**json alist round-trip via chibi**: `Value::from_raw` collapses dotted pairs `(key . val)` into proper lists when `val` is itself a proper list — e.g. `("x" . (("y" . 1)))` becomes `Value::List(["x", Value::Pair("y",1)])`. this loses alist structure needed for json object detection. `json_stringify_raw` (used by the scheme trampoline) works directly at the raw sexp level to detect alist entries via `sexp_pairp + sexp_stringp(car)`, bypassing `from_raw`. the rust-only `json_stringify` path (test-only) via sexp_bridge remains correct since it operates on hand-built `Value`s that haven't been through chibi.
 
 ## adding a new scheme type
 

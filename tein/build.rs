@@ -85,6 +85,9 @@ const VFS_FILES: &[&str] = &[
     // tein documentation accessors
     "lib/tein/docs.sld",
     "lib/tein/docs.scm",
+    // tein json module
+    "lib/tein/json.sld",
+    "lib/tein/json.scm",
 ];
 
 /// C-backed modules that need static linking.

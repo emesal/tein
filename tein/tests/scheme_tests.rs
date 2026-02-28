@@ -167,6 +167,11 @@ fn test_scheme_tein_foreign() {
 }
 
 #[test]
+fn test_scheme_json() {
+    run_scheme_test(include_str!("scheme/json.scm"));
+}
+
+#[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
     use tein::sandbox::*;
