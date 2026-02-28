@@ -233,6 +233,8 @@ pub const SAFE_MODULES: &[&str] = &[
 /// import internally. users shouldn't need to import these directly, but they
 /// must pass the gate when the module system resolves transitive deps.
 pub(crate) const IMPLICIT_DEPS: &[&str] = &[
+    // r7rs ambient substrate — expected to be available without explicit import
+    "scheme/base", "scheme/write",
     "srfi/9", "srfi/11", "srfi/16", "srfi/38", "srfi/39",
     "srfi/69", "srfi/151",
     "chibi/char-set/", "chibi/equiv", "chibi/string",

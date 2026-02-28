@@ -4717,18 +4717,18 @@ mod tests {
             .standard_env()
             .preset(&ARITHMETIC)
             .allow(&["import"])
-            .allow_only_modules(&["chibi/string"])
+            .allow_only_modules(&["tein/test"])
             .build()
             .expect("standard + sandbox + allow_only");
 
-        // chibi/string was explicitly listed — should work (it's also in IMPLICIT_DEPS)
-        let r = ctx.evaluate("(import (chibi string))");
-        assert!(r.is_ok(), "(import (chibi string)) should succeed: {:?}", r.err());
+        // tein/test was explicitly listed — should work
+        let r = ctx.evaluate("(import (tein test))");
+        assert!(r.is_ok(), "(import (tein test)) should succeed: {:?}", r.err());
 
-        // scheme/write is NOT in the custom list
-        let err = ctx.evaluate("(import (scheme write))").unwrap_err();
+        // chibi/process is neither in IMPLICIT_DEPS nor the custom list
+        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
         assert!(matches!(err, Error::SandboxViolation(_)),
-            "(import (scheme write)) should fail with allow_only: {:?}", err);
+            "(import (chibi process)) should fail with allow_only: {:?}", err);
 
         drop(ctx);
     }
