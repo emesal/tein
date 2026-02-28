@@ -4492,8 +4492,6 @@ mod tests {
 
     #[test]
     fn test_module_policy_blocks_non_vfs() {
-        // a sandboxed standard-env context should activate VfsOnly policy,
-        // blocking attempts to import filesystem-based modules.
         use crate::sandbox::*;
         let ctx = Context::builder()
             .standard_env()
@@ -4504,8 +4502,8 @@ mod tests {
         MODULE_POLICY.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::VfsOnly,
-                "sandboxed standard env should activate VfsOnly policy"
+                POLICY_ALLOWLIST,
+                "sandboxed standard env should activate allowlist policy"
             );
         });
 
@@ -4514,13 +4512,12 @@ mod tests {
 
     #[test]
     fn test_module_policy_unrestricted_without_sandbox() {
-        // standard env without sandbox should leave module policy unrestricted
         let ctx = Context::new_standard().expect("new_standard");
 
         MODULE_POLICY.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::Unrestricted,
+                crate::sandbox::POLICY_UNRESTRICTED,
                 "unsandboxed standard env should be unrestricted"
             );
         });
@@ -4539,14 +4536,14 @@ mod tests {
                 .expect("standard + sandbox");
 
             MODULE_POLICY.with(|cell| {
-                assert_eq!(cell.get(), ModulePolicy::VfsOnly);
+                assert_eq!(cell.get(), POLICY_ALLOWLIST);
             });
         }
         // after drop, policy should reset
         MODULE_POLICY.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::Unrestricted,
+                POLICY_UNRESTRICTED,
                 "module policy should reset to unrestricted after context drop"
             );
         });
@@ -4565,7 +4562,7 @@ mod tests {
         MODULE_POLICY.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::Unrestricted,
+                POLICY_UNRESTRICTED,
                 "non-standard-env sandbox should not set module policy"
             );
         });
@@ -4638,7 +4635,7 @@ mod tests {
 
     #[test]
     fn test_sequential_context_policy_isolation() {
-        // ctx1 sets VfsOnly module policy; after drop, ctx2 must still have VfsOnly.
+        // ctx1 sets Allowlist module policy; after drop, ctx2 must still have Allowlist.
         // this tests the save/restore RAII pattern on Context::drop().
         use crate::sandbox::ARITHMETIC;
         let ctx1 = Context::builder()
@@ -4659,7 +4656,7 @@ mod tests {
         let err = ctx2.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
-            "ctx2 module policy must still be VfsOnly after ctx1 dropped, got: {:?}",
+            "ctx2 module policy must still be Allowlist after ctx1 dropped, got: {:?}",
             err
         );
     }
