@@ -17,7 +17,7 @@ tein-sexp = { path = "../tein-sexp" }
 libloading = "0.8"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-toml_crate = { package = "toml", version = "1.0", default-features = false, features = ["parse", "display"], optional = true }
+toml_crate = { package = "toml", version = "1.0", default-features = false, features = ["parse", "display", "serde"], optional = true }
 
 [dev-dependencies]
 rustyline = { version = "17", features = ["with-file-history"] }
@@ -29,8 +29,8 @@ default = ["json", "toml"]
 ## pulls in serde + serde_json.
 json = ["dep:serde_json", "dep:serde", "tein-sexp/serde"]
 ## enables `(tein toml)` module with `toml-parse` and `toml-stringify`.
-## pulls in the toml crate (parse + display features only).
-toml = ["dep:toml_crate"]
+## pulls in the toml crate (parse + display + serde features) and serde.
+toml = ["dep:toml_crate", "dep:serde"]
 ## enables chibi-scheme GC debugging instrumentation (+4 bytes/object overhead).
 ## adds magic-number header validation and pointer bounds checking before GC mark.
 ## useful for diagnosing heap corruption, dangling pointers, and unrooted locals.

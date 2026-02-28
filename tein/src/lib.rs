@@ -60,6 +60,8 @@ pub mod foreign;
 #[cfg(feature = "json")]
 mod json;
 pub mod managed;
+#[cfg(feature = "toml")]
+mod toml;
 mod port;
 pub mod sandbox;
 #[cfg(feature = "json")]
