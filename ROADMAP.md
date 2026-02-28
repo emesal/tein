@@ -126,6 +126,8 @@ tein as a first-class scheme implementation, not just a rust library.
 
 **r5rs/r6rs compatibility layers** — `ContextBuilder::r5rs_env()` / `ContextBuilder::r6rs_env()` for best-effort compatibility. chibi already has substantial r6rs support internally; the goal is exposing it properly rather than implementing it from scratch. expands the pool of available scheme code significantly. documented as best-effort, not full conformance.
 
+**`(tein introspect)`** — environment introspection API for LLM agents. exposes chibi's existing runtime knowledge — env bindings, procedure arity, module exports, binding metadata — as scheme procedures. an LLM working inside a tein sandbox can query what's in scope, what arguments a procedure takes, and what modules are available, without needing an external LSP server or static analyser. thin shim over chibi internals, not a reimplementation. complements `(tein docs)` by answering structural questions about the live environment.
+
 **scheme test harness** — run `.scm` files as cargo integration tests. enables testing scheme-level behaviour idiomatically.
 
 ### milestone 10 — capability modules
