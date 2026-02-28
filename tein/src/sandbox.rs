@@ -5,7 +5,7 @@
 //! 1. **Environment restriction** — expose only selected primitives via presets
 //! 2. **Step limits** — cap VM instructions per evaluation
 //! 3. **File IO policy** — allowlist filesystem paths for reading/writing
-//! 4. **Module policy** — restrict `(import ...)` to VFS-only modules
+//! 4. **Module policy** — restrict `(import ...)` to safe modules (three-tier: Allowlist / VfsAll / Unrestricted)
 //!
 //! # Presets
 //!
@@ -74,11 +74,13 @@
 //!
 //! # Module policy
 //!
-//! When a sandboxed context uses the standard environment, the module
-//! policy is automatically set to VFS-only — `(import ...)` can only
-//! load modules embedded in tein's virtual filesystem, not from the
-//! host filesystem. This prevents sandbox escapes via modules like
-//! `(chibi process)` or `(chibi filesystem)`.
+//! Module imports in sandboxed standard-env contexts are restricted by a
+//! three-tier policy:
+//!
+//! - **Allowlist** (default) — only [`SAFE_MODULES`] + transitive deps.
+//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module).
+//! - **VfsAll** — all curated VFS modules. set with [`.vfs_all()`](crate::ContextBuilder::vfs_all).
+//! - **Unrestricted** — VFS + filesystem (unsandboxed contexts).
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -140,31 +142,108 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
-/// Module import policy for sandboxed standard-env contexts.
+/// module import policy for sandboxed standard-env contexts.
 ///
-/// Controls which modules can be loaded via `(import ...)`.
-/// When a sandboxed context uses the standard environment, this is
-/// automatically set to `VfsOnly` to prevent loading filesystem-based
-/// modules (e.g. `(chibi process)`, `(chibi filesystem)`).
+/// controls which modules can be loaded via `(import ...)`.
+///
+/// ## tiers
+///
+/// | policy | what passes | use case |
+/// |--------|------------|----------|
+/// | `Allowlist` | only listed module prefixes (must be in VFS) | tight LLM sandbox |
+/// | `VfsAll` | all curated VFS modules | sandbox with full scheme ecosystem |
+/// | `Unrestricted` | VFS + filesystem | unsandboxed |
 ///
 /// ## VFS safety contract
 ///
 /// VFS modules are safe by construction: tein curates the embedded virtual
 /// filesystem to ensure no module can bypass the existing safety layers
 /// (preset allowlists, FsPolicy, fuel/timeout). capabilities exposed by
-/// VFS modules remain subject to these controls — e.g. IO operations are
-/// gated by preset availability and filesystem path policies.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ModulePolicy {
-    /// All modules allowed (unsandboxed or non-standard-env context).
-    Unrestricted = 0,
-    /// Only VFS modules allowed (sandboxed standard-env context).
-    VfsOnly = 1,
+/// VFS modules remain subject to these controls.
+///
+/// ## default behaviour
+///
+/// sandboxed contexts (standard_env + presets) default to
+/// `Allowlist(SAFE_MODULES + IMPLICIT_DEPS)`. use [`.vfs_all()`](crate::ContextBuilder::vfs_all)
+/// or [`.allow_module()`](crate::ContextBuilder::allow_module) to adjust.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModulePolicy {
+    /// all modules allowed (VFS + filesystem). no gate.
+    Unrestricted,
+    /// all curated VFS modules allowed. filesystem blocked.
+    VfsAll,
+    /// only listed module prefixes allowed (must also be in VFS).
+    /// entries are path prefixes matched against the module path after `/vfs/lib/`.
+    Allowlist(Vec<String>),
+}
+
+/// numeric policy level for C interop and cheap thread-local checks.
+/// mirrors `tein_module_policy` in tein_shim.c.
+pub(crate) const POLICY_UNRESTRICTED: u8 = 0;
+pub(crate) const POLICY_VFS_ALL: u8 = 1;
+pub(crate) const POLICY_ALLOWLIST: u8 = 2;
+
+impl ModulePolicy {
+    /// numeric policy level for C interop.
+    pub(crate) fn level(&self) -> u8 {
+        match self {
+            ModulePolicy::Unrestricted => POLICY_UNRESTRICTED,
+            ModulePolicy::VfsAll => POLICY_VFS_ALL,
+            ModulePolicy::Allowlist(_) => POLICY_ALLOWLIST,
+        }
+    }
 }
 
 thread_local! {
-    /// Active module import policy (set during build, cleared on drop).
-    pub(crate) static MODULE_POLICY: Cell<ModulePolicy> = const { Cell::new(ModulePolicy::Unrestricted) };
+    /// numeric policy level (0/1/2). cheap to read for error checks in value.rs.
+    pub(crate) static MODULE_POLICY: Cell<u8> = const { Cell::new(POLICY_UNRESTRICTED) };
+
+    /// the actual allowlist, populated when policy is Allowlist.
+    /// read by the C→rust callback during module resolution.
+    pub(crate) static MODULE_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// minimal safe set — tein modules + core r7rs pure-computation modules.
+///
+/// used as the default allowlist for sandboxed contexts. each entry is a
+/// module path prefix matched against the path after `/vfs/lib/` — so
+/// `"tein/"` matches all `(tein ...)` modules.
+///
+/// use [`ContextBuilder::allow_module()`](crate::ContextBuilder::allow_module)
+/// to add entries, or [`ContextBuilder::vfs_all()`](crate::ContextBuilder::vfs_all)
+/// to allow all VFS modules.
+pub const SAFE_MODULES: &[&str] = &[
+    "tein/",
+    "scheme/base",
+    "scheme/case-lambda",
+    "scheme/char",
+    "scheme/complex",
+    "scheme/cxr",
+    "scheme/inexact",
+    "scheme/lazy",
+    "scheme/read",
+    "scheme/write",
+    "scheme/bytevector",
+    "scheme/sort",
+];
+
+/// transitive dependencies of safe modules. always included in any allowlist.
+///
+/// these are implementation plumbing — modules that safe user-facing modules
+/// import internally. users shouldn't need to import these directly, but they
+/// must pass the gate when the module system resolves transitive deps.
+pub(crate) const IMPLICIT_DEPS: &[&str] = &[
+    "srfi/9", "srfi/11", "srfi/16", "srfi/38", "srfi/39",
+    "srfi/69", "srfi/151",
+    "chibi/char-set/", "chibi/equiv", "chibi/string",
+    "chibi/ast", "chibi/io", "chibi/iset/",
+];
+
+/// build the default allowlist from SAFE_MODULES + IMPLICIT_DEPS.
+pub(crate) fn default_allowlist() -> Vec<String> {
+    SAFE_MODULES.iter().chain(IMPLICIT_DEPS.iter())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// A named set of Scheme primitives for environment restriction.
