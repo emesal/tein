@@ -90,6 +90,9 @@ const VFS_FILES: &[&str] = &[
 /// VFS files gated behind the "json" cargo feature.
 const VFS_FILES_JSON: &[&str] = &["lib/tein/json.sld", "lib/tein/json.scm"];
 
+/// VFS files gated behind the "toml" cargo feature.
+const VFS_FILES_TOML: &[&str] = &["lib/tein/toml.sld", "lib/tein/toml.scm"];
+
 /// C-backed modules that need static linking.
 ///
 /// each entry: (path to .c file relative to chibi dir, init function suffix, table key).
@@ -182,6 +185,9 @@ fn main() {
     let mut vfs_files: Vec<&str> = VFS_FILES.to_vec();
     if cfg!(feature = "json") {
         vfs_files.extend_from_slice(VFS_FILES_JSON);
+    }
+    if cfg!(feature = "toml") {
+        vfs_files.extend_from_slice(VFS_FILES_TOML);
     }
 
     // generate install.h (with VFS module path) into OUT_DIR/chibi/
