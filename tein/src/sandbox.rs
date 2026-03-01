@@ -1047,13 +1047,14 @@ pub(crate) fn unexported_stubs(allowed_modules: &[String]) -> Vec<(&'static str,
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Modules {
     /// conservative safe set — default for sandboxed contexts.
     ///
     /// includes all modules marked `default_safe: true` in the registry,
     /// with transitive deps resolved. excludes `scheme/eval`, `scheme/repl`,
     /// `tein/process`, and other environment-escape modules.
+    #[default]
     Safe,
     /// all vetted modules in the registry (superset of `Safe`).
     All,
@@ -1072,12 +1073,6 @@ impl Modules {
     /// transitive dependencies are resolved automatically at build time.
     pub fn only(modules: &[&str]) -> Self {
         Modules::Only(modules.iter().map(|s| s.to_string()).collect())
-    }
-}
-
-impl Default for Modules {
-    fn default() -> Self {
-        Modules::Safe
     }
 }
 

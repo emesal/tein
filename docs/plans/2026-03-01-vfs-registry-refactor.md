@@ -36,7 +36,19 @@ tasks are ordered for incremental compilation — each task produces a compiling
 
 ## progress notes
 
-**batch 2 complete (tasks 4–5).**
+**batch 3 complete (tasks 6–9).**
+
+### batch 3 notes
+
+- `Modules` enum needs `#[derive(Default)]` with `#[default]` on `Safe` — clippy catches manual `impl Default` for enums
+- the new sandbox build path is an `else if` branch off the old `allowed_primitives` path — mutually exclusive, both coexist until task 10
+- IO prefix extraction moved inside each branch (old path does `self.file_*_prefixes.take()` at its start; new path does the same inside its block). `has_io` is now `mut` and assigned by whichever branch runs
+- `scheme/file` is NOT in the VFS registry — file IO in the new sandbox path requires the IO wrapper fns (registered via `file_read()`/`file_write()`) plus `(scheme read)` for `read`. tests verify this correctly
+- `allow_module()` with `sandbox_modules` set: expands `Safe`/`All`/`None` to `Only(resolved_list + module)`. `registry_resolve_deps` handles transitive deps at build time inside the branch
+- the import warnings ("importing already defined binding: define", etc.) appear when `(import (scheme base))` is called in a null env that already has core syntax from `sexp_make_null_env`. this is harmless and expected; chibi's null env always includes the 8 core syntax forms
+- 701 tests pass after batch 3
+
+### batch 2 notes
 
 ### implementation notes discovered
 
@@ -54,7 +66,7 @@ tasks are ordered for incremental compilation — each task produces a compiling
 
 ### next batch
 
-bootstrap context: this plan file + branch `feature/refactor/vfs-registry-2603`. start at task 6.
+bootstrap context: this plan file + branch `feature/refactor/vfs-registry-2603`. start at task 10.
 
 ---
 
