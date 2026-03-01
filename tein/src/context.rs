@@ -124,6 +124,17 @@ thread_local! {
     pub(crate) static EXT_API: Cell<*const tein_ext::TeinExtApi> = const { Cell::new(std::ptr::null()) };
 }
 
+// --- exit escape hatch thread-locals ---
+//
+// (exit) / (exit obj) in scheme sets these, then returns an exception to
+// stop the VM immediately. the eval loop checks the flag before converting
+// exceptions to errors and intercepts it to return Ok(value) to the rust caller.
+// cleared on Context::drop() as a safety net.
+thread_local! {
+    static EXIT_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    static EXIT_VALUE: Cell<ffi::sexp> = const { Cell::new(std::ptr::null_mut()) };
+}
+
 // --- implementations of the 4 foreign protocol dispatch functions ---
 
 /// Dispatch a method call: (foreign-call obj 'method arg ...)
@@ -1734,6 +1745,28 @@ impl Context {
         Ok(())
     }
 
+    /// Check if `(exit)` was called during evaluation.
+    ///
+    /// If the exit flag is set, clears it, releases the GC root on the
+    /// stashed value, converts it to a `Value`, and returns `Some(Ok(value))`.
+    /// Returns `None` if no exit was requested.
+    fn check_exit(&self) -> Option<Result<Value>> {
+        if EXIT_REQUESTED.with(|c| c.replace(false)) {
+            let raw = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
+            // release GC root — sexp_release_object is a no-op for immediates
+            if !raw.is_null() {
+                unsafe { ffi::sexp_release_object(self.ctx, raw) };
+            }
+            // null or void → (exit) with no args, return 0
+            if raw.is_null() || unsafe { ffi::sexp_voidp(raw) != 0 } {
+                return Some(Ok(Value::Integer(0)));
+            }
+            Some(unsafe { Value::from_raw(self.ctx, raw) })
+        } else {
+            None
+        }
+    }
+
     /// Evaluate one or more Scheme expressions.
     ///
     /// Evaluates all expressions in the string sequentially, returning the
@@ -1835,8 +1868,12 @@ impl Context {
                 // (fuel exhaustion returns a normal-looking value, not an exception)
                 self.check_fuel()?;
 
-                // evaluation error
+                // exit escape hatch — (exit) returns an exception to stop the
+                // VM immediately; intercept before converting to an error.
                 if ffi::sexp_exceptionp(result) != 0 {
+                    if let Some(exit_result) = self.check_exit() {
+                        return exit_result;
+                    }
                     return Value::from_raw(self.ctx, result);
                 }
             }
@@ -2526,6 +2563,9 @@ impl Context {
                 // root result before from_raw (see evaluate() for rationale)
                 let _result_root = ffi::GcRoot::new(self.ctx, result);
                 if ffi::sexp_exceptionp(result) != 0 {
+                    if let Some(exit_result) = self.check_exit() {
+                        return exit_result;
+                    }
                     return Value::from_raw(self.ctx, result);
                 }
                 last = Value::from_raw(self.ctx, result)?;
@@ -2659,6 +2699,9 @@ impl Context {
             let _result_root = ffi::GcRoot::new(self.ctx, result);
 
             if ffi::sexp_exceptionp(result) != 0 {
+                if let Some(exit_result) = self.check_exit() {
+                    return exit_result;
+                }
                 return Value::from_raw(self.ctx, result);
             }
 
@@ -2698,6 +2741,14 @@ impl Drop for Context {
                     p.set(std::ptr::null_mut());
                 }
             });
+        }
+
+        // clear any pending exit request — defensive safety net in case evaluation
+        // was interrupted before the eval loop could consume the flag.
+        EXIT_REQUESTED.with(|c| c.set(false));
+        let stashed = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
+        if !stashed.is_null() {
+            unsafe { ffi::sexp_release_object(self.ctx, stashed) };
         }
 
         // clear reader dispatch table so the next context on this thread
@@ -3983,8 +4034,7 @@ mod tests {
             .expect("sandboxed context");
         let r = ctx.evaluate("(import (tein process))");
         assert!(
-            r.is_err()
-                || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
+            r.is_err() || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
             "expected (tein process) to be blocked in default sandbox, got: {:?}",
             r
         );
