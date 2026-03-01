@@ -70,13 +70,13 @@ pub mod sandbox;
 #[cfg(feature = "json")]
 mod sexp_bridge;
 mod thread;
+#[cfg(feature = "time")]
+mod time;
 mod timeout;
 #[cfg(feature = "toml")]
 mod toml;
 #[cfg(feature = "uuid")]
 mod uuid;
-#[cfg(feature = "time")]
-mod time;
 mod value;
 
 pub use context::{Context, ContextBuilder};
