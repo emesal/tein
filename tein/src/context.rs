@@ -1729,6 +1729,7 @@ impl ContextBuilder {
 
                 // mark sandboxed so (tein file) trampolines apply policy
                 IS_SANDBOXED.with(|c| c.set(true));
+                crate::sandbox::register_vfs_shadows(); // inject shadow modules before gate is armed
 
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
@@ -7558,5 +7559,22 @@ mod tests {
         } else {
             panic!("expected Modules::Only");
         }
+    }
+
+    // --- VFS shadow tests ---
+
+    #[test]
+    fn test_scheme_repl_shadow_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // (scheme repl) in sandbox should resolve to our shadow
+        let r = ctx.evaluate(
+            "(import (scheme base) (scheme repl)) (procedure? interaction-environment)"
+        );
+        assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
     }
 }
