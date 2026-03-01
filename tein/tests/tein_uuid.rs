@@ -11,7 +11,11 @@ fn test_make_uuid_returns_string() {
     let ctx = ctx();
     ctx.evaluate("(import (tein uuid))").expect("import");
     let val = ctx.evaluate("(make-uuid)").expect("make-uuid");
-    assert!(matches!(val, Value::String(_)), "expected string, got {:?}", val);
+    assert!(
+        matches!(val, Value::String(_)),
+        "expected string, got {:?}",
+        val
+    );
 }
 
 #[test]
@@ -23,8 +27,16 @@ fn test_make_uuid_format() {
         assert_eq!(s.len(), 36, "uuid wrong length: {}", s);
         let parts: Vec<&str> = s.split('-').collect();
         assert_eq!(parts.len(), 5);
-        assert_eq!((parts[0].len(), parts[1].len(), parts[2].len(), parts[3].len(), parts[4].len()),
-                   (8, 4, 4, 4, 12));
+        assert_eq!(
+            (
+                parts[0].len(),
+                parts[1].len(),
+                parts[2].len(),
+                parts[3].len(),
+                parts[4].len()
+            ),
+            (8, 4, 4, 4, 12)
+        );
         assert!(parts[2].starts_with('4'), "not v4: {}", s);
     } else {
         panic!("expected string");
@@ -44,14 +56,20 @@ fn test_make_uuid_unique() {
 fn test_uuid_predicate_valid() {
     let ctx = ctx();
     ctx.evaluate("(import (tein uuid))").expect("import");
-    assert_eq!(ctx.evaluate("(uuid? (make-uuid))").unwrap(), Value::Boolean(true));
+    assert_eq!(
+        ctx.evaluate("(uuid? (make-uuid))").unwrap(),
+        Value::Boolean(true)
+    );
 }
 
 #[test]
 fn test_uuid_predicate_invalid_string() {
     let ctx = ctx();
     ctx.evaluate("(import (tein uuid))").expect("import");
-    assert_eq!(ctx.evaluate(r#"(uuid? "nope")"#).unwrap(), Value::Boolean(false));
+    assert_eq!(
+        ctx.evaluate(r#"(uuid? "nope")"#).unwrap(),
+        Value::Boolean(false)
+    );
 }
 
 #[test]
@@ -77,14 +95,18 @@ fn test_uuid_nil_value() {
 fn test_uuid_nil_is_valid() {
     let ctx = ctx();
     ctx.evaluate("(import (tein uuid))").expect("import");
-    assert_eq!(ctx.evaluate("(uuid? uuid-nil)").unwrap(), Value::Boolean(true));
+    assert_eq!(
+        ctx.evaluate("(uuid? uuid-nil)").unwrap(),
+        Value::Boolean(true)
+    );
 }
 
 #[test]
 fn test_uuid_docs() {
     let ctx = ctx();
     ctx.evaluate("(import (tein uuid))").expect("import uuid");
-    ctx.evaluate("(import (tein uuid docs))").expect("import uuid docs");
+    ctx.evaluate("(import (tein uuid docs))")
+        .expect("import uuid docs");
     ctx.evaluate("(import (tein docs))").expect("import docs");
     let desc = ctx.evaluate("(describe uuid-docs)").expect("describe");
     if let Value::String(s) = desc {

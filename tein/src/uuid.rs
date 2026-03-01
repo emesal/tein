@@ -10,6 +10,7 @@ use tein_macros::tein_module;
 #[tein_module("uuid")]
 pub(crate) mod uuid_impl {
     /// the nil UUID (all zeros)
+    #[allow(dead_code)] // value is embedded in macro-generated VFS content, not referenced directly
     #[tein_const]
     pub const UUID_NIL: &str = "00000000-0000-0000-0000-000000000000";
 
