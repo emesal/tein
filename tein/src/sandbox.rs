@@ -1026,6 +1026,61 @@ pub(crate) fn unexported_stubs(allowed_modules: &[String]) -> Vec<(&'static str,
     stubs
 }
 
+/// Module set configuration for sandboxed contexts.
+///
+/// Controls which VFS modules are importable when using [`ContextBuilder::sandboxed()`].
+/// Dependencies are always resolved automatically from the registry.
+///
+/// # examples
+///
+/// ```
+/// use tein::{Context, sandbox::Modules};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // allow only scheme/base
+/// let ctx = Context::builder()
+///     .standard_env()
+///     .sandboxed(Modules::only(&["scheme/base"]))
+///     .build()?;
+/// let result = ctx.evaluate("(import (scheme base)) (+ 1 2)")?;
+/// assert_eq!(result, tein::Value::Integer(3));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+pub enum Modules {
+    /// conservative safe set — default for sandboxed contexts.
+    ///
+    /// includes all modules marked `default_safe: true` in the registry,
+    /// with transitive deps resolved. excludes `scheme/eval`, `scheme/repl`,
+    /// `tein/process`, and other environment-escape modules.
+    Safe,
+    /// all vetted modules in the registry (superset of `Safe`).
+    All,
+    /// syntax only — no modules, not even `scheme/base`.
+    ///
+    /// `import` is still available as syntax (so code can attempt imports),
+    /// but all module imports will be rejected by the VFS gate.
+    None,
+    /// custom explicit module list; transitive deps resolved automatically.
+    Only(Vec<String>),
+}
+
+impl Modules {
+    /// construct a custom module list from module path strings.
+    ///
+    /// transitive dependencies are resolved automatically at build time.
+    pub fn only(modules: &[&str]) -> Self {
+        Modules::Only(modules.iter().map(|s| s.to_string()).collect())
+    }
+}
+
+impl Default for Modules {
+    fn default() -> Self {
+        Modules::Safe
+    }
+}
+
 /// check whether a cargo feature gate is satisfied at runtime.
 ///
 /// in sandbox.rs this is a compile-time check. build.rs uses the same check.

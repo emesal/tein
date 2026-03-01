@@ -1498,6 +1498,9 @@ pub struct ContextBuilder {
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
     vfs_gate: Option<VfsGate>,
+    /// new module-level sandbox configuration (task 6+).
+    /// when set, activates the registry-based sandbox path in build().
+    sandbox_modules: Option<crate::sandbox::Modules>,
 }
 
 impl ContextBuilder {
@@ -1598,6 +1601,39 @@ impl ContextBuilder {
             .preset(&STRING_PORTS)
             .preset(&STDOUT_ONLY)
             .preset(&EXCEPTIONS)
+    }
+
+    /// Configure module-level sandboxing.
+    ///
+    /// Activates the registry-based sandbox: builds a null env with only
+    /// `import` syntax, sets up the VFS gate for the given module set,
+    /// and registers UX stubs for all excluded module exports so scheme
+    /// code gets a clear `(import (module path))` hint instead of an
+    /// "undefined variable" error.
+    ///
+    /// **Requires** `.standard_env()` — sandboxed contexts need the full
+    /// env loaded first before restriction.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .build()?;
+    ///
+    /// // after importing, scheme/base ops work
+    /// let result = ctx.evaluate("(import (scheme base)) (+ 1 2)")?;
+    /// assert_eq!(result, tein::Value::Integer(3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sandboxed(mut self, modules: crate::sandbox::Modules) -> Self {
+        self.sandbox_modules = Some(modules);
+        self
     }
 
     /// Allow file reading from paths under the given prefixes.
@@ -2098,6 +2134,7 @@ impl Context {
             file_read_prefixes: None,
             file_write_prefixes: None,
             vfs_gate: None,
+            sandbox_modules: None,
         }
     }
 
@@ -7430,6 +7467,38 @@ mod tests {
         match result {
             Value::String(msg) => assert!(msg.contains("toml-parse")),
             other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    // --- task 6: Modules enum + sandboxed() builder ---
+
+    #[test]
+    fn test_sandboxed_builder_compiles() {
+        use crate::sandbox::Modules;
+        // sandboxed() returns a ContextBuilder — just check it compiles and doesn't panic.
+        // behavioural test is in task 7 once build() is wired up.
+        let _builder = Context::builder().standard_env().sandboxed(Modules::Safe);
+        let _builder2 = Context::builder().standard_env().sandboxed(Modules::All);
+        let _builder3 = Context::builder().standard_env().sandboxed(Modules::None);
+        let _builder4 = Context::builder().standard_env().sandboxed(Modules::only(&["scheme/base"]));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_safe_default() {
+        use crate::sandbox::Modules;
+        let m: Modules = Default::default();
+        assert!(matches!(m, Modules::Safe));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_only_constructor() {
+        use crate::sandbox::Modules;
+        let m = Modules::only(&["scheme/base", "scheme/write"]);
+        if let Modules::Only(list) = m {
+            assert!(list.contains(&"scheme/base".to_string()));
+            assert!(list.contains(&"scheme/write".to_string()));
+        } else {
+            panic!("expected Modules::Only");
         }
     }
 }
