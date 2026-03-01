@@ -1,0 +1,147 @@
+# VFS module registry refactor — design
+
+issue: #95
+
+## problem
+
+the VFS module registry (`VFS_MODULES_SAFE` / `VFS_MODULES_ALL` in `sandbox.rs`) lists ~80
+modules, but only ~35 have their `.sld`/`.scm` files actually embedded in the VFS
+(`build.rs` `VFS_FILES`). the rest are phantom entries — in the allowlist but not
+importable, because chibi's module resolver only searches `/vfs/lib`.
+
+this means `(import (srfi 1))` silently fails in a sandbox despite being in
+`VFS_MODULES_SAFE`. the entire module allowlist system gives a false sense of functionality.
+
+## root cause
+
+`VFS_FILES` (build.rs) and `VFS_MODULES_SAFE`/`VFS_MODULES_ALL` (sandbox.rs) evolved
+independently. modules were added to the registry without embedding their files, or the
+registry was built aspirationally. no test validates that registry entries are importable.
+
+## design
+
+### single source of truth: `VfsRegistry`
+
+one master registry replaces both `VFS_MODULES_SAFE` and `VFS_MODULES_ALL`. each entry
+specifies:
+
+```rust
+struct VfsEntry {
+    /// module path, e.g. "scheme/char", "srfi/1"
+    path: &'static str,
+    /// transitive module deps (resolved at builder time)
+    deps: &'static [&'static str],
+    /// files to embed: .sld and any .scm includes, relative to chibi lib/
+    files: &'static [&'static str],
+    /// whether this module is in the default safe set
+    default_safe: bool,
+}
+```
+
+`files` is the key addition — it declares exactly which files must be in the VFS for
+this module to work. `build.rs` reads this registry (or a generated manifest) to know
+what to embed. "on the list" = "files embedded" = "importable".
+
+modules that are dynamically generated (uuid, time) or feature-gated (json, toml) are
+handled separately — they register into the dynamic VFS at runtime and have their own
+feature-conditional registry entries.
+
+### builder API
+
+the builder API matches the user's mental model:
+
+```rust
+// empty sandbox — no modules available
+ContextBuilder::new().standard_env().allow_no_modules()
+
+// default safe set
+ContextBuilder::new().standard_env().safe()
+
+// all vetted modules
+ContextBuilder::new().standard_env().safe().allow_all_modules()
+
+// custom: default + extras
+ContextBuilder::new().standard_env().safe().allow_module("tein/process")
+
+// custom: specific modules only
+ContextBuilder::new().standard_env().allow_no_modules().allow_module("srfi/1")
+```
+
+`allow_module()` automatically resolves transitive deps from the registry.
+
+### where the registry lives
+
+the registry must be accessible to both `sandbox.rs` (runtime) and `build.rs` (compile
+time). options:
+
+**option A: shared const in sandbox.rs, build.rs reads it.**
+build.rs can `include!()` a shared file, or we generate a manifest file. slightly awkward
+because build.rs runs before the crate is compiled.
+
+**option B: registry in a separate file, both import it.**
+a `vfs_registry.rs` that's `include!`d by both sandbox.rs and build.rs. pure const data,
+no dependencies.
+
+**option C: build.rs generates the file list from the registry at compile time.**
+the registry lives in sandbox.rs. build.rs generates a manifest by parsing it (or we use
+a build-time data file). build.rs collects all `files` arrays and embeds them.
+
+recommend **option B** — a shared data file keeps the single-source-of-truth principle
+clean. both sandbox.rs and build.rs include the same file.
+
+### c static library entries
+
+some modules need C backends (chibi/ast, chibi/io, srfi/39, srfi/69, srfi/151,
+tein/reader, tein/macro). these are currently in `CLIB_ENTRIES` in build.rs. they should
+be part of the registry too, so the relationship between a module's .sld, .scm, and .c
+files is explicit in one place.
+
+### what about modules NOT in the registry?
+
+modules not in the registry are not embeddable and not importable in sandboxes. in
+unsandboxed contexts (VFS gate off), chibi can still find them on the filesystem if
+`CHIBI_MODULE_PATH` is set or if they're in `./lib/`. this is fine — the registry only
+governs sandbox behaviour.
+
+### migration path
+
+1. audit every module in current `VFS_MODULES_SAFE` + `VFS_MODULES_ALL`
+2. for each, determine the files needed (.sld + included .scm files)
+3. build the unified registry with `files` arrays
+4. update build.rs to read file lists from the registry
+5. remove `VFS_FILES` — it's now derived from the registry
+6. update builder API
+7. add integration test: for every registry entry, verify `(import (...))` works in sandbox
+
+### file inventory needed
+
+for each module in the registry, we need to know exactly which files chibi loads. an
+`.sld` file may `(include "foo.scm")` which may itself have deps. the safest approach:
+parse each `.sld` for `(include ...)` directives and collect transitively.
+
+build.rs could do this automatically: given a module path, find the `.sld`, parse its
+includes, and embed all referenced files. this eliminates manual file tracking entirely.
+
+### dynamic / feature-gated modules
+
+- **uuid, time**: generated by `#[tein_module]`, registered at runtime via
+  `tein_vfs_register()`. not in the shared registry's `files` arrays. instead, the
+  registry marks them as `generated = true` and build.rs skips them.
+- **json, toml**: feature-gated in cargo. the registry marks them with a feature flag.
+  build.rs conditionally includes their files.
+
+### VFS shadow modules (future, #91)
+
+the shadow system (dynamic VFS registration of replacement `.sld` files) sits on top of
+this foundation. once the registry is solid, shadows are just additional dynamic VFS
+entries registered during sandboxed context build.
+
+## tests
+
+- for every module in the registry: `(import (...))` succeeds in a sandboxed context
+- for every module NOT in the registry: `(import (...))` fails in a sandboxed context
+- `allow_module("X")` makes X and its transitive deps importable
+- `allow_no_modules()` results in no imports possible
+- default safe set matches documented expectations
+- feature-gated modules only available when feature is enabled
+- dynamic modules (uuid, time) available when feature is enabled
