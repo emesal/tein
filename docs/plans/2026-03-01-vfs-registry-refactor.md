@@ -36,24 +36,16 @@ tasks are ordered for incremental compilation — each task produces a compiling
 
 ## progress notes
 
-**batch 4 in progress — tasks 10 and 11 mostly done, need to verify + commit.**
+**batch 4 complete — all tasks done, 699/699 tests pass.**
 
-### batch 4 checkpoint notes
+### batch 4 notes
 
-- task 10 complete: old preset system removed from sandbox.rs (VfsModule, VFS_MODULES_SAFE/ALL, resolve_module_deps, vfs_safe_allowlist/all, Preset, all 16 preset consts, ALL_PRESETS, ALWAYS_STUB, sandbox_stub); old builder methods (preset/allow/safe/pure_computation) removed from context.rs; old allowed_primitives build path removed; has_io_wrappers removed from Context struct
-- task 11 mostly complete: all tests in context.rs, scheme_tests.rs, tein_uuid.rs, tein_time.rs migrated to new API. HOWEVER: `cargo check -p tein` passes clean but `just test` has NOT been run yet — context is about to be cleared
-- key migration notes: .safe() → .sandboxed(Modules::Safe), .preset(&ARITHMETIC) bare (no standard_env) → dropped (no equivalent, tests rewritten), file IO tests now use .standard_env().sandboxed(Modules::Safe).file_read(); eval-escape tests rewritten to test scheme/eval import blocking
-- `#[cfg_attr(not(test), allow(dead_code))]` on `module_exports` in sandbox.rs — only used in test module
-- task 11 still needs: run `just test` to verify all tests pass, fix any failures
-- task 12 not started: examples/sandbox.rs, AGENTS.md, README.md, guide.md, ARCHITECTURE.md, module docstrings
-
-### next session
-
-bootstrap: this plan file + branch `feature/refactor/vfs-registry-2603`.
-1. run `just test` — expect some failures due to test behavior changes (IO tests now need `(import (scheme base))` before `(import (scheme file))`, etc.)
-2. fix any test failures
-3. commit task 11
-4. start task 12 (examples + docs)
+- task 10 complete: old preset system removed from sandbox.rs and context.rs
+- task 11 complete: all tests migrated to new Modules API. key fixes needed during verification:
+  - `test_ux_stub_binding_hint`: `(map + '(1 2 3) '(10 20 30))` → `(map 1)` — calling `map` with `+` as arg triggers the `+` stub during arg eval, producing confusing errors instead of the `map` stub error
+  - file IO tests: `(import (scheme file))` is blocked by VFS gate (not in safe set); wrappers are in env directly; `(scheme read)` provides read/close-input-port
+  - step_limit for sandboxed contexts must be generous (5_000_000+) when `(import (scheme base))` is called under the limit — module loading consumes many steps
+- task 12 complete: sandbox.rs example rewritten, AGENTS.md/README.md/guide.md/ARCHITECTURE.md updated, all preset references removed from user-facing docs
 
 **batch 3 complete (tasks 6–9).**
 
