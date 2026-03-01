@@ -230,6 +230,10 @@ unsafe extern "C" {
     // runtime VFS registration (tein_shim.c dynamic VFS table)
     pub fn tein_vfs_register(key: *const c_char, content: *const c_char, length: c_uint);
     pub fn tein_vfs_clear_dynamic();
+    /// look up a VFS path and return a pointer to its content and length.
+    ///
+    /// returns null if the path is not registered in the VFS (static or dynamic).
+    pub fn tein_vfs_lookup(full_path: *const c_char, out_length: *mut c_uint) -> *const c_char;
 }
 
 // convenience wrappers that call our shim layer
@@ -473,6 +477,21 @@ pub unsafe fn get_void() -> sexp {
     unsafe { tein_get_void() }
 }
 
+/// check if `x` is the void object.
+#[inline]
+pub unsafe fn sexp_voidp(x: sexp) -> c_int {
+    // chibi defines SEXP_VOID as a tagged constant; compare directly.
+    unsafe { if tein_get_void() == x { 1 } else { 0 } }
+}
+
+/// check if `x` is truthy (anything except `#f`).
+///
+/// chibi's `sexp_truep(x)` = `(x != SEXP_FALSE)`.
+#[inline]
+pub unsafe fn sexp_truep(x: sexp) -> c_int {
+    unsafe { if tein_get_false() != x { 1 } else { 0 } }
+}
+
 #[inline]
 pub unsafe fn sexp_c_str(ctx: sexp, s: *const c_char, len: sexp_sint_t) -> sexp {
     unsafe { sexp_c_string(ctx, s, len) }
@@ -633,6 +652,24 @@ pub unsafe fn sexp_preserve_object(ctx: sexp, x: sexp) {
 #[inline]
 pub unsafe fn sexp_release_object(ctx: sexp, x: sexp) {
     unsafe { tein_sexp_release_object(ctx, x) }
+}
+
+/// look up a VFS path, returning the embedded content as a byte slice.
+///
+/// returns `None` if the path is not in the VFS. the returned slice borrows
+/// from static (compiled-in) or thread-local (dynamic) storage and is valid
+/// for the lifetime of the context.
+#[inline]
+pub unsafe fn vfs_lookup(path: &std::ffi::CStr) -> Option<&[u8]> {
+    unsafe {
+        let mut len: c_uint = 0;
+        let ptr = tein_vfs_lookup(path.as_ptr(), &mut len);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::slice::from_raw_parts(ptr as *const u8, len as usize))
+        }
+    }
 }
 
 // fuel control
