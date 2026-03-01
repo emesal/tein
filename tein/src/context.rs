@@ -3972,6 +3972,43 @@ mod tests {
         assert!(err.is_err(), "file io should be unavailable in safe preset");
     }
 
+    #[test]
+    fn test_tein_process_blocked_by_default_sandbox() {
+        let ctx = Context::builder()
+            .standard_env()
+            .safe()
+            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        let r = ctx.evaluate("(import (tein process))");
+        assert!(
+            r.is_err()
+                || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
+            "expected (tein process) to be blocked in default sandbox, got: {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_tein_process_allowed_with_allow_module() {
+        let ctx = Context::builder()
+            .standard_env()
+            .safe()
+            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .allow_module("tein/process")
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        // module import should succeed once trampolines are registered
+        let r = ctx.evaluate("(import (tein process))");
+        assert!(
+            r.is_ok(),
+            "expected (tein process) import to succeed: {:?}",
+            r
+        );
+    }
+
     // --- phase 3: timeout context ---
 
     #[test]

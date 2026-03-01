@@ -203,11 +203,14 @@ thread_local! {
     pub(crate) static MODULE_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// minimal safe set — tein modules + core r7rs pure-computation modules.
+/// minimal safe set — safe tein modules + core r7rs pure-computation modules.
 ///
 /// used as the default allowlist for sandboxed contexts. each entry is a
-/// module path prefix matched against the path after `/vfs/lib/` — so
-/// `"tein/"` matches all `(tein ...)` modules.
+/// module path prefix matched against the path after `/vfs/lib/`.
+///
+/// tein modules are listed explicitly rather than via a `"tein/"` blanket
+/// because `(tein process)` is intentionally excluded — `command-line` leaks
+/// host argv. use `.allow_module("tein/process")` or `.vfs_all()` to opt in.
 ///
 /// **excluded r7rs modules and rationale:**
 /// - `scheme/file` — filesystem access (`open-input-file`, `with-input-from-file`, etc.)
@@ -220,7 +223,16 @@ thread_local! {
 /// to add entries, or [`ContextBuilder::vfs_all()`](crate::ContextBuilder::vfs_all)
 /// to allow all VFS modules.
 pub const SAFE_MODULES: &[&str] = &[
-    "tein/",
+    // tein modules (explicit — tein/process excluded, leaks host argv)
+    "tein/foreign",
+    "tein/reader",
+    "tein/macro",
+    "tein/test",
+    "tein/docs",
+    "tein/json",
+    "tein/toml",
+    "tein/file",
+    "tein/load",
     // r7rs standard libraries (safe subset — excludes file, process-context, load, r5rs)
     "scheme/base",
     "scheme/bitwise",
