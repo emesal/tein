@@ -184,6 +184,12 @@ fn test_scheme_tein_uuid() {
     run_scheme_test(include_str!("scheme/tein_uuid.scm"));
 }
 
+#[cfg(feature = "time")]
+#[test]
+fn test_scheme_tein_time() {
+    run_scheme_test(include_str!("scheme/tein_time.scm"));
+}
+
 #[test]
 fn test_scheme_tein_file() {
     run_scheme_test(include_str!("scheme/tein_file.scm"));
