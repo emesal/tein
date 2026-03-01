@@ -238,6 +238,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             "lib/scheme/char/full.scm",
             "lib/scheme/char/special-casing.scm",
             "lib/scheme/char/case-offsets.scm",
+            "lib/scheme/char/ascii.scm",
             "lib/scheme/digit-value.scm",
         ],
         clib: None,
@@ -581,7 +582,18 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "srfi/1/immutable",
         deps: &[],
-        files: &["lib/srfi/1/immutable.sld"],
+        files: &[
+            "lib/srfi/1/immutable.sld",
+            "lib/srfi/1/predicates.scm",
+            "lib/srfi/1/selectors.scm",
+            "lib/srfi/1/search.scm",
+            "lib/srfi/1/misc.scm",
+            "lib/srfi/1/constructors.scm",
+            "lib/srfi/1/fold.scm",
+            "lib/srfi/1/deletion.scm",
+            "lib/srfi/1/alists.scm",
+            "lib/srfi/1/lset.scm",
+        ],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -661,7 +673,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "srfi/27",
         deps: &[],
-        files: &["lib/srfi/27.sld"],
+        files: &["lib/srfi/27.sld", "lib/srfi/27/constructors.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -696,7 +708,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "srfi/41",
         deps: &["scheme/base", "scheme/lazy", "srfi/1"],
-        files: &["lib/srfi/41.sld"],
+        files: &["lib/srfi/41.sld", "lib/srfi/41.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -722,7 +734,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "srfi/95",
         deps: &[],
-        files: &["lib/srfi/95.sld"],
+        files: &["lib/srfi/95.sld", "lib/srfi/95/sort.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -901,7 +913,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "srfi/135/kernel8",
         deps: &["scheme/base"],
-        files: &["lib/srfi/135/kernel8.sld"],
+        files: &["lib/srfi/135/kernel8.sld", "lib/srfi/135/kernel8.body.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,

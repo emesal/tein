@@ -10,6 +10,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+include!("src/vfs_registry.rs");
+
 const CHIBI_REPO: &str = "https://github.com/emesal/chibi-scheme.git";
 const CHIBI_BRANCH: &str = "emesal-tein";
 
@@ -185,19 +187,144 @@ fn fetch_chibi() -> String {
     chibi_dir.to_str().expect("non-utf8 path").to_string()
 }
 
+/// validate that each embedded `.sld` file's `(include ...)` directives reference
+/// only files already present in that entry's `files` list.
+///
+/// panics with a clear message if a referenced file is missing from the registry entry.
+/// this catches registry drift when upstream chibi-scheme adds or renames included files.
+fn validate_sld_includes(chibi_dir: &str) {
+    for entry in VFS_REGISTRY
+        .iter()
+        .filter(|e| e.source == VfsSource::Embedded)
+    {
+        // find the .sld file in this entry's files list
+        let sld_rel = match entry.files.iter().find(|f| f.ends_with(".sld")) {
+            Some(f) => *f,
+            None => continue, // no .sld, nothing to validate
+        };
+
+        let sld_path = format!("{chibi_dir}/{sld_rel}");
+        let source = match fs::read_to_string(&sld_path) {
+            Ok(s) => s,
+            Err(e) => panic!("failed to read {sld_path}: {e}"),
+        };
+
+        // derive the directory containing the .sld to resolve relative includes
+        let sld_dir = Path::new(sld_rel)
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_str()
+            .expect("non-utf8 sld dir");
+
+        // collect all (include "...") references in the .sld
+        // this is a line-based scan: look for `"filename.scm"` after `include`
+        let referenced_files = collect_include_files(&source, sld_dir);
+
+        // referenced files come back as paths relative to the chibi lib/ dir
+        // (e.g. "tein/foreign.scm" from sld_dir="lib/tein" + file="foreign.scm"
+        //  becomes "lib/tein/foreign.scm" after collection).
+        // compare directly against the entry's files list.
+        for ref_file in &referenced_files {
+            if !entry.files.contains(&ref_file.as_str()) {
+                panic!(
+                    "registry validation failed for '{}': \
+                     .sld references '{}' but it is not listed in the entry's files array.\n\
+                     add '{}' to the files list for '{}'.",
+                    entry.path, ref_file, ref_file, entry.path
+                );
+            }
+        }
+    }
+}
+
+/// extract file paths from `(include ...)` and `(include-ci ...)` directives.
+///
+/// only handles the `.scm` include form (not `include-shared`, which embeds C `.so`).
+/// resolves relative to `sld_dir` (the directory containing the `.sld` file).
+fn collect_include_files(source: &str, sld_dir: &str) -> Vec<String> {
+    use tein_sexp::{SexpKind, parser};
+
+    let mut result = Vec::new();
+
+    let sexps = match parser::parse_all(source) {
+        Ok(s) => s,
+        Err(_) => return result, // parse error — skip validation for this file
+    };
+
+    // recursively walk all sexps collecting include strings
+    fn walk(sexp: &tein_sexp::Sexp, sld_dir: &str, out: &mut Vec<String>) {
+        match &sexp.kind {
+            SexpKind::List(items) => {
+                // check if this is (include "...") or (include-ci "...")
+                if let Some(first) = items.first() {
+                    if let SexpKind::Symbol(name) = &first.kind {
+                        if name == "include" || name == "include-ci" {
+                            for arg in items.iter().skip(1) {
+                                if let SexpKind::String(file) = &arg.kind {
+                                    // resolve relative to sld_dir
+                                    let resolved = if sld_dir.is_empty() {
+                                        file.clone()
+                                    } else {
+                                        format!("{sld_dir}/{file}")
+                                    };
+                                    out.push(resolved);
+                                }
+                            }
+                            return; // don't recurse further into include args
+                        }
+                    }
+                }
+                // recurse into all list items
+                for item in items {
+                    walk(item, sld_dir, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for sexp in &sexps {
+        walk(sexp, sld_dir, &mut result);
+    }
+
+    result
+}
+
+/// check whether a cargo feature is enabled at build time (mirrors sandbox.rs)
+fn feature_enabled(feature: Option<&str>) -> bool {
+    match feature {
+        None => true,
+        Some("json") => cfg!(feature = "json"),
+        Some("toml") => cfg!(feature = "toml"),
+        Some("uuid") => cfg!(feature = "uuid"),
+        Some("time") => cfg!(feature = "time"),
+        Some(f) => {
+            // unknown feature name — conservatively include
+            eprintln!("cargo:warning=unknown feature gate in VFS_REGISTRY: {f}");
+            true
+        }
+    }
+}
+
+/// bootstrap files embedded in the VFS but not in the registry (not importable modules)
+const BOOTSTRAP_FILES: &[&str] = &["lib/init-7.scm", "lib/meta-7.scm"];
+
 fn main() {
     let chibi_dir = fetch_chibi();
     let include_dir = format!("{chibi_dir}/include");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
 
-    // build the combined VFS file list (base + feature-gated modules)
-    let mut vfs_files: Vec<&str> = VFS_FILES.to_vec();
-    if cfg!(feature = "json") {
-        vfs_files.extend_from_slice(VFS_FILES_JSON);
-    }
-    if cfg!(feature = "toml") {
-        vfs_files.extend_from_slice(VFS_FILES_TOML);
-    }
+    // build the combined VFS file list from the registry (replaces VFS_FILES + feature gates)
+    let mut vfs_files: Vec<&str> = BOOTSTRAP_FILES.to_vec();
+    vfs_files.extend(
+        VFS_REGISTRY
+            .iter()
+            .filter(|e| e.source == VfsSource::Embedded && feature_enabled(e.feature))
+            .flat_map(|e| e.files.iter().copied()),
+    );
+
+    // validate that .sld files reference only files present in their entry's files list
+    validate_sld_includes(&chibi_dir);
 
     // generate install.h (with VFS module path) into OUT_DIR/chibi/
     generate_install_h(&out_dir);
@@ -288,8 +415,8 @@ fn main() {
     for f in &vfs_files {
         println!("cargo:rerun-if-changed={chibi_dir}/{f}");
     }
-    for &(c_file, _, _) in CLIB_ENTRIES {
-        println!("cargo:rerun-if-changed={chibi_dir}/{c_file}");
+    for entry in VFS_REGISTRY.iter().filter_map(|e| e.clib.as_ref()) {
+        println!("cargo:rerun-if-changed={chibi_dir}/{}", entry.source);
     }
 }
 
@@ -378,24 +505,31 @@ fn generate_clibs(chibi_dir: &str, out_dir: &str) {
     let out_path = Path::new(out_dir).join("tein_clibs.c");
     let mut out = String::with_capacity(4096);
 
+    let clib_entries: Vec<&ClibEntry> = VFS_REGISTRY
+        .iter()
+        .filter_map(|e| e.clib.as_ref())
+        .collect();
+
     out.push_str("// generated by build.rs — do not edit\n\n");
     out.push_str("#include <chibi/eval.h>\n\n");
 
     // include each C library with a unique init function name
-    for &(c_file, suffix, _) in CLIB_ENTRIES {
+    for entry in &clib_entries {
         out.push_str(&format!(
-            "#define sexp_init_library sexp_init_lib_{suffix}\n"
+            "#define sexp_init_library sexp_init_lib_{}\n",
+            entry.init_suffix
         ));
-        out.push_str(&format!("#include \"{chibi_dir}/{c_file}\"\n"));
+        out.push_str(&format!("#include \"{chibi_dir}/{}\"\n", entry.source));
         out.push_str("#undef sexp_init_library\n\n");
     }
 
     // the lookup table that chibi's eval.c searches via sexp_find_static_library.
     // init functions are already defined by the #include pattern above.
     out.push_str("\nstruct sexp_library_entry_t tein_static_libraries_array[] = {\n");
-    for &(_, suffix, key) in CLIB_ENTRIES {
+    for entry in &clib_entries {
         out.push_str(&format!(
-            "    {{ \"{key}\", (sexp_init_proc)sexp_init_lib_{suffix} }},\n"
+            "    {{ \"{}\", (sexp_init_proc)sexp_init_lib_{} }},\n",
+            entry.vfs_key, entry.init_suffix
         ));
     }
     out.push_str("    { NULL, NULL }\n");

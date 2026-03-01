@@ -45,3 +45,4 @@ debug-chibi = []
 
 [build-dependencies]
 cc = "1.0"
+tein-sexp = { path = "../tein-sexp" }
