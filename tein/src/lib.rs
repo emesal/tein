@@ -41,6 +41,7 @@
 //! |---------|---------|-------------|
 //! | `json`  | yes     | Enables `(tein json)` module with `json-parse` and `json-stringify`. Pulls in `serde` + `serde_json`. |
 //! | `toml`  | yes     | Enables `(tein toml)` module with `toml-parse` and `toml-stringify`. Pulls in `toml` crate. |
+//! | `uuid`  | yes     | Enables `(tein uuid)` module with `make-uuid`, `uuid?`, and `uuid-nil`. Pulls in `uuid` crate. |
 //!
 //! Disable default features with `default-features = false` for a minimal build
 //! without format-module dependencies.
@@ -53,6 +54,8 @@
 //! thread and proxy requests over channels.
 
 #![warn(missing_docs)]
+
+extern crate self as tein;
 
 mod context;
 mod error;
@@ -69,6 +72,8 @@ mod thread;
 mod timeout;
 #[cfg(feature = "toml")]
 mod toml;
+#[cfg(feature = "uuid")]
+mod uuid;
 mod value;
 
 pub use context::{Context, ContextBuilder};

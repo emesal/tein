@@ -181,7 +181,10 @@ impl Value {
     ///
     /// # Safety
     /// ctx and raw must be valid pointers from Chibi-Scheme.
-    pub(crate) unsafe fn from_raw(ctx: ffi::sexp, raw: ffi::sexp) -> Result<Self> {
+    ///
+    /// `#[doc(hidden)]` — not part of the stable public API; exposed for proc-macro generated code.
+    #[doc(hidden)]
+    pub unsafe fn from_raw(ctx: ffi::sexp, raw: ffi::sexp) -> Result<Self> {
         unsafe { Self::from_raw_depth(ctx, raw, 0) }
     }
 

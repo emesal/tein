@@ -529,6 +529,10 @@ fn generate_module_internal(info: ModuleInfo) -> syn::Result<proc_macro2::TokenS
     Ok(quote! {
         #(#mod_attrs)*
         #mod_vis mod #mod_name {
+            // bring Value into scope so fn bodies inside #[tein_module] can use
+            // `Value::String(_)` etc. without full path qualification.
+            #[allow(unused_imports)]
+            use tein::Value;
             #(#items)*
             #(#foreign_impls)*
             #(#fn_wrappers)*
@@ -1730,6 +1734,28 @@ fn gen_arg_extraction(arg_name: &syn::Ident, ty: &Type, index: usize) -> proc_ma
             };
             __tein_current_args = tein::raw::sexp_cdr(__tein_current_args);
         },
+        // accept any scheme value as a tein::Value — no type check needed,
+        // from_raw converts whatever sexp chibi passes. on conversion failure
+        // (shouldn't happen for valid sexps) returns a descriptive error string
+        // so LLM callers get actionable diagnostics rather than silent Nil.
+        "Value" => quote! {
+            let #arg_name: tein::Value = {
+                let raw = tein::raw::sexp_car(__tein_current_args);
+                // safety: ctx and raw come from chibi-scheme internals
+                match unsafe { tein::Value::from_raw(ctx, raw) } {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let msg = format!(
+                            "failed to convert argument '{}': {}",
+                            stringify!(#arg_name), e
+                        );
+                        let c_msg = ::std::ffi::CString::new(msg.clone()).unwrap();
+                        return tein::raw::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as tein::raw::sexp_sint_t);
+                    }
+                }
+            };
+            __tein_current_args = tein::raw::sexp_cdr(__tein_current_args);
+        },
         _ => {
             let err = format!("unsupported argument type: {}", type_str);
             quote! { compile_error!(#err); }
@@ -1765,32 +1791,37 @@ fn gen_return_conversion(
     }
 }
 
-fn generate_scheme_fn(input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn generate_scheme_fn(mut input: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &input.sig.ident;
     let wrapper_name = syn::Ident::new(&format!("__tein_{}", fn_name), fn_name.span());
 
-    // parse arguments
+    // parse arguments; rewrite bare `Value` types to `tein::Value` so the emitted fn
+    // compiles in any calling crate (the macro can't rely on `Value` being in scope)
     let mut arg_names = Vec::new();
     let mut arg_types = Vec::new();
 
-    for arg in &input.sig.inputs {
+    for arg in input.sig.inputs.iter_mut() {
         match arg {
             FnArg::Typed(pat_type) => {
                 let name = match pat_type.pat.as_ref() {
                     Pat::Ident(pat_ident) => pat_ident.ident.clone(),
                     _ => {
                         return Err(syn::Error::new_spanned(
-                            arg,
+                            &*pat_type,
                             "expected simple argument name",
                         ));
                     }
                 };
+                // rewrite bare `Value` → `tein::Value` in the emitted fn signature
+                if type_name_str(&pat_type.ty).as_deref() == Some("Value") {
+                    *pat_type.ty = syn::parse_quote! { tein::Value };
+                }
                 arg_names.push(name);
                 arg_types.push(pat_type.ty.as_ref().clone());
             }
             FnArg::Receiver(_) => {
                 return Err(syn::Error::new_spanned(
-                    arg,
+                    &*arg,
                     "tein_fn does not support self parameters",
                 ));
             }
