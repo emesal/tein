@@ -54,6 +54,8 @@
 
 #![warn(missing_docs)]
 
+extern crate self as tein;
+
 mod context;
 mod error;
 mod ffi;
