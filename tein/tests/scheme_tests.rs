@@ -178,6 +178,12 @@ fn test_scheme_toml() {
     run_scheme_test(include_str!("scheme/toml.scm"));
 }
 
+#[cfg(feature = "uuid")]
+#[test]
+fn test_scheme_tein_uuid() {
+    run_scheme_test(include_str!("scheme/tein_uuid.scm"));
+}
+
 #[test]
 fn test_scheme_tein_file() {
     run_scheme_test(include_str!("scheme/tein_file.scm"));
