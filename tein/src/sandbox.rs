@@ -5,7 +5,7 @@
 //! 1. **Module restriction** — importable modules via [`Modules`] + [`ContextBuilder::sandboxed()`](crate::ContextBuilder::sandboxed)
 //! 2. **Step limits** — cap VM instructions per evaluation
 //! 3. **File IO policy** — allowlist filesystem paths for reading/writing
-//! 4. **VFS gate** — restrict `(import ...)` to vetted VFS modules via [`VfsGate`]
+//! 4. **VFS gate** — restrict `(import ...)` to vetted VFS modules; automatic when using `sandboxed()`
 //!
 //! # Module sets
 //!
@@ -40,13 +40,11 @@
 //!
 //! # VFS gate
 //!
-//! Module imports in sandboxed contexts are restricted by [`VfsGate`]:
+//! Module imports in sandboxed contexts are restricted automatically:
 //!
-//! - **`Off`** — no restriction (unsandboxed contexts).
-//! - **`Allow(vec)`** (default for sandboxed) — only listed module prefixes pass.
-//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module),
-//!   widen with [`.vfs_gate_all()`](crate::ContextBuilder::vfs_gate_all),
-//!   or start empty with [`.vfs_gate_none()`](crate::ContextBuilder::vfs_gate_none).
+//! - unsandboxed contexts — no restriction; VFS + filesystem modules all pass.
+//! - sandboxed contexts — only modules in the resolved `Modules` allowlist pass.
+//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module).
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -110,45 +108,16 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
-/// controls which VFS modules can be imported via `(import ...)`.
-///
-/// ## variants
-///
-/// | gate | what passes | use case |
-/// |------|------------|----------|
-/// | `Off` | VFS + filesystem — no restriction | unsandboxed contexts |
-/// | `Allow(vec)` | only listed module prefixes (must be in VFS) | sandboxed contexts |
-///
-/// ## VFS safety contract
-///
-/// VFS modules are curated to ensure no module can bypass tein's safety layers
-/// (FsPolicy, fuel/timeout). capabilities exposed by VFS modules remain subject
-/// to these controls.
-///
-/// ## default behaviour
-///
-/// sandboxed contexts default to `Allow(registry_safe_allowlist())`. use
-/// [`.vfs_gate_all()`](crate::ContextBuilder::vfs_gate_all)
-/// or [`.allow_module()`](crate::ContextBuilder::allow_module) to adjust.
-///
-/// ## modules NOT in the VFS registry
-///
-/// the following chibi modules exist in the VFS filesystem but are **not vetted**
-/// and will be blocked by any active gate:
-///
-/// - `scheme/file` — raw filesystem IO, no policy checks. use `(tein file)` instead.
-/// - `scheme/process-context` — `exit`/`emergency-exit` from `(chibi process)` kills the
-///   host process, bypassing all rust error handling. use `(tein process)` instead.
-/// - `scheme/load` — loads arbitrary files from filesystem. use `(tein load)` instead.
-/// - `scheme/r5rs` — re-exports `scheme/file`, `scheme/load`, `scheme/process-context`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VfsGate {
-    /// no restriction — VFS + filesystem modules all pass. used for unsandboxed contexts.
-    Off,
-    /// only listed module prefixes (+ their transitive deps) pass.
-    /// deps are resolved automatically from [`VfsModule`] data.
-    Allow(Vec<String>),
-}
+// modules NOT in the VFS registry:
+//
+// the following chibi modules exist in the VFS filesystem but are **not vetted**
+// and will be blocked by the gate in any sandboxed context:
+//
+// - `scheme/file` — raw filesystem IO, no policy checks. use `(tein file)` instead.
+// - `scheme/process-context` — `exit`/`emergency-exit` from `(chibi process)` kills the
+//   host process, bypassing all rust error handling. use `(tein process)` instead.
+// - `scheme/load` — loads arbitrary files from filesystem. use `(tein load)` instead.
+// - `scheme/r5rs` — re-exports `scheme/file`, `scheme/load`, `scheme/process-context`.
 
 /// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
 pub(crate) const GATE_OFF: u8 = 0;
@@ -168,7 +137,7 @@ thread_local! {
 ///
 /// follows `deps` recursively for each entry, returns a deduplicated flat list
 /// of all module path strings (including the inputs). unknown paths are included
-/// as-is (not expanded). same semantics as [`resolve_module_deps`].
+/// as-is (not expanded).
 pub fn registry_resolve_deps(paths: &[&str]) -> Vec<String> {
     let mut result: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();

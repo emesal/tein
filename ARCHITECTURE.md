@@ -34,7 +34,7 @@
 - `ContextBuilder` with fluent API for heap sizes, step limits, and environment restriction
 - Fuel-based step limiting via thread-local counters + vm.c patch
 - `Modules` enum (`Safe`, `All`, `None`, `only(&[...])`) for module-based sandbox configuration
-- `VfsGate` allowlist with transitive dep resolution via `VFS_REGISTRY`
+- VFS gate allowlist with transitive dep resolution via `VFS_REGISTRY`
 - `TimeoutContext` for wall-clock deadlines via dedicated thread
 - `Error::StepLimitExceeded` and `Error::Timeout` variants
 
@@ -49,7 +49,7 @@
 - VFS + static libs + eval.c patches for embedded module loading
 - `Context::new_standard()` / `ContextBuilder::standard_env()` API
 - ~200 bindings (map, for-each, values, dynamic-wind, etc.)
-- `VfsGate`: VFS-only import restriction in sandboxed standard-env contexts
+- VFS gate: automatic VFS-only import restriction in sandboxed standard-env contexts
 - C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
 
 **Milestone 6 — Foreign type protocol** (completed)
@@ -94,7 +94,7 @@ tein/
     foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore, dispatch
     managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
     port.rs      — PortStore: Read/Write bridge via thread-local trampoline
-    sandbox.rs   — Modules enum, FsPolicy, VfsGate, registry helpers, UX stub generation
+    sandbox.rs   — Modules enum, FsPolicy, registry helpers, UX stub generation
     thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
     timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
   target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
@@ -133,7 +133,7 @@ rust code → Context::evaluate()
 
 ```
 ContextBuilder::build() with sandboxed(modules):
-  1. set IS_SANDBOXED thread-local → controls FsPolicy + VfsGate activation
+  1. set IS_SANDBOXED thread-local → controls FsPolicy + VFS gate activation
   2. resolve module allowlist from Modules variant via VFS_REGISTRY
      (Modules::Safe → registry_safe_allowlist, Modules::All → registry_all_allowlist,
       Modules::None → empty, Modules::Only(v) → registry_resolve_deps(&v))

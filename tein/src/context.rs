@@ -42,7 +42,7 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE, VfsGate},
+    sandbox::{FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -1513,7 +1513,6 @@ pub struct ContextBuilder {
     standard_env: bool,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
-    vfs_gate: Option<VfsGate>,
     /// module-level sandbox configuration.
     /// when set, activates the registry-based sandbox path in build().
     sandbox_modules: Option<crate::sandbox::Modules>,
@@ -1628,39 +1627,6 @@ impl ContextBuilder {
         self
     }
 
-    /// set VFS gate to allow all vetted VFS modules.
-    ///
-    /// by default, sandboxed contexts use the safe registry set. call this to
-    /// widen access to all vetted VFS modules while still blocking filesystem
-    /// module loading.
-    pub fn vfs_gate_all(mut self) -> Self {
-        self.vfs_gate = Some(VfsGate::Allow(crate::sandbox::registry_all_allowlist()));
-        self
-    }
-
-    /// start from an empty VFS gate — no modules allowed until explicitly added
-    /// via [`allow_module`](Self::allow_module).
-    ///
-    /// # examples
-    ///
-    /// ```
-    /// use tein::{Context, sandbox::Modules};
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let ctx = Context::builder()
-    ///     .standard_env()
-    ///     .sandboxed(Modules::Safe)
-    ///     .vfs_gate_none()
-    ///     .allow_module("tein/json")
-    ///     .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn vfs_gate_none(mut self) -> Self {
-        self.vfs_gate = Some(VfsGate::Allow(Vec::new()));
-        self
-    }
-
     /// add a module (+ its transitive deps) to the VFS gate allowlist.
     ///
     /// starts from the current `Modules` variant's resolved allowlist, appends
@@ -1745,30 +1711,12 @@ impl ContextBuilder {
                 }
             }
 
-            // resolve VFS gate:
-            // - explicit gate from builder takes precedence
-            // - sandbox_modules path sets the gate internally
-            // - everything else is Off
-            let resolved_gate = self.vfs_gate.take().unwrap_or(VfsGate::Off);
-            let has_vfs_gate =
-                !matches!(resolved_gate, VfsGate::Off) || self.sandbox_modules.is_some();
-
             // save current gate values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
             let prev_vfs_gate = VFS_GATE.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
             let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
-
-            if has_vfs_gate {
-                VFS_GATE.with(|cell| cell.set(GATE_CHECK));
-                ffi::vfs_gate_set(GATE_CHECK as i32);
-                if let VfsGate::Allow(ref list) = resolved_gate {
-                    VFS_ALLOWLIST.with(|cell| {
-                        *cell.borrow_mut() = list.clone();
-                    });
-                }
-            }
 
             if let Some(ref modules) = self.sandbox_modules.take() {
                 // registry-based sandbox path: builds a null env + import, resolves
@@ -1808,9 +1756,9 @@ impl ContextBuilder {
                     }
                 };
 
-                // set VFS gate to the resolved allowlist (overrides the gate set earlier)
-                VFS_GATE.with(|cell| cell.set(crate::sandbox::GATE_CHECK));
-                ffi::vfs_gate_set(crate::sandbox::GATE_CHECK as i32);
+                // activate the VFS gate with the resolved allowlist
+                VFS_GATE.with(|cell| cell.set(GATE_CHECK));
+                ffi::vfs_gate_set(GATE_CHECK as i32);
                 VFS_ALLOWLIST.with(|cell| {
                     *cell.borrow_mut() = allowlist.clone();
                 });
@@ -1913,7 +1861,6 @@ impl ContextBuilder {
             let context = Context {
                 ctx,
                 step_limit: self.step_limit,
-                has_vfs_gate,
                 prev_vfs_gate,
                 prev_fs_policy,
                 prev_vfs_allowlist,
@@ -2006,7 +1953,6 @@ impl ContextBuilder {
 pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
-    has_vfs_gate: bool,
     /// previous VFS_GATE level, restored on drop
     prev_vfs_gate: u8,
     /// previous FS_POLICY value, restored on drop
@@ -2063,7 +2009,6 @@ impl Context {
             standard_env: false,
             file_read_prefixes: None,
             file_write_prefixes: None,
-            vfs_gate: None,
             sandbox_modules: None,
         }
     }
@@ -3105,15 +3050,14 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // restore previous VFS gate rather than unconditionally clearing —
-        // a second context on the same thread may still be active and depends on its gate.
-        if self.has_vfs_gate {
-            VFS_GATE.with(|cell| cell.set(self.prev_vfs_gate));
-            unsafe { ffi::vfs_gate_set(self.prev_vfs_gate as i32) };
-            VFS_ALLOWLIST.with(|cell| {
-                *cell.borrow_mut() = std::mem::take(&mut self.prev_vfs_allowlist);
-            });
-        }
+        // restore previous VFS gate — always, since a second context on the same thread
+        // may still be active and depends on its gate. prev_vfs_gate is GATE_OFF for
+        // unsandboxed contexts (default), so this is safe when no outer context exists.
+        VFS_GATE.with(|cell| cell.set(self.prev_vfs_gate));
+        unsafe { ffi::vfs_gate_set(self.prev_vfs_gate as i32) };
+        VFS_ALLOWLIST.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_vfs_allowlist);
+        });
 
         // restore previous FS_POLICY (typically None, unless sequential sandboxed contexts)
         FS_POLICY.with(|cell| {
@@ -5311,32 +5255,33 @@ mod tests {
     }
 
     #[test]
-    fn test_vfs_gate_all() {
+    fn test_sandboxed_modules_all_allows_extra_modules() {
+        // Modules::All includes everything registered in the VFS, including modules
+        // not in the safe set. chibi/string is a dep of scheme/base (also in All).
         use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
         let ctx = Context::builder()
             .standard_env()
-            .sandboxed(Modules::Safe)
-            .vfs_gate_all()
+            .sandboxed(Modules::All)
             .build()
-            .expect("standard + sandboxed + vfs_gate_all");
+            .expect("standard + sandboxed(All)");
 
         VFS_GATE.with(|cell| {
             assert_eq!(cell.get(), GATE_CHECK);
         });
 
-        // chibi/string is a transitive dep of scheme/base — works under gate_all
+        // chibi/string is in the All set
         let r = ctx.evaluate("(import (chibi string))");
         assert!(
             r.is_ok(),
-            "(import (chibi string)) should succeed under vfs_gate_all: {:?}",
+            "(import (chibi string)) should succeed under Modules::All: {:?}",
             r.err()
         );
 
-        // filesystem module should still fail
+        // non-VFS filesystem module should still fail (not in the registry)
         let err = ctx.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
-            "filesystem import should fail under vfs_gate_all: {:?}",
+            "non-VFS import should fail under Modules::All: {:?}",
             err
         );
 
@@ -5369,7 +5314,8 @@ mod tests {
     }
 
     #[test]
-    fn test_vfs_gate_none_with_explicit_module() {
+    fn test_sandboxed_modules_none_with_explicit_allow_module() {
+        // Modules::None + allow_module: start from nothing, add only what you need
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()

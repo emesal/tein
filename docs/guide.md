@@ -253,9 +253,8 @@ When `.sandboxed(...)` is used, `import` is automatically restricted to vetted V
 The gate is set at build time from the `Modules` configuration — no extra configuration
 needed.
 
-To widen to the full VFS (all registered modules regardless of safety tier), use
-`.vfs_gate_all()`. To collapse to an empty allowlist (reject all imports), use
-`.vfs_gate_none()`.
+To widen to all vetted modules (superset of Safe), use `Modules::All`. To start with
+nothing and add specific modules, use `Modules::None` + `.allow_module("...")`.
 
 See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module for the full API
 reference.
