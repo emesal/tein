@@ -34,6 +34,26 @@ tasks are ordered for incremental compilation — each task produces a compiling
 
 ---
 
+## progress notes
+
+**batch 1 complete (tasks 1–3).**
+
+### implementation notes discovered
+
+- `vfs_registry.rs` uses `#[allow(dead_code)]` on each struct/enum, not `#![allow(dead_code)]` — the inner attr form doesn't work in `include!`'d files
+- `registry_safe_allowlist` / `registry_all_allowlist` have `#[allow(dead_code)]` until task 7 wires them into context.rs
+- `validate_sld_includes` in build.rs caught 6 missing includes in the initial registry (char/ascii.scm, srfi/1/immutable's 9 scm files, srfi/27/constructors.scm, srfi/41.scm, srfi/95/sort.scm, srfi/135/kernel8.body.scm) — the validator is working as intended
+- old `VFS_FILES` / `CLIB_ENTRIES` constants removed from build.rs immediately (were unused); old `VFS_MODULES_SAFE` / `VFS_MODULES_ALL` in sandbox.rs stay until task 10
+- `feature_enabled` duplicated between build.rs and sandbox.rs (acceptable — they live in different compilation contexts; the include!'d vfs_registry.rs can't define it since it needs `cfg!()` which is context-dependent)
+- registry now embeds significantly more files than old VFS_FILES (220 vs ~64) — all vetted modules get embedded, not just the minimal set. this is correct and intentional.
+- srfi/18 clib entry added to registry (was previously absent; srfi/18 is pulled in by scheme/time but only used in the "all" set)
+
+### next batch
+
+bootstrap context: this plan file + branch `feature/refactor/vfs-registry-2603`. start at task 4.
+
+---
+
 ## phase 1: registry data structure
 
 ### task 1: create `vfs_registry.rs` with `VfsEntry` and the registry

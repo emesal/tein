@@ -951,6 +951,7 @@ pub fn registry_resolve_deps(paths: &[&str]) -> Vec<String> {
 
 /// build the default safe allowlist from `VFS_REGISTRY` (`default_safe: true` entries
 /// with their transitive deps resolved, filtered by active cargo features).
+#[allow(dead_code)] // used in context.rs starting task 7
 pub(crate) fn registry_safe_allowlist() -> Vec<String> {
     let paths: Vec<&str> = VFS_REGISTRY
         .iter()
@@ -962,6 +963,7 @@ pub(crate) fn registry_safe_allowlist() -> Vec<String> {
 
 /// build the full allowlist from `VFS_REGISTRY` (all entries with deps resolved,
 /// filtered by active cargo features).
+#[allow(dead_code)] // used in context.rs starting task 7
 pub(crate) fn registry_all_allowlist() -> Vec<String> {
     let paths: Vec<&str> = VFS_REGISTRY
         .iter()
@@ -1313,8 +1315,14 @@ mod registry_tests {
     fn registry_safe_allowlist_contains_expected_modules() {
         let safe = registry_safe_allowlist();
         // core r7rs modules expected in safe set
-        assert!(safe.iter().any(|m| m == "scheme/base"), "scheme/base missing");
-        assert!(safe.iter().any(|m| m == "scheme/write"), "scheme/write missing");
+        assert!(
+            safe.iter().any(|m| m == "scheme/base"),
+            "scheme/base missing"
+        );
+        assert!(
+            safe.iter().any(|m| m == "scheme/write"),
+            "scheme/write missing"
+        );
         assert!(safe.iter().any(|m| m == "srfi/1"), "srfi/1 missing");
         // excluded modules must not appear
         assert!(
@@ -1348,8 +1356,14 @@ mod registry_tests {
             "registry_all_allowlist should be larger than safe"
         );
         // scheme/eval + scheme/repl must be present in all
-        assert!(all.iter().any(|m| m == "scheme/eval"), "scheme/eval missing from all");
-        assert!(all.iter().any(|m| m == "tein/process"), "tein/process missing from all");
+        assert!(
+            all.iter().any(|m| m == "scheme/eval"),
+            "scheme/eval missing from all"
+        );
+        assert!(
+            all.iter().any(|m| m == "tein/process"),
+            "tein/process missing from all"
+        );
     }
 
     #[test]
@@ -1367,8 +1381,14 @@ mod registry_tests {
         );
         // srfi/39 comes from scheme/base (via chibi chain) — verify no duplicates
         let resolved_base = registry_resolve_deps(&["scheme/base"]);
-        let count_srfi9 = resolved_base.iter().filter(|m| m.as_str() == "srfi/9").count();
-        assert_eq!(count_srfi9, 1, "srfi/9 should appear exactly once (no duplicates)");
+        let count_srfi9 = resolved_base
+            .iter()
+            .filter(|m| m.as_str() == "srfi/9")
+            .count();
+        assert_eq!(
+            count_srfi9, 1,
+            "srfi/9 should appear exactly once (no duplicates)"
+        );
     }
 
     #[test]

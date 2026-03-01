@@ -15,123 +15,6 @@ include!("src/vfs_registry.rs");
 const CHIBI_REPO: &str = "https://github.com/emesal/chibi-scheme.git";
 const CHIBI_BRANCH: &str = "emesal-tein";
 
-/// files embedded in the VFS for r7rs standard library support.
-///
-/// keys become `/vfs/lib/...` paths that chibi's module resolver finds.
-/// order doesn't matter — the VFS is a flat lookup table.
-const VFS_FILES: &[&str] = &[
-    // bootstrap
-    "lib/init-7.scm",
-    "lib/meta-7.scm",
-    // r7rs standard modules
-    "lib/scheme/base.sld",
-    "lib/scheme/write.sld",
-    "lib/scheme/read.sld",
-    "lib/scheme/lazy.sld",
-    "lib/scheme/case-lambda.sld",
-    "lib/scheme/cxr.sld",
-    "lib/scheme/inexact.sld",
-    "lib/scheme/complex.sld",
-    "lib/scheme/char.sld",
-    // scheme includes
-    "lib/scheme/define-values.scm",
-    "lib/scheme/extras.scm",
-    "lib/scheme/misc-macros.scm",
-    "lib/scheme/cxr.scm",
-    "lib/scheme/inexact.scm",
-    "lib/scheme/digit-value.scm",
-    "lib/scheme/char/full.scm",
-    "lib/scheme/char/special-casing.scm",
-    "lib/scheme/char/case-offsets.scm",
-    // chibi dependencies
-    "lib/chibi/equiv.sld",
-    "lib/chibi/equiv.scm",
-    "lib/chibi/string.sld",
-    "lib/chibi/string.scm",
-    "lib/chibi/ast.sld",
-    "lib/chibi/ast.scm",
-    "lib/chibi/io.sld",
-    "lib/chibi/io/io.scm",
-    "lib/chibi/char-set/base.sld",
-    "lib/chibi/char-set/full.sld",
-    "lib/chibi/char-set/full.scm",
-    "lib/chibi/iset/base.sld",
-    "lib/chibi/iset/base.scm",
-    // srfi dependencies
-    "lib/srfi/9.sld",
-    "lib/srfi/9.scm",
-    "lib/srfi/11.sld",
-    "lib/srfi/16.sld",
-    "lib/srfi/38.sld",
-    "lib/srfi/38.scm",
-    "lib/srfi/39.sld",
-    "lib/srfi/39/syntax.scm",
-    "lib/srfi/39/syntax-no-threads.scm",
-    "lib/srfi/69.sld",
-    "lib/srfi/69/type.scm",
-    "lib/srfi/69/interface.scm",
-    "lib/srfi/151.sld",
-    "lib/srfi/151/bitwise.scm",
-    // tein foreign type protocol
-    "lib/tein/foreign.sld",
-    "lib/tein/foreign.scm",
-    // tein reader dispatch protocol
-    "lib/tein/reader.sld",
-    "lib/tein/reader.scm",
-    // tein macro expansion hook
-    "lib/tein/macro.sld",
-    "lib/tein/macro.scm",
-    // tein test framework
-    "lib/tein/test.sld",
-    "lib/tein/test.scm",
-    // tein documentation accessors
-    "lib/tein/docs.sld",
-    "lib/tein/docs.scm",
-    // tein file operations (safe wrappers via FsPolicy)
-    "lib/tein/file.sld",
-    "lib/tein/file.scm",
-    // tein VFS-restricted load
-    "lib/tein/load.sld",
-    "lib/tein/load.scm",
-    // tein process context access (NOT in VFS_MODULES_SAFE)
-    "lib/tein/process.sld",
-    "lib/tein/process.scm",
-];
-
-/// VFS files gated behind the "json" cargo feature.
-const VFS_FILES_JSON: &[&str] = &["lib/tein/json.sld", "lib/tein/json.scm"];
-
-/// VFS files gated behind the "toml" cargo feature.
-const VFS_FILES_TOML: &[&str] = &["lib/tein/toml.sld", "lib/tein/toml.scm"];
-
-/// C-backed modules that need static linking.
-///
-/// each entry: (path to .c file relative to chibi dir, init function suffix, table key).
-/// the table key must match what `sexp_find_module_file_raw` constructs via the `/vfs/lib` path,
-/// minus the `.so` extension (chibi's `sexp_find_static_library` strips `.so` before comparing).
-const CLIB_ENTRIES: &[(&str, &str, &str)] = &[
-    ("lib/chibi/ast.c", "chibi_ast", "/vfs/lib/chibi/ast"),
-    ("lib/chibi/io/io.c", "chibi_io", "/vfs/lib/chibi/io/io"),
-    (
-        "lib/srfi/39/param.c",
-        "srfi_39_param",
-        "/vfs/lib/srfi/39/param",
-    ),
-    (
-        "lib/srfi/69/hash.c",
-        "srfi_69_hash",
-        "/vfs/lib/srfi/69/hash",
-    ),
-    (
-        "lib/srfi/151/bit.c",
-        "srfi_151_bit",
-        "/vfs/lib/srfi/151/bit",
-    ),
-    // tein native-backed modules (reader dispatch + macro hook)
-    ("lib/tein/reader.c", "tein_reader", "/vfs/lib/tein/reader"),
-    ("lib/tein/macro.c", "tein_macro", "/vfs/lib/tein/macro"),
-];
-
 /// fetch or update the chibi-scheme fork into `target/chibi-scheme/`.
 ///
 /// clones on first build, then fetches + resets to branch tip on subsequent builds.
@@ -253,33 +136,29 @@ fn collect_include_files(source: &str, sld_dir: &str) -> Vec<String> {
 
     // recursively walk all sexps collecting include strings
     fn walk(sexp: &tein_sexp::Sexp, sld_dir: &str, out: &mut Vec<String>) {
-        match &sexp.kind {
-            SexpKind::List(items) => {
-                // check if this is (include "...") or (include-ci "...")
-                if let Some(first) = items.first() {
-                    if let SexpKind::Symbol(name) = &first.kind {
-                        if name == "include" || name == "include-ci" {
-                            for arg in items.iter().skip(1) {
-                                if let SexpKind::String(file) = &arg.kind {
-                                    // resolve relative to sld_dir
-                                    let resolved = if sld_dir.is_empty() {
-                                        file.clone()
-                                    } else {
-                                        format!("{sld_dir}/{file}")
-                                    };
-                                    out.push(resolved);
-                                }
-                            }
-                            return; // don't recurse further into include args
-                        }
+        if let SexpKind::List(items) = &sexp.kind {
+            // check if this is (include "...") or (include-ci "...")
+            if let Some(first) = items.first()
+                && let SexpKind::Symbol(name) = &first.kind
+                && (name == "include" || name == "include-ci")
+            {
+                for arg in items.iter().skip(1) {
+                    if let SexpKind::String(file) = &arg.kind {
+                        // resolve relative to sld_dir
+                        let resolved = if sld_dir.is_empty() {
+                            file.clone()
+                        } else {
+                            format!("{sld_dir}/{file}")
+                        };
+                        out.push(resolved);
                     }
                 }
-                // recurse into all list items
-                for item in items {
-                    walk(item, sld_dir, out);
-                }
+                return; // don't recurse further into include args
             }
-            _ => {}
+            // recurse into all list items
+            for item in items {
+                walk(item, sld_dir, out);
+            }
         }
     }
 

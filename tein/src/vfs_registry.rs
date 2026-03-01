@@ -1,5 +1,9 @@
+// this file is include!'d from both sandbox.rs and build.rs.
+// fields may be unused in one context but used in the other.
+
 /// source type for a VFS module entry
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum VfsSource {
     /// .sld/.scm files embedded at build time
     Embedded,
@@ -9,6 +13,7 @@ enum VfsSource {
 
 /// C static library backing for a module
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 struct ClibEntry {
     /// C source file relative to chibi dir
     source: &'static str,
@@ -20,6 +25,7 @@ struct ClibEntry {
 
 /// a single module in the VFS registry
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct VfsEntry {
     /// module path, e.g. "scheme/char", "srfi/1"
     path: &'static str,
