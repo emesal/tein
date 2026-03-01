@@ -45,8 +45,8 @@ use crate::{
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
     sandbox::{
-        FS_POLICY, FsPolicy, MODULE_ALLOWLIST, MODULE_POLICY, ModulePolicy, Preset,
-        default_allowlist,
+        FS_POLICY, FsPolicy, GATE_CHECK, Preset, VFS_ALLOWLIST, VFS_GATE, VfsGate,
+        vfs_safe_allowlist,
     },
 };
 use std::cell::{Cell, RefCell};
@@ -1497,7 +1497,7 @@ pub struct ContextBuilder {
     allowed_primitives: Option<Vec<&'static str>>,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
-    module_policy: Option<ModulePolicy>,
+    vfs_gate: Option<VfsGate>,
 }
 
 impl ContextBuilder {
@@ -1641,23 +1641,18 @@ impl ContextBuilder {
         self
     }
 
-    /// Set module policy to VfsAll — all curated VFS modules available.
+    /// set VFS gate to allow all vetted VFS modules.
     ///
-    /// By default, sandboxed contexts use an allowlist
-    /// ([`SAFE_MODULES`](crate::sandbox::SAFE_MODULES) + transitive deps).
-    /// Call this to widen access to all VFS modules while still blocking
-    /// filesystem module loading.
-    pub fn vfs_all(mut self) -> Self {
-        self.module_policy = Some(ModulePolicy::VfsAll);
+    /// by default, sandboxed contexts use [`VFS_MODULES_SAFE`](crate::sandbox::VFS_MODULES_SAFE)
+    /// (+ transitive deps). call this to widen access to all vetted VFS modules
+    /// while still blocking filesystem module loading.
+    pub fn vfs_gate_all(mut self) -> Self {
+        self.vfs_gate = Some(VfsGate::Allow(crate::sandbox::vfs_all_allowlist()));
         self
     }
 
-    /// Add a module prefix to the import allowlist.
-    ///
-    /// If no policy has been explicitly set, starts from
-    /// [`SAFE_MODULES`](crate::sandbox::SAFE_MODULES) + transitive deps.
-    /// `prefix` is matched against module paths like
-    /// `"chibi/regexp"`, `"srfi/1"`, `"scheme/eval"`.
+    /// start from an empty VFS gate — no modules allowed until explicitly added
+    /// via [`allow_module`](Self::allow_module).
     ///
     /// # examples
     ///
@@ -1669,59 +1664,53 @@ impl ContextBuilder {
     ///     .standard_env()
     ///     .safe()
     ///     .allow(&["import"])
-    ///     .allow_module("chibi/regexp")
+    ///     .vfs_gate_none()
+    ///     .allow_module("tein/json")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn vfs_gate_none(mut self) -> Self {
+        self.vfs_gate = Some(VfsGate::Allow(Vec::new()));
+        self
+    }
+
+    /// add a module (+ its transitive deps) to the VFS gate allowlist.
+    ///
+    /// if no gate has been explicitly set, starts from the default safe set
+    /// ([`VFS_MODULES_SAFE`](crate::sandbox::VFS_MODULES_SAFE) + deps).
+    /// dependencies are resolved automatically from the [`VfsModule`](crate::sandbox::VfsModule)
+    /// registry — callers never need to think about transitive imports.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .safe()
+    ///     .allow(&["import"])
+    ///     .allow_module("tein/process")
     ///     .build()?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn allow_module(mut self, prefix: &str) -> Self {
-        self.ensure_allowlist();
-        if let Some(ModulePolicy::Allowlist(ref mut list)) = self.module_policy {
-            let s = prefix.to_string();
-            if !list.contains(&s) {
-                list.push(s);
+        // ensure we have an Allow list to extend
+        if !matches!(self.vfs_gate, Some(VfsGate::Allow(_))) {
+            self.vfs_gate = Some(VfsGate::Allow(vfs_safe_allowlist()));
+        }
+        if let Some(VfsGate::Allow(ref mut list)) = self.vfs_gate {
+            // resolve transitive deps from the VFS module registry
+            for dep in crate::sandbox::resolve_module_deps(&[prefix]) {
+                if !list.contains(&dep) {
+                    list.push(dep);
+                }
             }
         }
         self
-    }
-
-    /// Replace the default safe set entirely. [`IMPLICIT_DEPS`](crate::sandbox::IMPLICIT_DEPS)
-    /// are always included so transitive module loading works.
-    ///
-    /// For building minimal allowlists from scratch.
-    ///
-    /// # examples
-    ///
-    /// ```
-    /// use tein::Context;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let ctx = Context::builder()
-    ///     .standard_env()
-    ///     .safe()
-    ///     .allow(&["import"])
-    ///     .allow_only_modules(&["tein/json"])
-    ///     .build()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn allow_only_modules(mut self, prefixes: &[&str]) -> Self {
-        use crate::sandbox::IMPLICIT_DEPS;
-        let mut list: Vec<String> = IMPLICIT_DEPS.iter().map(|s| s.to_string()).collect();
-        for p in prefixes {
-            let s = p.to_string();
-            if !list.contains(&s) {
-                list.push(s);
-            }
-        }
-        self.module_policy = Some(ModulePolicy::Allowlist(list));
-        self
-    }
-
-    fn ensure_allowlist(&mut self) {
-        if !matches!(self.module_policy, Some(ModulePolicy::Allowlist(_))) {
-            self.module_policy = Some(ModulePolicy::Allowlist(default_allowlist()));
-        }
     }
 
     /// Check if a step limit has been configured.
@@ -1772,33 +1761,32 @@ impl ContextBuilder {
                 }
             }
 
-            // resolve module policy:
-            // - explicit policy from builder takes precedence
-            // - sandboxed standard-env defaults to Allowlist(SAFE_MODULES + IMPLICIT_DEPS)
-            // - everything else is Unrestricted
+            // resolve VFS gate:
+            // - explicit gate from builder takes precedence
+            // - sandboxed standard-env defaults to Allow(safe modules + deps)
+            // - everything else is Off
             let has_sandbox = self.standard_env && self.allowed_primitives.is_some();
-            let resolved_policy = self.module_policy.take().unwrap_or_else(|| {
+            let resolved_gate = self.vfs_gate.take().unwrap_or_else(|| {
                 if has_sandbox {
-                    ModulePolicy::Allowlist(default_allowlist())
+                    VfsGate::Allow(vfs_safe_allowlist())
                 } else {
-                    ModulePolicy::Unrestricted
+                    VfsGate::Off
                 }
             });
-            let has_module_policy = !matches!(resolved_policy, ModulePolicy::Unrestricted);
+            let has_vfs_gate = !matches!(resolved_gate, VfsGate::Off);
 
-            // save current policy values before overwriting — restored on drop so that
+            // save current gate values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
-            let prev_module_policy = MODULE_POLICY.with(|cell| cell.get());
+            let prev_vfs_gate = VFS_GATE.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
-            let prev_module_allowlist = MODULE_ALLOWLIST.with(|cell| cell.borrow().clone());
+            let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
 
-            if has_module_policy {
-                let level = resolved_policy.level();
-                MODULE_POLICY.with(|cell| cell.set(level));
-                ffi::module_policy_set(level as i32);
-                if let ModulePolicy::Allowlist(ref list) = resolved_policy {
-                    MODULE_ALLOWLIST.with(|cell| {
+            if has_vfs_gate {
+                VFS_GATE.with(|cell| cell.set(GATE_CHECK));
+                ffi::vfs_gate_set(GATE_CHECK as i32);
+                if let VfsGate::Allow(ref list) = resolved_gate {
+                    VFS_ALLOWLIST.with(|cell| {
                         *cell.borrow_mut() = list.clone();
                     });
                 }
@@ -1957,10 +1945,10 @@ impl ContextBuilder {
                 ctx,
                 step_limit: self.step_limit,
                 has_io_wrappers: has_io,
-                has_module_policy,
-                prev_module_policy,
+                has_vfs_gate,
+                prev_vfs_gate,
                 prev_fs_policy,
-                prev_module_allowlist,
+                prev_vfs_allowlist,
                 prev_is_sandboxed,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
@@ -2046,13 +2034,13 @@ pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
     has_io_wrappers: bool,
-    has_module_policy: bool,
-    /// previous MODULE_POLICY level, restored on drop
-    prev_module_policy: u8,
+    has_vfs_gate: bool,
+    /// previous VFS_GATE level, restored on drop
+    prev_vfs_gate: u8,
     /// previous FS_POLICY value, restored on drop
     prev_fs_policy: Option<FsPolicy>,
-    /// previous MODULE_ALLOWLIST, restored on drop
-    prev_module_allowlist: Vec<String>,
+    /// previous VFS_ALLOWLIST, restored on drop
+    prev_vfs_allowlist: Vec<String>,
     /// previous IS_SANDBOXED value, restored on drop
     prev_is_sandboxed: bool,
     /// per-context store for foreign type registrations and live instances
@@ -2104,7 +2092,7 @@ impl Context {
             allowed_primitives: None,
             file_read_prefixes: None,
             file_write_prefixes: None,
-            module_policy: None,
+            vfs_gate: None,
         }
     }
 
@@ -3145,13 +3133,13 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // restore previous module policy rather than unconditionally clearing —
-        // a second context on the same thread may still be active and depends on its policy.
-        if self.has_module_policy {
-            MODULE_POLICY.with(|cell| cell.set(self.prev_module_policy));
-            unsafe { ffi::module_policy_set(self.prev_module_policy as i32) };
-            MODULE_ALLOWLIST.with(|cell| {
-                *cell.borrow_mut() = std::mem::take(&mut self.prev_module_allowlist);
+        // restore previous VFS gate rather than unconditionally clearing —
+        // a second context on the same thread may still be active and depends on its gate.
+        if self.has_vfs_gate {
+            VFS_GATE.with(|cell| cell.set(self.prev_vfs_gate));
+            unsafe { ffi::vfs_gate_set(self.prev_vfs_gate as i32) };
+            VFS_ALLOWLIST.with(|cell| {
+                *cell.borrow_mut() = std::mem::take(&mut self.prev_vfs_allowlist);
             });
         }
 
@@ -5170,10 +5158,10 @@ mod tests {
         );
     }
 
-    // --- module policy ---
+    // --- VFS gate ---
 
     #[test]
-    fn test_module_policy_blocks_non_vfs() {
+    fn test_vfs_gate_active_when_sandboxed() {
         use crate::sandbox::*;
         let ctx = Context::builder()
             .standard_env()
@@ -5181,11 +5169,11 @@ mod tests {
             .build()
             .expect("standard + sandbox");
 
-        MODULE_POLICY.with(|cell| {
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                POLICY_ALLOWLIST,
-                "sandboxed standard env should activate allowlist policy"
+                GATE_CHECK,
+                "sandboxed standard env should activate VFS gate"
             );
         });
 
@@ -5193,14 +5181,15 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_unrestricted_without_sandbox() {
+    fn test_vfs_gate_off_without_sandbox() {
+        use crate::sandbox::*;
         let ctx = Context::new_standard().expect("new_standard");
 
-        MODULE_POLICY.with(|cell| {
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                crate::sandbox::POLICY_UNRESTRICTED,
-                "unsandboxed standard env should be unrestricted"
+                GATE_OFF,
+                "unsandboxed standard env should have gate off"
             );
         });
 
@@ -5208,7 +5197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_cleared_on_drop() {
+    fn test_vfs_gate_cleared_on_drop() {
         use crate::sandbox::*;
         {
             let _ctx = Context::builder()
@@ -5217,23 +5206,23 @@ mod tests {
                 .build()
                 .expect("standard + sandbox");
 
-            MODULE_POLICY.with(|cell| {
-                assert_eq!(cell.get(), POLICY_ALLOWLIST);
+            VFS_GATE.with(|cell| {
+                assert_eq!(cell.get(), GATE_CHECK);
             });
         }
-        // after drop, policy should reset
-        MODULE_POLICY.with(|cell| {
+        // after drop, gate should reset
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                POLICY_UNRESTRICTED,
-                "module policy should reset to unrestricted after context drop"
+                GATE_OFF,
+                "VFS gate should reset to off after context drop"
             );
         });
     }
 
     #[test]
-    fn test_module_policy_not_set_without_standard_env() {
-        // sandbox without standard_env should NOT activate module policy
+    fn test_vfs_gate_not_set_without_standard_env() {
+        // sandbox without standard_env should NOT activate VFS gate
         // (there's no module system to restrict)
         use crate::sandbox::*;
         let ctx = Context::builder()
@@ -5241,11 +5230,11 @@ mod tests {
             .build()
             .expect("sandbox without standard env");
 
-        MODULE_POLICY.with(|cell| {
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                POLICY_UNRESTRICTED,
-                "non-standard-env sandbox should not set module policy"
+                GATE_OFF,
+                "non-standard-env sandbox should not set VFS gate"
             );
         });
 
@@ -5253,9 +5242,9 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_blocks_filesystem_import() {
+    fn test_vfs_gate_blocks_filesystem_import() {
         // sandboxed standard-env contexts with import allowed should block
-        // filesystem-based modules like (chibi process) via VfsOnly policy
+        // filesystem-based modules like (chibi process) via the VFS gate
         // while still allowing VFS-based imports like (scheme write).
         use crate::sandbox::*;
         let ctx = Context::builder()
@@ -5269,7 +5258,7 @@ mod tests {
         let r = ctx.evaluate("(import (scheme write))");
         assert!(
             r.is_ok(),
-            "(import (scheme write)) should succeed under VfsOnly: {:?}",
+            "(import (scheme write)) should succeed under VFS gate: {:?}",
             r.err()
         );
 
@@ -5316,8 +5305,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sequential_context_policy_isolation() {
-        // ctx1 sets Allowlist module policy; after drop, ctx2 must still have Allowlist.
+    fn test_sequential_context_gate_isolation() {
+        // ctx1 sets VFS gate; after drop, ctx2 must still have its gate active.
         // this tests the save/restore RAII pattern on Context::drop().
         use crate::sandbox::ARITHMETIC;
         let ctx1 = Context::builder()
@@ -5331,38 +5320,38 @@ mod tests {
             .build()
             .unwrap();
 
-        // drop ctx1 — must NOT clear ctx2's module policy
+        // drop ctx1 — must NOT clear ctx2's VFS gate
         drop(ctx1);
 
         // ctx2 must still block filesystem modules
         let err = ctx2.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
-            "ctx2 module policy must still be Allowlist after ctx1 dropped, got: {:?}",
+            "ctx2 VFS gate must still be active after ctx1 dropped, got: {:?}",
             err
         );
     }
 
     #[test]
-    fn test_module_policy_vfs_all() {
+    fn test_vfs_gate_all() {
         use crate::sandbox::*;
         let ctx = Context::builder()
             .standard_env()
             .preset(&ARITHMETIC)
             .allow(&["import"])
-            .vfs_all()
+            .vfs_gate_all()
             .build()
-            .expect("standard + sandbox + vfs_all");
+            .expect("standard + sandbox + vfs_gate_all");
 
-        MODULE_POLICY.with(|cell| {
-            assert_eq!(cell.get(), POLICY_VFS_ALL);
+        VFS_GATE.with(|cell| {
+            assert_eq!(cell.get(), GATE_CHECK);
         });
 
-        // (chibi string) is in VFS but not in SAFE_MODULES — should work under VfsAll
+        // (chibi string) is in VFS_MODULES_SAFE (transitive dep of scheme/base) — works under gate_all
         let r = ctx.evaluate("(import (chibi string))");
         assert!(
             r.is_ok(),
-            "(import (chibi string)) should succeed under VfsAll: {:?}",
+            "(import (chibi string)) should succeed under vfs_gate_all: {:?}",
             r.err()
         );
 
@@ -5370,7 +5359,7 @@ mod tests {
         let err = ctx.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
-            "filesystem import should fail under VfsAll: {:?}",
+            "filesystem import should fail under vfs_gate_all: {:?}",
             err
         );
 
@@ -5378,7 +5367,7 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_allow_module() {
+    fn test_vfs_gate_allow_module() {
         use crate::sandbox::*;
         let ctx = Context::builder()
             .standard_env()
@@ -5388,11 +5377,11 @@ mod tests {
             .build()
             .expect("standard + sandbox + allow_module");
 
-        MODULE_POLICY.with(|cell| {
-            assert_eq!(cell.get(), POLICY_ALLOWLIST);
+        VFS_GATE.with(|cell| {
+            assert_eq!(cell.get(), GATE_CHECK);
         });
 
-        // chibi/string was explicitly allowed
+        // chibi/string was explicitly allowed (+ its deps resolved automatically)
         let r = ctx.evaluate("(import (chibi string))");
         assert!(
             r.is_ok(),
@@ -5404,15 +5393,16 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_allow_only_modules() {
+    fn test_vfs_gate_none_with_explicit_module() {
         use crate::sandbox::*;
         let ctx = Context::builder()
             .standard_env()
             .preset(&ARITHMETIC)
             .allow(&["import"])
-            .allow_only_modules(&["tein/test"])
+            .vfs_gate_none()
+            .allow_module("tein/test")
             .build()
-            .expect("standard + sandbox + allow_only");
+            .expect("standard + sandbox + vfs_gate_none + allow_module");
 
         // tein/test was explicitly listed — should work
         let r = ctx.evaluate("(import (tein test))");
@@ -5422,11 +5412,11 @@ mod tests {
             r.err()
         );
 
-        // chibi/process is neither in IMPLICIT_DEPS nor the custom list
+        // chibi/process is not in the explicit list
         let err = ctx.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
-            "(import (chibi process)) should fail with allow_only: {:?}",
+            "(import (chibi process)) should fail with vfs_gate_none: {:?}",
             err
         );
 
@@ -5434,9 +5424,9 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_allowlist_raii() {
+    fn test_vfs_gate_allowlist_raii() {
         use crate::sandbox::*;
-        // verify allowlist is restored, not just the policy level
+        // verify allowlist is restored, not just the gate level
         {
             let _ctx = Context::builder()
                 .standard_env()
@@ -5447,7 +5437,7 @@ mod tests {
                 .expect("context with extended allowlist");
         }
         // after drop, allowlist should be empty (previous was empty)
-        MODULE_ALLOWLIST.with(|cell| {
+        VFS_ALLOWLIST.with(|cell| {
             assert!(
                 cell.borrow().is_empty(),
                 "allowlist should be restored to empty after drop"
@@ -5456,23 +5446,24 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_transitive_deps() {
+    fn test_vfs_gate_transitive_deps() {
         use crate::sandbox::*;
-        // allow_only_modules always includes IMPLICIT_DEPS automatically,
-        // so (chibi string) works even when not explicitly listed — it's in IMPLICIT_DEPS.
+        // allow_module resolves transitive deps from the VfsModule registry,
+        // so adding tein/foreign also enables its deps (chibi/string etc).
         let ctx = Context::builder()
             .standard_env()
             .preset(&ARITHMETIC)
             .allow(&["import"])
-            .allow_only_modules(&["tein/foreign"])
+            .vfs_gate_none()
+            .allow_module("tein/foreign")
             .build()
-            .expect("minimal allowlist");
+            .expect("minimal allowlist with dep resolution");
 
-        // chibi/string is in IMPLICIT_DEPS, not the explicit list — should still work
+        // chibi/string is a dep of tein/foreign — should be resolved automatically
         let r = ctx.evaluate("(import (chibi string))");
         assert!(
             r.is_ok(),
-            "(chibi string) should load via IMPLICIT_DEPS even without explicit listing: {:?}",
+            "(chibi string) should load via transitive dep resolution: {:?}",
             r.err()
         );
 

@@ -200,8 +200,8 @@ unsafe extern "C" {
     // error construction (for policy violation exceptions)
     pub fn tein_make_error(ctx: sexp, msg: *const c_char, len: sexp_sint_t) -> sexp;
 
-    // module import policy (for sandboxed standard env)
-    pub fn tein_module_policy_set(policy: c_int);
+    // VFS module gate (for sandboxed standard env)
+    pub fn tein_vfs_gate_set(level: c_int);
 
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
@@ -724,27 +724,46 @@ pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_load_standard_ports(ctx, env) }
 }
 
-/// set the module import policy at C level.
-/// 0 = unrestricted, 1 = vfs-all, 2 = allowlist (rust callback).
+/// set the VFS module gate at C level.
+/// 0 = off (allow everything), 1 = check via rust callback.
 #[inline]
-pub unsafe fn module_policy_set(policy: i32) {
-    unsafe { tein_module_policy_set(policy as c_int) }
+pub unsafe fn vfs_gate_set(level: i32) {
+    unsafe { tein_vfs_gate_set(level as c_int) }
 }
 
-/// called from C (`tein_shim.c`) when module policy is Allowlist (policy 2).
-/// checks the module path against the thread-local allowlist.
+/// called from C (`tein_shim.c`) when `tein_vfs_gate == 1`.
+/// checks the module path against the thread-local VFS allowlist.
+///
+/// absorbs all gate logic previously split between C and rust:
+/// - VFS `/vfs/lib/` prefix requirement (non-VFS paths rejected)
+/// - `..` path traversal guard
+/// - `.scm` passthrough (if the `.sld` was allowed, included `.scm` files are safe)
+/// - allowlist prefix matching
 ///
 /// the path arrives as e.g. `/vfs/lib/tein/json.sld` or `/vfs/lib/srfi/69/hash`.
-/// we strip the `/vfs/lib/` prefix and check if any allowlist entry is a prefix
-/// of the remainder.
 #[unsafe(no_mangle)]
-extern "C" fn tein_module_allowlist_check(path: *const c_char) -> c_int {
-    use crate::sandbox::MODULE_ALLOWLIST;
+extern "C" fn tein_vfs_gate_check(path: *const c_char) -> c_int {
+    use crate::sandbox::VFS_ALLOWLIST;
 
     let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
-    let suffix = path_str.strip_prefix("/vfs/lib/").unwrap_or(path_str);
 
-    MODULE_ALLOWLIST.with(|cell| {
+    // reject non-VFS paths (filesystem module loading)
+    let Some(suffix) = path_str.strip_prefix("/vfs/lib/") else {
+        return 0;
+    };
+
+    // reject path traversal attempts
+    if suffix.contains("..") {
+        return 0;
+    }
+
+    // .scm passthrough — reachable only after the corresponding .sld was allowed
+    if suffix.ends_with(".scm") {
+        return 1;
+    }
+
+    // check against the allowlist
+    VFS_ALLOWLIST.with(|cell| {
         let list = cell.borrow();
         if list
             .iter()

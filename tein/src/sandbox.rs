@@ -5,7 +5,7 @@
 //! 1. **Environment restriction** — expose only selected primitives via presets
 //! 2. **Step limits** — cap VM instructions per evaluation
 //! 3. **File IO policy** — allowlist filesystem paths for reading/writing
-//! 4. **Module policy** — restrict `(import ...)` to safe modules (three-tier: Allowlist / VfsAll / Unrestricted)
+//! 4. **VFS gate** — restrict `(import ...)` to vetted VFS modules via [`VfsGate`]
 //!
 //! # Presets
 //!
@@ -72,15 +72,16 @@
 //! Paths are canonicalised before prefix-checking, so symlink and `..`
 //! traversals are resolved.
 //!
-//! # Module policy
+//! # VFS gate
 //!
-//! Module imports in sandboxed standard-env contexts are restricted by a
-//! three-tier policy:
+//! Module imports in sandboxed standard-env contexts are restricted by [`VfsGate`]:
 //!
-//! - **Allowlist** (default) — only [`SAFE_MODULES`] + transitive deps.
-//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module).
-//! - **VfsAll** — all curated VFS modules. set with [`.vfs_all()`](crate::ContextBuilder::vfs_all).
-//! - **Unrestricted** — VFS + filesystem (unsandboxed contexts).
+//! - **`Off`** — no restriction (unsandboxed contexts).
+//! - **`Allow(vec)`** (default for sandboxed) — only listed module prefixes pass.
+//!   defaults to [`VFS_MODULES_SAFE`] + transitive deps.
+//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module),
+//!   widen with [`.vfs_gate_all()`](crate::ContextBuilder::vfs_gate_all),
+//!   or start empty with [`.vfs_gate_none()`](crate::ContextBuilder::vfs_gate_none).
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -142,169 +143,771 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
-/// module import policy for sandboxed standard-env contexts.
+/// a module available in the VFS, with its transitive dependencies.
 ///
-/// controls which modules can be loaded via `(import ...)`.
+/// every module that tein allows through the VFS gate must have an entry
+/// in either [`VFS_MODULES_SAFE`] or [`VFS_MODULES_ALL`]. the `deps` field
+/// lists module path prefixes that this module imports transitively — resolved
+/// at build time from `.sld` `(import ...)` chains, not parsed at runtime.
 ///
-/// ## tiers
+/// `(chibi)` (the primitive core) is never listed as a dep — it's always
+/// available and not gated.
+pub struct VfsModule {
+    /// module path prefix, e.g. `"scheme/char"`, `"tein/json"`, `"srfi/1"`.
+    pub path: &'static str,
+    /// paths of modules this one depends on (vetted from `.sld` import chains).
+    /// `(chibi)` primitive core is omitted — always available.
+    pub deps: &'static [&'static str],
+}
+
+/// controls which VFS modules can be imported via `(import ...)`.
 ///
-/// | policy | what passes | use case |
-/// |--------|------------|----------|
-/// | `Allowlist` | only listed module prefixes (must be in VFS) | tight LLM sandbox |
-/// | `VfsAll` | all curated VFS modules | sandbox with full scheme ecosystem |
-/// | `Unrestricted` | VFS + filesystem | unsandboxed |
+/// ## variants
+///
+/// | gate | what passes | use case |
+/// |------|------------|----------|
+/// | `Off` | VFS + filesystem — no restriction | unsandboxed contexts |
+/// | `Allow(vec)` | only listed module prefixes (must be in VFS) | sandboxed contexts |
 ///
 /// ## VFS safety contract
 ///
-/// VFS modules are safe by construction: tein curates the embedded virtual
-/// filesystem to ensure no module can bypass the existing safety layers
+/// VFS modules are curated to ensure no module can bypass tein's safety layers
 /// (preset allowlists, FsPolicy, fuel/timeout). capabilities exposed by
 /// VFS modules remain subject to these controls.
 ///
 /// ## default behaviour
 ///
 /// sandboxed contexts (standard_env + presets) default to
-/// `Allowlist(SAFE_MODULES + IMPLICIT_DEPS)`. use [`.vfs_all()`](crate::ContextBuilder::vfs_all)
+/// `Allow(vfs_safe_allowlist())`. use [`.vfs_gate_all()`](crate::ContextBuilder::vfs_gate_all)
 /// or [`.allow_module()`](crate::ContextBuilder::allow_module) to adjust.
+///
+/// ## modules NOT in the VFS registry
+///
+/// the following chibi modules exist in the VFS filesystem but are **not vetted**
+/// and will be blocked by any active gate:
+///
+/// - `scheme/file` — raw filesystem IO, no policy checks. use `(tein file)` instead.
+/// - `scheme/process-context` — `exit`/`emergency-exit` from `(chibi process)` kills the
+///   host process, bypassing all rust error handling. use `(tein process)` instead.
+/// - `scheme/load` — loads arbitrary files from filesystem. use `(tein load)` instead.
+/// - `scheme/r5rs` — re-exports `scheme/file`, `scheme/load`, `scheme/process-context`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModulePolicy {
-    /// all modules allowed (VFS + filesystem). no gate.
-    Unrestricted,
-    /// all curated VFS modules allowed. filesystem blocked.
-    VfsAll,
-    /// only listed module prefixes allowed (must also be in VFS).
-    /// entries are path prefixes matched against the module path after `/vfs/lib/`.
-    Allowlist(Vec<String>),
+pub enum VfsGate {
+    /// no restriction — VFS + filesystem modules all pass. used for unsandboxed contexts.
+    Off,
+    /// only listed module prefixes (+ their transitive deps) pass.
+    /// deps are resolved automatically from [`VfsModule`] data.
+    Allow(Vec<String>),
 }
 
-/// numeric policy level for C interop and cheap thread-local checks.
-/// mirrors `tein_module_policy` in tein_shim.c.
-pub(crate) const POLICY_UNRESTRICTED: u8 = 0;
-pub(crate) const POLICY_VFS_ALL: u8 = 1;
-pub(crate) const POLICY_ALLOWLIST: u8 = 2;
-
-impl ModulePolicy {
-    /// numeric policy level for C interop.
-    pub(crate) fn level(&self) -> u8 {
-        match self {
-            ModulePolicy::Unrestricted => POLICY_UNRESTRICTED,
-            ModulePolicy::VfsAll => POLICY_VFS_ALL,
-            ModulePolicy::Allowlist(_) => POLICY_ALLOWLIST,
-        }
-    }
-}
+/// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
+pub(crate) const GATE_OFF: u8 = 0;
+/// numeric gate level for C interop — rust callback checks the allowlist.
+pub(crate) const GATE_CHECK: u8 = 1;
 
 thread_local! {
-    /// numeric policy level (0/1/2). cheap to read for error checks in value.rs.
-    pub(crate) static MODULE_POLICY: Cell<u8> = const { Cell::new(POLICY_UNRESTRICTED) };
+    /// numeric gate level (0=off, 1=check). set during Context::build(), cleared on drop.
+    pub(crate) static VFS_GATE: Cell<u8> = const { Cell::new(GATE_OFF) };
 
-    /// the actual allowlist, populated when policy is Allowlist.
-    /// read by the C→rust callback during module resolution.
-    pub(crate) static MODULE_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// the resolved allowlist, populated when gate is `Allow`.
+    /// read by the C→rust callback (`tein_vfs_gate_check`) during module resolution.
+    pub(crate) static VFS_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// minimal safe set — safe tein modules + core r7rs pure-computation modules.
-///
-/// used as the default allowlist for sandboxed contexts. each entry is a
-/// module path prefix matched against the path after `/vfs/lib/`.
+// ---------------------------------------------------------------------------
+// VFS module registry
+// ---------------------------------------------------------------------------
+
+/// conservative sandbox set — default for sandboxed contexts.
 ///
 /// tein modules are listed explicitly rather than via a `"tein/"` blanket
 /// because `(tein process)` is intentionally excluded — `command-line` leaks
-/// host argv. use `.allow_module("tein/process")` or `.vfs_all()` to opt in.
+/// host argv. use `.allow_module("tein/process")` or `.vfs_gate_all()` to opt in.
 ///
-/// **excluded r7rs modules and rationale:**
-/// - `scheme/file` — filesystem access (`open-input-file`, `with-input-from-file`, etc.)
-/// - `scheme/process-context` — process control (`exit`, `get-environment-variable`, `command-line`)
-/// - `scheme/load` — loads and evaluates arbitrary files from the filesystem
-/// - `scheme/r5rs` — compatibility bundle that re-exports `interaction-environment` and other
-///   env-escaping primitives alongside `scheme/eval`; use individual modules instead
-///
-/// use [`ContextBuilder::allow_module()`](crate::ContextBuilder::allow_module)
-/// to add entries, or [`ContextBuilder::vfs_all()`](crate::ContextBuilder::vfs_all)
-/// to allow all VFS modules.
-pub const SAFE_MODULES: &[&str] = &[
-    // tein modules (explicit — tein/process excluded, leaks host argv)
-    "tein/foreign",
-    "tein/reader",
-    "tein/macro",
-    "tein/test",
-    "tein/docs",
-    "tein/json",
-    "tein/toml",
-    "tein/uuid",
-    "tein/file",
-    "tein/load",
-    // r7rs standard libraries (safe subset — excludes file, process-context, load, r5rs)
-    "scheme/base",
-    "scheme/bitwise",
-    "scheme/box",
-    "scheme/bytevector",
-    "scheme/case-lambda",
-    "scheme/char",
-    "scheme/charset",
-    "scheme/comparator",
-    "scheme/complex",
-    "scheme/cxr",
-    "scheme/division",
-    "scheme/ephemeron",
-    "scheme/eval",
-    "scheme/fixnum",
-    "scheme/flonum",
-    "scheme/generator",
-    "scheme/hash-table",
-    "scheme/ideque",
-    "scheme/ilist",
-    "scheme/inexact",
-    "scheme/lazy",
-    "scheme/list",
-    "scheme/list-queue",
-    "scheme/lseq",
-    "scheme/mapping",
-    "scheme/read",
-    "scheme/regex",
-    "scheme/repl",
-    "scheme/rlist",
-    "scheme/set",
-    "scheme/show",
-    "scheme/sort",
-    "scheme/stream",
-    "scheme/text",
-    "scheme/time",
-    "scheme/vector",
-    "scheme/write",
+/// `scheme/time` and `scheme/show` are excluded because they transitively
+/// depend on unvetted modules (`scheme/process-context`, `scheme/file`).
+/// see github issues #90 and #91 for safe alternatives.
+pub const VFS_MODULES_SAFE: &[VfsModule] = &[
+    // --- tein modules (tein/process excluded: leaks host argv) ---
+    VfsModule {
+        path: "tein/foreign",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/reader",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/macro",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/test",
+        deps: &["scheme/base", "scheme/write"],
+    },
+    VfsModule {
+        path: "tein/docs",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/json",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/toml",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/uuid",
+        deps: &[],
+    },
+    VfsModule {
+        path: "tein/file",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/load",
+        deps: &["scheme/base"],
+    },
+    // --- r7rs standard libraries (safe subset) ---
+    VfsModule {
+        path: "scheme/base",
+        deps: &[
+            "chibi/equiv",
+            "chibi/string",
+            "chibi/io",
+            "chibi/ast",
+            "srfi/9",
+            "srfi/11",
+            "srfi/39",
+        ],
+    },
+    VfsModule {
+        path: "scheme/bitwise",
+        deps: &["srfi/151"],
+    },
+    VfsModule {
+        path: "scheme/box",
+        deps: &["srfi/111"],
+    },
+    VfsModule {
+        path: "scheme/bytevector",
+        deps: &["scheme/base", "srfi/151"],
+    },
+    VfsModule {
+        path: "scheme/case-lambda",
+        deps: &["srfi/16"],
+    },
+    VfsModule {
+        path: "scheme/char",
+        deps: &[
+            "scheme/base",
+            "chibi/char-set/full",
+            "chibi/char-set/base",
+            "chibi/iset/base",
+        ],
+    },
+    VfsModule {
+        path: "scheme/charset",
+        deps: &["srfi/14"],
+    },
+    VfsModule {
+        path: "scheme/comparator",
+        deps: &["srfi/128"],
+    },
+    VfsModule {
+        path: "scheme/complex",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/cxr",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/division",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "scheme/ephemeron",
+        deps: &["srfi/124"],
+    },
+    VfsModule {
+        path: "scheme/eval",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/fixnum",
+        deps: &["srfi/143"],
+    },
+    VfsModule {
+        path: "scheme/flonum",
+        deps: &["srfi/144"],
+    },
+    VfsModule {
+        path: "scheme/generator",
+        deps: &["srfi/121"],
+    },
+    VfsModule {
+        path: "scheme/hash-table",
+        deps: &["srfi/125"],
+    },
+    VfsModule {
+        path: "scheme/ideque",
+        deps: &["srfi/134"],
+    },
+    VfsModule {
+        path: "scheme/ilist",
+        deps: &["srfi/116"],
+    },
+    VfsModule {
+        path: "scheme/inexact",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/lazy",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/list",
+        deps: &["srfi/1"],
+    },
+    VfsModule {
+        path: "scheme/list-queue",
+        deps: &["srfi/117"],
+    },
+    VfsModule {
+        path: "scheme/lseq",
+        deps: &["srfi/127"],
+    },
+    VfsModule {
+        path: "scheme/mapping",
+        deps: &["srfi/146"],
+    },
+    VfsModule {
+        path: "scheme/read",
+        deps: &["srfi/38"],
+    },
+    VfsModule {
+        path: "scheme/regex",
+        deps: &["srfi/115"],
+    },
+    VfsModule {
+        path: "scheme/repl",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/rlist",
+        deps: &["srfi/101"],
+    },
+    VfsModule {
+        path: "scheme/set",
+        deps: &["srfi/113"],
+    },
+    VfsModule {
+        path: "scheme/sort",
+        deps: &["srfi/132"],
+    },
+    VfsModule {
+        path: "scheme/stream",
+        deps: &["srfi/41"],
+    },
+    VfsModule {
+        path: "scheme/text",
+        deps: &["srfi/135"],
+    },
+    VfsModule {
+        path: "scheme/vector",
+        deps: &["srfi/133"],
+    },
+    VfsModule {
+        path: "scheme/write",
+        deps: &["srfi/38"],
+    },
+    // --- srfi modules (transitive deps of the above) ---
+    VfsModule {
+        path: "srfi/1",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/1/immutable",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/2",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/8",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/9",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/11",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/14",
+        deps: &["chibi/char-set"],
+    },
+    VfsModule {
+        path: "srfi/16",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/27",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/38",
+        deps: &["srfi/69", "chibi/ast"],
+    },
+    VfsModule {
+        path: "srfi/39",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/41",
+        deps: &["scheme/base", "scheme/lazy", "srfi/1"],
+    },
+    VfsModule {
+        path: "srfi/69",
+        deps: &["srfi/9"],
+    },
+    VfsModule {
+        path: "srfi/95",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/101",
+        deps: &["scheme/base", "srfi/16", "srfi/1", "srfi/125", "srfi/151"],
+    },
+    VfsModule {
+        path: "srfi/111",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/113",
+        deps: &["scheme/base", "srfi/1", "srfi/125", "srfi/128"],
+    },
+    VfsModule {
+        path: "srfi/115",
+        deps: &["chibi/regexp"],
+    },
+    VfsModule {
+        path: "srfi/116",
+        deps: &["scheme/base", "srfi/1/immutable", "srfi/128"],
+    },
+    VfsModule {
+        path: "srfi/117",
+        deps: &["scheme/base", "srfi/1"],
+    },
+    VfsModule {
+        path: "srfi/121",
+        deps: &["scheme/base", "srfi/130"],
+    },
+    VfsModule {
+        path: "srfi/124",
+        deps: &["chibi/weak", "scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/125",
+        deps: &["scheme/base", "srfi/128", "srfi/69", "chibi/ast"],
+    },
+    VfsModule {
+        path: "srfi/127",
+        deps: &["scheme/base", "srfi/1"],
+    },
+    VfsModule {
+        path: "srfi/128",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "srfi/27",
+            "srfi/69",
+            "srfi/95",
+            "srfi/98",
+            "srfi/151",
+            "chibi/ast",
+        ],
+    },
+    VfsModule {
+        path: "srfi/130",
+        deps: &["scheme/base", "scheme/char", "scheme/write", "chibi/string"],
+    },
+    VfsModule {
+        path: "srfi/132",
+        deps: &["scheme/base", "srfi/95"],
+    },
+    VfsModule {
+        path: "srfi/133",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/134",
+        deps: &["scheme/base", "srfi/16", "srfi/1", "srfi/9", "srfi/121"],
+    },
+    VfsModule {
+        path: "srfi/135",
+        deps: &["scheme/base", "srfi/16", "scheme/char", "srfi/135/kernel8"],
+    },
+    VfsModule {
+        path: "srfi/135/kernel8",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/141",
+        deps: &["scheme/base", "scheme/division"],
+    },
+    VfsModule {
+        path: "srfi/143",
+        deps: &["scheme/base", "srfi/141", "srfi/151"],
+    },
+    VfsModule {
+        path: "srfi/144",
+        deps: &["srfi/141"],
+    },
+    VfsModule {
+        path: "srfi/145",
+        deps: &["scheme/base", "chibi/assert"],
+    },
+    VfsModule {
+        path: "srfi/146",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/1",
+            "srfi/2",
+            "srfi/8",
+            "srfi/121",
+            "srfi/128",
+            "srfi/145",
+        ],
+    },
+    VfsModule {
+        path: "srfi/146/hamt",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/143",
+            "srfi/151",
+            "srfi/146/hamt-misc",
+            "srfi/146/vector-edit",
+        ],
+    },
+    VfsModule {
+        path: "srfi/146/hamt-map",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/1",
+            "srfi/146/hamt",
+            "srfi/146/hamt-misc",
+        ],
+    },
+    VfsModule {
+        path: "srfi/146/hamt-misc",
+        deps: &["scheme/base", "srfi/16", "srfi/125", "srfi/128"],
+    },
+    VfsModule {
+        path: "srfi/146/vector-edit",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/146/hash",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/1",
+            "srfi/8",
+            "srfi/121",
+            "srfi/128",
+            "srfi/145",
+            "srfi/146/hamt-map",
+        ],
+    },
+    VfsModule {
+        path: "srfi/151",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/165",
+        deps: &[
+            "scheme/base",
+            "srfi/1",
+            "srfi/111",
+            "srfi/125",
+            "srfi/128",
+            "srfi/146",
+        ],
+    },
+    VfsModule {
+        path: "srfi/98",
+        deps: &[],
+    },
+    // --- chibi internal modules (transitive deps) ---
+    VfsModule {
+        path: "chibi/ast",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/assert",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/equiv",
+        deps: &["srfi/69"],
+    },
+    VfsModule {
+        path: "chibi/io",
+        deps: &["chibi/ast"],
+    },
+    VfsModule {
+        path: "chibi/optional",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/string",
+        deps: &["chibi/ast", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/weak",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/time",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/char-set",
+        deps: &["chibi/char-set/base", "chibi/char-set/extras"],
+    },
+    VfsModule {
+        path: "chibi/char-set/base",
+        deps: &["chibi/iset/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/full",
+        deps: &["chibi/iset/base", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/ascii",
+        deps: &["chibi/iset/base", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/extras",
+        deps: &["chibi/iset", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/boundary",
+        deps: &["chibi/char-set"],
+    },
+    VfsModule {
+        path: "chibi/iset",
+        deps: &[
+            "scheme/base",
+            "chibi/iset/base",
+            "chibi/iset/iterators",
+            "chibi/iset/constructors",
+        ],
+    },
+    VfsModule {
+        path: "chibi/iset/base",
+        deps: &["srfi/9", "srfi/151"],
+    },
+    VfsModule {
+        path: "chibi/iset/iterators",
+        deps: &["chibi/iset/base", "srfi/9", "srfi/151"],
+    },
+    VfsModule {
+        path: "chibi/iset/constructors",
+        deps: &["chibi/iset/base", "chibi/iset/iterators", "srfi/151"],
+    },
+    VfsModule {
+        path: "chibi/regexp",
+        deps: &[
+            "srfi/69",
+            "scheme/char",
+            "srfi/9",
+            "chibi/char-set",
+            "chibi/char-set/full",
+            "chibi/char-set/ascii",
+            "srfi/151",
+            "chibi/char-set/boundary",
+        ],
+    },
+    VfsModule {
+        path: "chibi/show/shared",
+        deps: &["scheme/base", "scheme/write", "srfi/69"],
+    },
 ];
 
-/// transitive dependencies of safe modules. always included in any allowlist.
+/// all vetted VFS modules — superset of [`VFS_MODULES_SAFE`].
 ///
-/// these are implementation plumbing — modules that safe user-facing modules
-/// import internally. users shouldn't need to import these directly, but they
-/// must pass the gate when the module system resolves transitive deps.
-pub(crate) const IMPLICIT_DEPS: &[&str] = &[
-    // r7rs ambient substrate — expected to be available without explicit import
-    "scheme/base",
-    "scheme/write",
-    "srfi/9",
-    "srfi/11",
-    "srfi/16",
-    "srfi/38",
-    "srfi/39",
-    "srfi/69",
-    "srfi/151",
-    "chibi/char-set/",
-    "chibi/equiv",
-    "chibi/string",
-    "chibi/ast",
-    "chibi/io",
-    "chibi/iset/",
+/// includes modules that are safe by implementation but expose sensitive
+/// information or capabilities that the conservative sandbox excludes.
+/// use [`.vfs_gate_all()`](crate::ContextBuilder::vfs_gate_all) to enable.
+///
+/// **not included** (unvetted — blocked by any active gate):
+/// - `scheme/file` — raw filesystem IO with no policy checks. use `(tein file)`.
+/// - `scheme/process-context` — `exit`/`emergency-exit` kills host process. use `(tein process)`.
+/// - `scheme/load` — loads arbitrary filesystem files. use `(tein load)`.
+/// - `scheme/r5rs` — re-exports the above three unvetted modules.
+pub const VFS_MODULES_ALL: &[VfsModule] = &[
+    // tein/process: safe rust-backed exit, but leaks host argv via command-line
+    VfsModule {
+        path: "tein/process",
+        deps: &["scheme/base"],
+    },
+    // scheme/time: depends on scheme/process-context + scheme/file transitively.
+    // allowed in ALL because the deps are also available when the user opts in.
+    // see #90 for a future safe (tein time) alternative.
+    VfsModule {
+        path: "scheme/time",
+        deps: &["scheme/time/tai", "scheme/time/tai-to-utc-offset"],
+    },
+    VfsModule {
+        path: "scheme/time/tai",
+        deps: &["scheme/base", "scheme/time/tai-to-utc-offset"],
+    },
+    VfsModule {
+        path: "scheme/time/tai-to-utc-offset",
+        deps: &["scheme/base", "scheme/read", "srfi/18"],
+    },
+    VfsModule {
+        path: "srfi/18",
+        deps: &["srfi/9", "chibi/ast", "chibi/time"],
+    },
+    // scheme/show: depends on scheme/file via srfi/166/columnar.
+    // see #91 for a future safe (tein show) alternative.
+    VfsModule {
+        path: "scheme/show",
+        deps: &["srfi/166"],
+    },
+    VfsModule {
+        path: "scheme/mapping/hash",
+        deps: &["srfi/146/hash"],
+    },
+    VfsModule {
+        path: "srfi/166",
+        deps: &[
+            "srfi/166/base",
+            "srfi/166/pretty",
+            "srfi/166/columnar",
+            "srfi/166/unicode",
+            "srfi/166/color",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/base",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/complex",
+            "scheme/inexact",
+            "scheme/repl",
+            "scheme/write",
+            "srfi/1",
+            "srfi/69",
+            "srfi/130",
+            "srfi/165",
+            "chibi/show/shared",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/pretty",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/write",
+            "chibi/show/shared",
+            "srfi/1",
+            "srfi/69",
+            "srfi/130",
+            "srfi/166/base",
+            "srfi/166/color",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/columnar",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "srfi/1",
+            "srfi/117",
+            "srfi/130",
+            "srfi/166/base",
+            "chibi/optional",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/unicode",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "srfi/130",
+            "srfi/151",
+            "srfi/166/base",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/color",
+        deps: &["scheme/base", "srfi/130", "srfi/166/base"],
+    },
 ];
 
-/// build the default allowlist from SAFE_MODULES + IMPLICIT_DEPS.
-pub(crate) fn default_allowlist() -> Vec<String> {
-    SAFE_MODULES
+/// resolve a set of module paths to the complete transitive closure of their deps.
+///
+/// looks up each path in both [`VFS_MODULES_SAFE`] and [`VFS_MODULES_ALL`],
+/// follows `deps` recursively, and returns a deduplicated flat list of all
+/// module path prefixes (including the input paths themselves).
+///
+/// unknown paths (not in any registry) are included as-is but not expanded.
+pub fn resolve_module_deps(paths: &[&str]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stack: Vec<&str> = paths.to_vec();
+
+    while let Some(path) = stack.pop() {
+        if !seen.insert(path) {
+            continue;
+        }
+        result.push(path.to_string());
+
+        // look up in both registries
+        let module = VFS_MODULES_SAFE
+            .iter()
+            .chain(VFS_MODULES_ALL.iter())
+            .find(|m| m.path == path);
+
+        if let Some(m) = module {
+            for dep in m.deps {
+                if !seen.contains(dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// build the default safe allowlist — [`VFS_MODULES_SAFE`] with all transitive deps resolved.
+pub(crate) fn vfs_safe_allowlist() -> Vec<String> {
+    let paths: Vec<&str> = VFS_MODULES_SAFE.iter().map(|m| m.path).collect();
+    resolve_module_deps(&paths)
+}
+
+/// build the full allowlist — all modules from both registries with deps resolved.
+pub(crate) fn vfs_all_allowlist() -> Vec<String> {
+    let paths: Vec<&str> = VFS_MODULES_SAFE
         .iter()
-        .chain(IMPLICIT_DEPS.iter())
-        .map(|s| s.to_string())
-        .collect()
+        .chain(VFS_MODULES_ALL.iter())
+        .map(|m| m.path)
+        .collect();
+    resolve_module_deps(&paths)
 }
 
 /// A named set of Scheme primitives for environment restriction.

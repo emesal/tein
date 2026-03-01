@@ -417,7 +417,7 @@ impl Value {
     /// Extract a structured error from a Chibi exception.
     ///
     /// Detects sandbox sentinel prefixes (`[sandbox:file]`, `[sandbox:binding]`)
-    /// and module policy violations, returning `SandboxViolation` for those cases
+    /// and VFS gate violations, returning `SandboxViolation` for those cases
     /// and `EvalError` for everything else.
     unsafe fn extract_exception_error(ctx: ffi::sexp, exn: ffi::sexp) -> Error {
         unsafe {
@@ -461,14 +461,13 @@ impl Value {
                 return Error::SandboxViolation(rest.to_string());
             }
 
-            // module policy: detect import failures when sandboxed (VfsAll or Allowlist).
+            // VFS gate: detect import failures when sandboxed.
             // chibi emits "couldn't find import" from meta-7.scm (scheme level)
             // or "couldn't find file in module path" from eval.c (C level).
             if message == "couldn't find import" || message == "couldn't find file in module path" {
-                use crate::sandbox::MODULE_POLICY;
-                let is_sandboxed =
-                    MODULE_POLICY.with(|cell| cell.get() != crate::sandbox::POLICY_UNRESTRICTED);
-                if is_sandboxed {
+                use crate::sandbox::VFS_GATE;
+                let is_gated = VFS_GATE.with(|cell| cell.get() != crate::sandbox::GATE_OFF);
+                if is_gated {
                     let module = irritant_str.as_deref().unwrap_or("unknown");
                     return Error::SandboxViolation(format!(
                         "module import blocked: {} (not available in this sandbox)",
