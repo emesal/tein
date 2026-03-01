@@ -71,6 +71,8 @@ mod thread;
 mod timeout;
 #[cfg(feature = "toml")]
 mod toml;
+#[cfg(feature = "uuid")]
+mod uuid;
 mod value;
 
 pub use context::{Context, ContextBuilder};
