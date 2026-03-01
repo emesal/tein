@@ -10,6 +10,33 @@
 
 **Design doc:** `docs/plans/2026-02-28-safe-module-wrappers-design.md`
 
+## progress (branch: feature/safe-module-wrappers-2602)
+
+- ✅ task 1 — SAFE_MODULES blanket replaced (commit fa6cbee)
+- ✅ task 2 — `tein_vfs_lookup` + `sexp_voidp`/`sexp_truep` added to ffi.rs (commit 9aa29f6)
+- ✅ task 3 — exit thread-locals + eval intercepts in evaluate/evaluate_port/call (commit 5203d14)
+- ✅ task 4 — VFS files created + pushed to emesal/chibi-scheme emesal-tein (commit 943ab8f)
+- ✅ task 5 — build.rs VFS_FILES updated (commit 3948c82)
+- ⏳ task 6 — (tein file) trampolines: file_exists_trampoline, delete_file_trampoline, register_file_module
+- ⏳ task 7 — (tein load) trampoline: load_trampoline, register_load_module
+- ⏳ task 8 — (tein process) trampolines: get_env_var, get_env_vars, command_line, exit, register_process_module
+- ⏳ task 9 — scheme integration tests: tein_file.scm, tein_process.scm
+- ⏳ task 10 — AGENTS.md + sandbox.rs doc update
+- ⏳ task 11 — (already done in task 4)
+- ⏳ task 12 — final lint + full test run
+
+## notes for next session
+
+**test_tein_process_allowed_with_allow_module**: currently expected-failing — will pass once task 8 registers the process trampolines (the VFS file now exists, so the module loads, but the exports are undefined until trampolines are registered).
+
+**ffi.rs additions**: `sexp_voidp`, `sexp_truep` added as inline rust (compare against `tein_get_void()`/`tein_get_false()` — chibi macros not in shim). `vfs_lookup` safe wrapper added.
+
+**exit mechanism**: EXIT_REQUESTED + EXIT_VALUE thread-locals in context.rs. check_exit() on Context. intercepts in evaluate() (after check_fuel), evaluate_port() eval loop, and call(). Drop clears stale state.
+
+**task 6 placement**: `file_exists_trampoline` and `delete_file_trampoline` go near existing IoOp wrappers (~line 1078 in current context.rs). `register_file_module()` goes near `register_json_module()`. call registration in `build()` after toml registration.
+
+**task 8 note on n parameter**: the `exit_trampoline` uses `n: ffi::sexp_sint_t` to detect zero args. the variadic convention passes args as a list; check `ffi::sexp_nullp(args)` rather than `n == 0` to be safe.
+
 ---
 
 ### Task 1: replace `"tein/"` blanket with explicit SAFE_MODULES entries
