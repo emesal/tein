@@ -12,9 +12,8 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let ctx = Context::builder()
-//!     .standard_env()                   // load (scheme base)
-//!     .preset(&tein::sandbox::ARITHMETIC) // restrict to arithmetic
-//!     .step_limit(100_000)              // cap vm steps
+//!     .standard_env()
+//!     .step_limit(100_000)
 //!     .build()?;
 //! # Ok(())
 //! # }
@@ -30,13 +29,12 @@
 //!
 //! Four independent layers of control:
 //!
-//! 1. **Environment restriction** — [`ContextBuilder::preset()`] / [`.allow()`](ContextBuilder::allow) /
-//!    [`.pure_computation()`](ContextBuilder::pure_computation) / [`.safe()`](ContextBuilder::safe)
+//! 1. **Module restriction** — [`ContextBuilder::sandboxed()`] with [`sandbox::Modules`]
 //! 2. **Step limits** — [`ContextBuilder::step_limit()`]
 //! 3. **File IO policy** — [`ContextBuilder::file_read()`] / [`.file_write()`](ContextBuilder::file_write)
-//! 4. **Module policy** — automatic VFS-only when using standard env + presets
+//! 4. **VFS gate** — automatic VFS-only when using standard env + `sandboxed()`
 //!
-//! See the [`sandbox`](crate::sandbox) module for preset details.
+//! See the [`sandbox`](crate::sandbox) module for module set details.
 
 use crate::{
     Value,
@@ -44,10 +42,7 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{
-        FS_POLICY, FsPolicy, GATE_CHECK, Preset, VFS_ALLOWLIST, VFS_GATE, VfsGate,
-        vfs_safe_allowlist,
-    },
+    sandbox::{FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE, VfsGate},
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -138,8 +133,7 @@ thread_local! {
 
 // --- sandbox state thread-local ---
 //
-// set to true when env-restriction presets are active (i.e. the context was
-// built with .preset()/.safe()/.pure_computation()). used by (tein file)
+// set to true when sandboxed() is active. used by (tein file)
 // trampolines to distinguish unsandboxed contexts (allow all) from sandboxed
 // contexts with no file policy configured (deny). cleared on Context::drop().
 thread_local! {
@@ -988,44 +982,10 @@ impl IoOp {
     ];
 }
 
-/// Sandbox stub for disallowed bindings.
-///
-/// Registered under the name of each known preset primitive that wasn't
-/// included in the context's allowlist. When called, raises a Scheme exception
-/// with a `[sandbox:binding]` sentinel that `extract_exception_error` converts
-/// to `Error::SandboxViolation`.
-///
-/// The stub extracts its own name from the opcode's name slot (set by
-/// `sexp_define_foreign_proc` at registration time), so one function serves
-/// all stubbed bindings.
-unsafe extern "C" fn sandbox_stub(
-    ctx: ffi::sexp,
-    self_: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    _args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        let name_sexp = ffi::sexp_opcode_name(self_);
-        let name = if ffi::sexp_stringp(name_sexp) != 0 {
-            let ptr = ffi::sexp_string_data(name_sexp);
-            let len = ffi::sexp_string_size(name_sexp) as usize;
-            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
-                .unwrap_or("unknown")
-        } else {
-            "unknown"
-        };
-        let msg = format!(
-            "[sandbox:binding] '{}' is not available in this sandbox",
-            name
-        );
-        let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-        ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
-    }
-}
-
 /// UX stub for bindings excluded from module-level sandboxed contexts.
 ///
-/// Like [`sandbox_stub`], extracts its name from the opcode slot, then looks
+/// Extracts its name from the opcode's name slot (set by
+/// `sexp_define_foreign_proc` at registration time), then looks
 /// up the providing module in `STUB_MODULE_MAP` to produce an actionable hint:
 /// `"sandbox: 'map' requires (import (scheme base))"`.
 /// Converts to `Error::SandboxViolation` via the `[sandbox:binding]` sentinel.
@@ -1551,11 +1511,10 @@ pub struct ContextBuilder {
     heap_max: usize,
     step_limit: Option<u64>,
     standard_env: bool,
-    allowed_primitives: Option<Vec<&'static str>>,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
     vfs_gate: Option<VfsGate>,
-    /// new module-level sandbox configuration (task 6+).
+    /// module-level sandbox configuration.
     /// when set, activates the registry-based sandbox path in build().
     sandbox_modules: Option<crate::sandbox::Modules>,
 }
@@ -1588,76 +1547,14 @@ impl ContextBuilder {
     /// providing `define-record-type`, `import`, `map`, `for-each`, etc.
     /// Standard ports (stdin/stdout/stderr) are also initialised.
     ///
-    /// When combined with presets, the standard env is loaded first, then
-    /// the sandbox restricts it — so sandboxed code can use allowed R7RS
-    /// procedures that aren't bare primitives.
-    ///
     /// **Required for tein modules.** Feature-gated modules (json, toml, uuid)
     /// and IO modules (file, load, process) only register their trampolines
     /// when `standard_env` is active. Without this, `(import (tein ...))` will
     /// fail even if the module is in the allowlist. Typical sandboxed usage:
-    /// `Context::builder().standard_env().safe().allow(&["import"])`.
+    /// `Context::builder().standard_env().sandboxed(Modules::Safe)`.
     pub fn standard_env(mut self) -> Self {
         self.standard_env = true;
         self
-    }
-
-    /// Add all primitives from a preset to the allowlist.
-    ///
-    /// Activating any preset switches the context to restricted mode:
-    /// only explicitly allowed primitives (plus core syntax) are available.
-    /// Presets are additive — calling this multiple times combines them.
-    pub fn preset(mut self, preset: &Preset) -> Self {
-        let list = self.allowed_primitives.get_or_insert_with(Vec::new);
-        for name in preset.primitives {
-            if !list.contains(name) {
-                list.push(name);
-            }
-        }
-        self
-    }
-
-    /// Add individual primitives to the allowlist.
-    ///
-    /// Like `preset()`, activates restricted mode. Additive with presets.
-    pub fn allow(mut self, names: &[&'static str]) -> Self {
-        let list = self.allowed_primitives.get_or_insert_with(Vec::new);
-        for name in names {
-            if !list.contains(name) {
-                list.push(name);
-            }
-        }
-        self
-    }
-
-    /// Convenience: allow arithmetic + math + lists + vectors + strings + characters + type predicates.
-    ///
-    /// Suitable for pure computation with no side effects or mutation.
-    /// Does **not** include `standard_env()` — add it explicitly if you need
-    /// R7RS libraries or tein modules.
-    pub fn pure_computation(self) -> Self {
-        use crate::sandbox::*;
-        self.preset(&ARITHMETIC)
-            .preset(&MATH)
-            .preset(&LISTS)
-            .preset(&VECTORS)
-            .preset(&STRINGS)
-            .preset(&CHARACTERS)
-            .preset(&TYPE_PREDICATES)
-    }
-
-    /// Convenience: pure_computation + mutation + string_ports + stdout_only + exceptions.
-    ///
-    /// Suitable for most sandboxed use cases that don't need file/network IO.
-    /// Does **not** include `standard_env()` — chain `.standard_env().safe()`
-    /// if you need R7RS libraries or tein modules (json, toml, uuid, etc.).
-    pub fn safe(self) -> Self {
-        use crate::sandbox::*;
-        self.pure_computation()
-            .preset(&MUTATION)
-            .preset(&STRING_PORTS)
-            .preset(&STDOUT_ONLY)
-            .preset(&EXCEPTIONS)
     }
 
     /// Configure module-level sandboxing.
@@ -1695,62 +1592,49 @@ impl ContextBuilder {
 
     /// Allow file reading from paths under the given prefixes.
     ///
-    /// When combined with [`sandboxed()`](Self::sandboxed), records the prefix
-    /// list for the module-level sandbox build path, which handles IO wrapper
-    /// registration. When called without `sandboxed()`, auto-activates
-    /// `sandboxed(Modules::Safe)` (legacy behaviour).
-    ///
     /// Prefixes should be absolute paths (e.g. "/config/", "/data/").
     /// Paths are canonicalised before checking, so symlinks and `..`
     /// traversals are resolved.
+    ///
+    /// Auto-activates `sandboxed(Modules::Safe)` when called without an explicit
+    /// `sandboxed()` call.
     pub fn file_read(mut self, prefixes: &[&str]) -> Self {
         let list = self.file_read_prefixes.get_or_insert_with(Vec::new);
         for p in prefixes {
             list.push(p.to_string());
         }
-        if self.sandbox_modules.is_some() {
-            // new path: sandbox_modules handles IO wrapper registration in build()
-            self
-        } else {
-            // legacy path: ensure restricted mode + support primitives
-            self.allowed_primitives.get_or_insert_with(Vec::new);
-            self = self.preset(&crate::sandbox::FILE_READ_SUPPORT);
-            self
+        if self.sandbox_modules.is_none() {
+            // auto-activate sandboxed(Modules::Safe) when file IO is configured without explicit sandboxed()
+            self.sandbox_modules = Some(crate::sandbox::Modules::Safe);
         }
+        self
     }
 
     /// Allow file writing to paths under the given prefixes.
     ///
-    /// When combined with [`sandboxed()`](Self::sandboxed), records the prefix
-    /// list for the module-level sandbox build path, which handles IO wrapper
-    /// registration. When called without `sandboxed()`, auto-activates
-    /// `sandboxed(Modules::Safe)` (legacy behaviour).
-    ///
     /// Parent directories must exist; files will be created as needed (R7RS).
     /// Prefixes should be absolute paths (e.g. "/tmp/", "/output/").
+    ///
+    /// Auto-activates `sandboxed(Modules::Safe)` when called without an explicit
+    /// `sandboxed()` call.
     pub fn file_write(mut self, prefixes: &[&str]) -> Self {
         let list = self.file_write_prefixes.get_or_insert_with(Vec::new);
         for p in prefixes {
             list.push(p.to_string());
         }
-        if self.sandbox_modules.is_some() {
-            // new path: sandbox_modules handles IO wrapper registration in build()
-            self
-        } else {
-            // legacy path: ensure restricted mode + support primitives
-            self.allowed_primitives.get_or_insert_with(Vec::new);
-            self = self.preset(&crate::sandbox::FILE_WRITE_SUPPORT);
-            self
+        if self.sandbox_modules.is_none() {
+            self.sandbox_modules = Some(crate::sandbox::Modules::Safe);
         }
+        self
     }
 
     /// set VFS gate to allow all vetted VFS modules.
     ///
-    /// by default, sandboxed contexts use [`VFS_MODULES_SAFE`](crate::sandbox::VFS_MODULES_SAFE)
-    /// (+ transitive deps). call this to widen access to all vetted VFS modules
-    /// while still blocking filesystem module loading.
+    /// by default, sandboxed contexts use the safe registry set. call this to
+    /// widen access to all vetted VFS modules while still blocking filesystem
+    /// module loading.
     pub fn vfs_gate_all(mut self) -> Self {
-        self.vfs_gate = Some(VfsGate::Allow(crate::sandbox::vfs_all_allowlist()));
+        self.vfs_gate = Some(VfsGate::Allow(crate::sandbox::registry_all_allowlist()));
         self
     }
 
@@ -1760,13 +1644,12 @@ impl ContextBuilder {
     /// # examples
     ///
     /// ```
-    /// use tein::Context;
+    /// use tein::{Context, sandbox::Modules};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ctx = Context::builder()
     ///     .standard_env()
-    ///     .safe()
-    ///     .allow(&["import"])
+    ///     .sandboxed(Modules::Safe)
     ///     .vfs_gate_none()
     ///     .allow_module("tein/json")
     ///     .build()?;
@@ -1780,56 +1663,37 @@ impl ContextBuilder {
 
     /// add a module (+ its transitive deps) to the VFS gate allowlist.
     ///
-    /// if no gate has been explicitly set, starts from the default safe set
-    /// ([`VFS_MODULES_SAFE`](crate::sandbox::VFS_MODULES_SAFE) + deps).
-    /// dependencies are resolved automatically from the [`VfsModule`](crate::sandbox::VfsModule)
-    /// registry — callers never need to think about transitive imports.
+    /// starts from the current `Modules` variant's resolved allowlist, appends
+    /// the new module, and sets `Modules::Only(extended_list)`. dependencies are
+    /// resolved automatically from the registry — callers never need to think about
+    /// transitive imports.
     ///
     /// # examples
     ///
     /// ```
-    /// use tein::Context;
+    /// use tein::{Context, sandbox::Modules};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let ctx = Context::builder()
     ///     .standard_env()
-    ///     .safe()
-    ///     .allow(&["import"])
+    ///     .sandboxed(Modules::Safe)
     ///     .allow_module("tein/process")
     ///     .build()?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn allow_module(mut self, prefix: &str) -> Self {
-        if self.sandbox_modules.is_some() {
-            // new path: expand the Modules variant to include the additional module.
-            // Safe/All → Only(existing_list + new_module), None → Only(new_module),
-            // Only(list) → append to list. build() resolves transitive deps.
-            use crate::sandbox::{Modules, registry_all_allowlist, registry_safe_allowlist};
-            let mut base = match self.sandbox_modules.take() {
-                Some(Modules::Safe) => registry_safe_allowlist(),
-                Some(Modules::All) => registry_all_allowlist(),
-                Some(Modules::None) => Vec::new(),
-                Some(Modules::Only(list)) => list,
-                None => unreachable!(),
-            };
-            if !base.contains(&prefix.to_string()) {
-                base.push(prefix.to_string());
-            }
-            self.sandbox_modules = Some(Modules::Only(base));
-        } else {
-            // legacy path: extend the VFS gate allowlist
-            if !matches!(self.vfs_gate, Some(VfsGate::Allow(_))) {
-                self.vfs_gate = Some(VfsGate::Allow(vfs_safe_allowlist()));
-            }
-            if let Some(VfsGate::Allow(ref mut list)) = self.vfs_gate {
-                for dep in crate::sandbox::resolve_module_deps(&[prefix]) {
-                    if !list.contains(&dep) {
-                        list.push(dep);
-                    }
-                }
-            }
+        use crate::sandbox::{Modules, registry_all_allowlist, registry_safe_allowlist};
+        let mut base = match self.sandbox_modules.take().unwrap_or_default() {
+            Modules::Safe => registry_safe_allowlist(),
+            Modules::All => registry_all_allowlist(),
+            Modules::None => Vec::new(),
+            Modules::Only(list) => list,
+        };
+        if !base.contains(&prefix.to_string()) {
+            base.push(prefix.to_string());
         }
+        self.sandbox_modules = Some(Modules::Only(base));
         self
     }
 
@@ -1883,17 +1747,10 @@ impl ContextBuilder {
 
             // resolve VFS gate:
             // - explicit gate from builder takes precedence
-            // - sandboxed standard-env defaults to Allow(safe modules + deps)
+            // - sandbox_modules path sets the gate internally
             // - everything else is Off
-            let has_sandbox = self.standard_env && self.allowed_primitives.is_some();
-            let resolved_gate = self.vfs_gate.take().unwrap_or_else(|| {
-                if has_sandbox {
-                    VfsGate::Allow(vfs_safe_allowlist())
-                } else {
-                    VfsGate::Off
-                }
-            });
-            let has_vfs_gate = !matches!(resolved_gate, VfsGate::Off);
+            let resolved_gate = self.vfs_gate.take().unwrap_or(VfsGate::Off);
+            let has_vfs_gate = !matches!(resolved_gate, VfsGate::Off) || self.sandbox_modules.is_some();
 
             // save current gate values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
@@ -1912,164 +1769,13 @@ impl ContextBuilder {
                 }
             }
 
-            // has_io tracks whether any path set up IO wrappers, for Context::drop().
-            // each branch takes file_*_prefixes from self as needed.
-            let mut has_io = false;
-
-            // apply environment restrictions if presets are active.
-            // source_env is the context's current env — either the bare primitive
-            // env or the enriched standard env if standard_env was loaded above.
-            if let Some(ref allowed) = self.allowed_primitives {
-                // mark context as sandboxed so (tein file) trampolines apply policy
-                IS_SANDBOXED.with(|c| c.set(true));
-
-                // take IO prefixes for this path
-                let file_read_prefixes = self.file_read_prefixes.take();
-                let file_write_prefixes = self.file_write_prefixes.take();
-                has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
-
-                let source_env = ffi::sexp_context_env(ctx);
-                let version = ffi::sexp_make_fixnum(7);
-                let null_env = ffi::sexp_make_null_env(ctx, version);
-
-                if ffi::sexp_exceptionp(null_env) != 0 {
-                    ffi::sexp_destroy_context(ctx);
-                    return Err(Error::InitError(
-                        "failed to create null environment".to_string(),
-                    ));
-                }
-
-                // root both envs — intern, env_copy_named, and define_foreign_proc
-                // all allocate and can trigger GC. source_env is replaced as the
-                // context's env by null_env, so it becomes unreachable; null_env
-                // is only a rust local until sexp_context_env_set.
-                let _source_env_guard = ffi::GcRoot::new(ctx, source_env);
-                let _null_env_guard = ffi::GcRoot::new(ctx, null_env);
-
-                // if IO wrappers needed, capture original procs from full env first
-                if has_io {
-                    let undefined = ffi::get_void();
-                    for op in IoOp::ALL {
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let sym =
-                            ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
-                        if val != undefined {
-                            ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
-                        }
-                    }
-                }
-
-                // copy allowed primitives from the source env into the restricted env.
-                // uses env_copy_named which searches both direct bindings and
-                // rename bindings (needed when standard_env is active, since the
-                // module system stores most bindings as renames).
-                for name in allowed {
-                    let c_name = CString::new(*name).map_err(|_| {
-                        ffi::sexp_destroy_context(ctx);
-                        Error::InitError(format!("primitive name contains null bytes: {}", name))
-                    })?;
-                    ffi::env_copy_named(
-                        ctx,
-                        source_env,
-                        null_env,
-                        c_name.as_ptr(),
-                        name.len() as ffi::sexp_sint_t,
-                    );
-                }
-
-                ffi::sexp_context_env_set(ctx, null_env);
-
-                // register wrapper functions in the restricted env
-                if has_io {
-                    let read_ops = file_read_prefixes.is_some();
-                    let write_ops = file_write_prefixes.is_some();
-
-                    for op in IoOp::ALL {
-                        let want = if op.is_read() { read_ops } else { write_ops };
-                        if !want {
-                            continue;
-                        }
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let wrapper = wrapper_fn_for(op);
-                        ffi::sexp_define_foreign_proc(
-                            ctx,
-                            null_env,
-                            c_name.as_ptr(),
-                            0,
-                            ffi::SEXP_PROC_VARIADIC,
-                            c_name.as_ptr(),
-                            Some(wrapper),
-                        );
-                    }
-
-                    // set up the FsPolicy thread-local
-                    FS_POLICY.with(|cell| {
-                        *cell.borrow_mut() = Some(FsPolicy {
-                            read_prefixes: file_read_prefixes.unwrap_or_default(),
-                            write_prefixes: file_write_prefixes.unwrap_or_default(),
-                        });
-                    });
-                }
-
-                // register sandbox stubs for known primitives that weren't allowed.
-                // this gives callers a clear SandboxViolation instead of "undefined variable".
-                // stub_fn is shared across both registration passes below.
-                let stub_fn: Option<
-                    unsafe extern "C" fn(
-                        ffi::sexp,
-                        ffi::sexp,
-                        ffi::sexp_sint_t,
-                        ffi::sexp,
-                    ) -> ffi::sexp,
-                > = Some(sandbox_stub);
-
-                {
-                    use crate::sandbox::ALL_PRESETS;
-                    for preset in ALL_PRESETS {
-                        for name in preset.primitives {
-                            if !allowed.contains(name) {
-                                let c_name = CString::new(*name).unwrap();
-                                ffi::sexp_define_foreign_proc(
-                                    ctx,
-                                    null_env,
-                                    c_name.as_ptr(),
-                                    0,
-                                    ffi::SEXP_PROC_VARIADIC,
-                                    c_name.as_ptr(),
-                                    stub_fn,
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // always stub environment-escape primitives — these are never
-                // allowable in any sandboxed context regardless of preset selection.
-                {
-                    use crate::sandbox::ALWAYS_STUB;
-                    for name in ALWAYS_STUB {
-                        let c_name = CString::new(*name).unwrap();
-                        ffi::sexp_define_foreign_proc(
-                            ctx,
-                            null_env,
-                            c_name.as_ptr(),
-                            0,
-                            ffi::SEXP_PROC_VARIADIC,
-                            c_name.as_ptr(),
-                            stub_fn,
-                        );
-                    }
-                }
-            } else if let Some(ref modules) = self.sandbox_modules.take() {
-                // new registry-based sandbox path (task 7).
-                // builds a null env + import, resolves module allowlist from the
-                // Modules enum, registers UX stubs for excluded module exports.
+            if let Some(ref modules) = self.sandbox_modules.take() {
+                // registry-based sandbox path: builds a null env + import, resolves
+                // module allowlist from the Modules enum, registers UX stubs for
+                // excluded module exports.
                 use crate::sandbox::{
-                    Modules, registry_all_allowlist, registry_resolve_deps, registry_safe_allowlist,
-                    unexported_stubs,
+                    Modules, registry_all_allowlist, registry_resolve_deps,
+                    registry_safe_allowlist, unexported_stubs,
                 };
 
                 // mark sandboxed so (tein file) trampolines apply policy
@@ -2157,17 +1863,14 @@ impl ContextBuilder {
                 // IO wrappers: capture original procs from source env, register wrappers
                 let file_read_prefixes = self.file_read_prefixes.take();
                 let file_write_prefixes = self.file_write_prefixes.take();
-                has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
+                let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
                 if has_io {
                     let undefined = ffi::get_void();
                     for op in IoOp::ALL {
                         let name = op.name();
                         let c_name = CString::new(name).unwrap();
-                        let sym = ffi::sexp_intern(
-                            ctx,
-                            c_name.as_ptr(),
-                            name.len() as ffi::sexp_sint_t,
-                        );
+                        let sym =
+                            ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
                         let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
                         if val != undefined {
                             ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
@@ -2209,7 +1912,6 @@ impl ContextBuilder {
             let context = Context {
                 ctx,
                 step_limit: self.step_limit,
-                has_io_wrappers: has_io,
                 has_vfs_gate,
                 prev_vfs_gate,
                 prev_fs_policy,
@@ -2303,7 +2005,6 @@ impl ContextBuilder {
 pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
-    has_io_wrappers: bool,
     has_vfs_gate: bool,
     /// previous VFS_GATE level, restored on drop
     prev_vfs_gate: u8,
@@ -2352,14 +2053,13 @@ impl Context {
     ///
     /// Defaults to bare primitives only (no standard env, no sandboxing).
     /// Call `.standard_env()` to load R7RS libraries and tein modules,
-    /// then optionally `.safe()` / `.preset()` to sandbox.
+    /// then optionally `.sandboxed(Modules::Safe)` to restrict importable modules.
     pub fn builder() -> ContextBuilder {
         ContextBuilder {
             heap_size: DEFAULT_HEAP_SIZE,
             heap_max: DEFAULT_HEAP_MAX,
             step_limit: None,
             standard_env: false,
-            allowed_primitives: None,
             file_read_prefixes: None,
             file_write_prefixes: None,
             vfs_gate: None,
@@ -3415,16 +3115,14 @@ impl Drop for Context {
         }
 
         // restore previous FS_POLICY (typically None, unless sequential sandboxed contexts)
-        if self.has_io_wrappers {
-            FS_POLICY.with(|cell| {
-                *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
-            });
-            ORIGINAL_PROCS.with(|procs| {
-                for p in procs {
-                    p.set(std::ptr::null_mut());
-                }
-            });
-        }
+        FS_POLICY.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
+        });
+        ORIGINAL_PROCS.with(|procs| {
+            for p in procs {
+                p.set(std::ptr::null_mut());
+            }
+        });
 
         // restore sandbox flag for the thread (defensive restore-previous pattern)
         IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
@@ -4581,74 +4279,77 @@ mod tests {
         );
     }
 
-    // --- phase 2: restricted environments + presets ---
+    // --- phase 2: restricted environments (module-level sandboxing) ---
 
     #[test]
-    fn test_arithmetic_only_env() {
+    fn test_sandboxed_modules_safe_arithmetic() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::Safe)
             .build()
             .expect("builder");
-        let result = ctx.evaluate("(+ 1 2)").expect("should work");
+        // after import, arithmetic works
+        let result = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("should work");
         assert_eq!(result, Value::Integer(3));
-        let err = ctx.evaluate("(cons 1 2)").unwrap_err();
+        // modules outside safe set are blocked
+        let err = ctx.evaluate("(import (scheme eval))").unwrap_err();
         assert!(
-            matches!(err, Error::SandboxViolation(_)),
-            "cons should produce SandboxViolation in arithmetic-only env, got: {:?}",
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "scheme/eval should be blocked in Modules::Safe, got: {:?}",
             err
         );
     }
 
     #[test]
-    fn test_syntax_forms_always_available() {
+    fn test_sandboxed_modules_none_blocks_all() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("builder");
+        // even scheme/base is blocked — '+' requires import first
+        let err = ctx.evaluate("(import (scheme base))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "scheme/base should be blocked in Modules::None, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_sandboxed_modules_only_single() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
             .expect("builder");
         let result = ctx
-            .evaluate("(define x 5) (if #t (+ x 1) 0)")
+            .evaluate("(import (scheme base)) (+ 1 2)")
             .expect("should work");
-        assert_eq!(result, Value::Integer(6));
-
-        let result = ctx
-            .evaluate("((lambda (a b) (+ a b)) 3 4)")
-            .expect("lambda");
-        assert_eq!(result, Value::Integer(7));
-
-        let result = ctx.evaluate("(begin (+ 1 1) (+ 2 2))").expect("begin");
-        assert_eq!(result, Value::Integer(4));
-
-        let result = ctx.evaluate("(quote hello)").expect("quote");
-        assert_eq!(result, Value::Symbol("hello".into()));
-    }
-
-    #[test]
-    fn test_preset_composition() {
-        let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
-            .preset(&crate::sandbox::LISTS)
-            .build()
-            .expect("builder");
-        let result = ctx.evaluate("(+ 1 2)").expect("arithmetic");
         assert_eq!(result, Value::Integer(3));
-        let result = ctx.evaluate("(car (cons 1 2))").expect("lists");
-        assert_eq!(result, Value::Integer(1));
     }
 
     #[test]
-    fn test_allow_individual_primitives() {
+    fn test_sandboxed_modules_all() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .allow(&["+", "-"])
+            .standard_env()
+            .sandboxed(Modules::All)
             .build()
             .expect("builder");
-        let result = ctx.evaluate("(+ 10 (- 5 3))").expect("should work");
-        assert_eq!(result, Value::Integer(12));
-        let err = ctx.evaluate("(* 2 3)");
-        assert!(err.is_err(), "* should be undefined");
+        let result = ctx
+            .evaluate("(import (scheme write)) (write 1) #t")
+            .expect("should work");
+        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]
-    fn test_no_preset_full_env() {
+    fn test_unrestricted_env() {
         let ctx = Context::builder().build().expect("builder");
         let result = ctx
             .evaluate("(cons 1 (cons 2 (quote ())))")
@@ -4660,30 +4361,8 @@ mod tests {
     }
 
     #[test]
-    fn test_pure_computation_convenience() {
-        let ctx = Context::builder()
-            .pure_computation()
-            .build()
-            .expect("builder");
-        let r = ctx.evaluate("(+ 1 2)").expect("arithmetic");
-        assert_eq!(r, Value::Integer(3));
-        let r = ctx.evaluate("(car (cons 1 2))").expect("lists");
-        assert_eq!(r, Value::Integer(1));
-        let r = ctx.evaluate("(string? \"hello\")").expect("strings");
-        assert_eq!(r, Value::Boolean(true));
-    }
-
-    #[test]
-    fn test_safe_convenience() {
-        let ctx = Context::builder().safe().build().expect("builder");
-        let r = ctx
-            .evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")
-            .expect("should work");
-        assert_eq!(r, Value::Integer(99));
-    }
-
-    #[test]
-    fn test_foreign_fn_works_in_restricted_env() {
+    fn test_foreign_fn_works_in_sandboxed_env() {
+        use crate::sandbox::Modules;
         unsafe extern "C" fn add100(
             _ctx: crate::ffi::sexp,
             _self: crate::ffi::sexp,
@@ -4697,44 +4376,53 @@ mod tests {
         }
 
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
             .expect("builder");
         ctx.define_fn_variadic("add100", add100).expect("define fn");
-        let result = ctx.evaluate("(add100 5)").expect("should work");
+        let result = ctx
+            .evaluate("(import (scheme base)) (add100 5)")
+            .expect("should work");
         assert_eq!(result, Value::Integer(105));
     }
 
     #[test]
-    fn test_file_io_absent_in_safe_preset() {
-        let ctx = Context::builder().safe().build().expect("builder");
-        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
-        assert!(err.is_err(), "file io should be unavailable in safe preset");
+    fn test_file_io_absent_without_policy() {
+        use crate::sandbox::Modules;
+        // sandboxed with no file_read — open-input-file not in scheme/base, is absent
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        let err = ctx.evaluate("(import (scheme base)) (open-input-file \"/etc/passwd\")");
+        assert!(err.is_err(), "file io should be unavailable without file policy");
     }
 
     #[test]
     fn test_tein_process_blocked_by_default_sandbox() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .safe()
-            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .sandboxed(Modules::Safe)
             .step_limit(5_000_000)
             .build()
             .expect("sandboxed context");
         let r = ctx.evaluate("(import (tein process))");
         assert!(
             r.is_err() || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
-            "expected (tein process) to be blocked in default sandbox, got: {:?}",
+            "expected (tein process) to be blocked in Modules::Safe, got: {:?}",
             r
         );
     }
 
     #[test]
     fn test_tein_process_allowed_with_allow_module() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .safe()
-            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .sandboxed(Modules::Safe)
             .allow_module("tein/process")
             .step_limit(5_000_000)
             .build()
@@ -4784,10 +4472,10 @@ mod tests {
 
     #[test]
     fn test_tein_file_exists_sandboxed() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .safe()
-            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .sandboxed(Modules::Safe)
             .step_limit(5_000_000)
             .build()
             .unwrap();
@@ -4799,10 +4487,10 @@ mod tests {
 
     #[test]
     fn test_tein_file_exists_with_read_policy() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .safe()
-            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .sandboxed(Modules::Safe)
             .file_read(&["/"])
             .step_limit(5_000_000)
             .build()
@@ -4988,7 +4676,7 @@ mod tests {
         drop(ctx);
     }
 
-    // --- phase 4: parameterised IO presets ---
+    // --- IO policy tests ---
     //
     // IO tests use thread-local state (FS_POLICY, ORIGINAL_PROCS) so they
     // must not run concurrently on the same thread. we use a mutex to
@@ -5012,13 +4700,16 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
+        // open-input-file is registered directly as a wrapper — no (scheme file) import needed.
+        // (scheme read) provides `read` and `close-input-port`.
         let code = format!(
-            r#"(define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
+            r#"(import (scheme base)) (import (scheme read)) (define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
             file.display()
         );
         let result = ctx.evaluate(&code).expect("should succeed");
@@ -5035,7 +4726,8 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
@@ -5064,13 +4756,14 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         let code = format!(
-            r#"(define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
+            r#"(import (scheme base)) (define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
             file.display()
         );
         ctx.evaluate(&code).expect("should succeed");
@@ -5088,7 +4781,8 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
@@ -5104,7 +4798,8 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
@@ -5131,7 +4826,8 @@ mod tests {
             let canon_dir = dir.canonicalize().unwrap();
 
             let ctx = Context::builder()
-                .safe()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
                 .file_read(&[canon_dir.to_str().unwrap()])
                 .build()
                 .expect("builder");
@@ -5157,13 +4853,14 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         let code = format!(
-            r#"(define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
+            r#"(import (scheme base)) (define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
             file.display()
         );
         ctx.evaluate(&code).expect("should create new file");
@@ -5179,7 +4876,8 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
@@ -5196,9 +4894,13 @@ mod tests {
     #[test]
     fn test_file_read_without_policy() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // safe preset without file_read — open-input-file should be absent
-        let ctx = Context::builder().safe().build().expect("builder");
-        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
+        // sandboxed without file_read — open-input-file not in scope
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .build()
+            .expect("builder");
+        let err = ctx.evaluate("(import (scheme base)) (open-input-file \"/etc/passwd\")");
         assert!(
             err.is_err(),
             "open-input-file should be undefined without file_read()"
@@ -5208,9 +4910,13 @@ mod tests {
     #[test]
     fn test_file_write_without_policy() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // safe preset without file_write — open-output-file should be absent
-        let ctx = Context::builder().safe().build().expect("builder");
-        let err = ctx.evaluate("(open-output-file \"/tmp/nope.txt\")");
+        // sandboxed without file_write — open-output-file not in scope
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .build()
+            .expect("builder");
+        let err = ctx.evaluate("(import (scheme base)) (open-output-file \"/tmp/nope.txt\")");
         assert!(
             err.is_err(),
             "open-output-file should be undefined without file_write()"
@@ -5218,33 +4924,35 @@ mod tests {
     }
 
     #[test]
-    fn test_file_io_with_safe_preset() {
+    fn test_file_io_with_sandboxed_modules() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // .safe().file_read() should compose correctly
+        // sandboxed(Safe).file_read() should compose correctly
         let dir = io_test_dir("safe_compose");
         let file = dir.join("data.txt");
         std::fs::write(&file, "42").expect("write");
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
-        // arithmetic still works
-        let r = ctx.evaluate("(+ 1 2)").expect("arithmetic");
+        // arithmetic works after import
+        let r = ctx.evaluate("(import (scheme base)) (+ 1 2)").expect("arithmetic");
         assert_eq!(r, Value::Integer(3));
 
-        // mutation still works
+        // mutation works
         let r = ctx
             .evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")
             .expect("mutation");
         assert_eq!(r, Value::Integer(99));
 
-        // file read works
+        // file read works via wrapper — open-input-file is in env directly,
+        // (scheme read) provides `read`.
         let code = format!(
-            r#"(define p (open-input-file "{}")) (read p)"#,
+            r#"(import (scheme read)) (define p (open-input-file "{}")) (read p)"#,
             file.display()
         );
         let r = ctx.evaluate(&code).expect("file read");
@@ -5261,7 +4969,8 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
@@ -5336,20 +5045,19 @@ mod tests {
 
     #[test]
     fn test_standard_env_with_sandbox() {
-        // standard_env + presets: sandbox copies from the enriched standard env,
-        // but only bindings explicitly in the allowlist are available.
-        // "map" and "for-each" come from (scheme base), not from C primitives,
-        // so they must be explicitly allowed.
-        use crate::sandbox::*;
+        // sandboxed(Modules::only(["scheme/base"])) — map and for-each are
+        // available after (import (scheme base)).
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .preset(&LISTS)
-            .allow(&["map", "for-each"])
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
-        // map is allowed and comes from the standard env
+        // import scheme/base first
+        ctx.evaluate("(import (scheme base))").expect("import");
+
+        // map is available after import
         let r = ctx
             .evaluate("(map + '(1 2 3) '(10 20 30))")
             .expect("map in sandbox");
@@ -5362,18 +5070,16 @@ mod tests {
             ])
         );
 
-        // for-each works too (side-effect only, returns void)
-        // use define instead of let since for-each's closure sees the
-        // restricted env, and define creates top-level bindings.
+        // for-each works too
         ctx.evaluate("(define sandbox-sum 0)").expect("define");
         ctx.evaluate("(for-each (lambda (x) (set! sandbox-sum (+ sandbox-sum x))) '(1 2 3))")
             .expect("for-each in sandbox");
         let r = ctx.evaluate("sandbox-sum").expect("read sum");
         assert_eq!(r, Value::Integer(6));
 
-        // display is NOT in the allowlist — should be blocked
-        let err = ctx.evaluate("(display 42)");
-        assert!(err.is_err(), "display should be blocked by sandbox");
+        // eval is NOT importable (scheme/eval not in allowlist) — UX stub fires
+        let err = ctx.evaluate("(import (scheme eval))");
+        assert!(err.is_err(), "scheme/eval should be blocked by sandbox");
     }
 
     #[test]
@@ -5436,12 +5142,12 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_active_when_sandboxed() {
-        use crate::sandbox::*;
+        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK};
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
         VFS_GATE.with(|cell| {
             assert_eq!(
@@ -5456,7 +5162,7 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_off_without_sandbox() {
-        use crate::sandbox::*;
+        use crate::sandbox::{VFS_GATE, GATE_OFF};
         let ctx = Context::new_standard().expect("new_standard");
 
         VFS_GATE.with(|cell| {
@@ -5472,13 +5178,13 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_cleared_on_drop() {
-        use crate::sandbox::*;
+        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK, GATE_OFF};
         {
             let _ctx = Context::builder()
                 .standard_env()
-                .preset(&ARITHMETIC)
+                .sandboxed(Modules::only(&["scheme/base"]))
                 .build()
-                .expect("standard + sandbox");
+                .expect("standard + sandboxed");
 
             VFS_GATE.with(|cell| {
                 assert_eq!(cell.get(), GATE_CHECK);
@@ -5495,20 +5201,18 @@ mod tests {
     }
 
     #[test]
-    fn test_vfs_gate_not_set_without_standard_env() {
-        // sandbox without standard_env should NOT activate VFS gate
-        // (there's no module system to restrict)
-        use crate::sandbox::*;
+    fn test_vfs_gate_not_set_without_sandboxed() {
+        // unsandboxed context without standard_env should NOT activate VFS gate
+        use crate::sandbox::{VFS_GATE, GATE_OFF};
         let ctx = Context::builder()
-            .preset(&ARITHMETIC)
             .build()
-            .expect("sandbox without standard env");
+            .expect("bare context");
 
         VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
                 GATE_OFF,
-                "non-standard-env sandbox should not set VFS gate"
+                "unsandboxed context should not set VFS gate"
             );
         });
 
@@ -5517,16 +5221,14 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_blocks_filesystem_import() {
-        // sandboxed standard-env contexts with import allowed should block
-        // filesystem-based modules like (chibi process) via the VFS gate
-        // while still allowing VFS-based imports like (scheme write).
-        use crate::sandbox::*;
+        // sandboxed standard-env contexts should block filesystem-based modules
+        // like (chibi process) via the VFS gate while allowing VFS-based imports.
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::Safe)
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
         // VFS import should succeed
         let r = ctx.evaluate("(import (scheme write))");
@@ -5549,21 +5251,19 @@ mod tests {
 
     #[test]
     fn test_standard_env_sandbox_allows_vfs_import() {
-        // sandboxed standard-env contexts with import allowed should be able
-        // to import VFS modules and use their bindings at runtime.
-        use crate::sandbox::*;
+        // sandboxed standard-env contexts should be able to import VFS modules.
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::Safe)
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
         // import scheme write — VFS module with dependencies (srfi 38, etc.)
         let r = ctx.evaluate("(import (scheme write))");
         assert!(r.is_ok(), "(import (scheme write)) failed: {:?}", r.err());
 
-        // verify imported binding works — display returns void, write returns void
+        // verify imported binding works
         let r = ctx.evaluate("(write 42)");
         assert!(
             r.is_ok(),
@@ -5582,15 +5282,15 @@ mod tests {
     fn test_sequential_context_gate_isolation() {
         // ctx1 sets VFS gate; after drop, ctx2 must still have its gate active.
         // this tests the save/restore RAII pattern on Context::drop().
-        use crate::sandbox::ARITHMETIC;
+        use crate::sandbox::Modules;
         let ctx1 = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
         let ctx2 = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
 
@@ -5608,20 +5308,19 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_all() {
-        use crate::sandbox::*;
+        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK};
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::Safe)
             .vfs_gate_all()
             .build()
-            .expect("standard + sandbox + vfs_gate_all");
+            .expect("standard + sandboxed + vfs_gate_all");
 
         VFS_GATE.with(|cell| {
             assert_eq!(cell.get(), GATE_CHECK);
         });
 
-        // (chibi string) is in VFS_MODULES_SAFE (transitive dep of scheme/base) — works under gate_all
+        // chibi/string is a transitive dep of scheme/base — works under gate_all
         let r = ctx.evaluate("(import (chibi string))");
         assert!(
             r.is_ok(),
@@ -5642,14 +5341,13 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_allow_module() {
-        use crate::sandbox::*;
+        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK};
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::only(&["scheme/base"]))
             .allow_module("chibi/string")
             .build()
-            .expect("standard + sandbox + allow_module");
+            .expect("standard + sandboxed + allow_module");
 
         VFS_GATE.with(|cell| {
             assert_eq!(cell.get(), GATE_CHECK);
@@ -5668,15 +5366,13 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_none_with_explicit_module() {
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
-            .vfs_gate_none()
+            .sandboxed(Modules::None)
             .allow_module("tein/test")
             .build()
-            .expect("standard + sandbox + vfs_gate_none + allow_module");
+            .expect("standard + sandboxed(None) + allow_module");
 
         // tein/test was explicitly listed — should work
         let r = ctx.evaluate("(import (tein test))");
@@ -5690,7 +5386,7 @@ mod tests {
         let err = ctx.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
-            "(import (chibi process)) should fail with vfs_gate_none: {:?}",
+            "(import (chibi process)) should fail with Modules::None: {:?}",
             err
         );
 
@@ -5699,13 +5395,12 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_allowlist_raii() {
-        use crate::sandbox::*;
+        use crate::sandbox::{Modules, VFS_ALLOWLIST};
         // verify allowlist is restored, not just the gate level
         {
             let _ctx = Context::builder()
                 .standard_env()
-                .preset(&ARITHMETIC)
-                .allow(&["import"])
+                .sandboxed(Modules::only(&["scheme/base"]))
                 .allow_module("chibi/string")
                 .build()
                 .expect("context with extended allowlist");
@@ -5721,14 +5416,12 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_transitive_deps() {
-        use crate::sandbox::*;
-        // allow_module resolves transitive deps from the VfsModule registry,
+        use crate::sandbox::Modules;
+        // allow_module resolves transitive deps from the registry,
         // so adding tein/foreign also enables its deps (chibi/string etc).
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
-            .vfs_gate_none()
+            .sandboxed(Modules::None)
             .allow_module("tein/foreign")
             .build()
             .expect("minimal allowlist with dep resolution");
@@ -5972,11 +5665,11 @@ mod tests {
 
     #[test]
     fn test_file_io_sandbox_violation_type() {
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let _lock = IO_TEST_LOCK.lock().unwrap();
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::Safe)
             .file_read(&["/allowed/"])
             .build()
             .expect("builder");
@@ -5999,13 +5692,12 @@ mod tests {
 
     #[test]
     fn test_module_import_sandbox_violation_type() {
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::Safe)
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
         // VFS import should still succeed
         let r = ctx.evaluate("(import (scheme write))");
@@ -6027,45 +5719,43 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_stub_binding_violation() {
-        // arithmetic-only context should have stubs for known non-allowed primitives
-        use crate::sandbox::*;
+    fn test_ux_stub_binding_hint() {
+        // UX stubs in Modules::None context should emit informative messages
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::None)
             .build()
             .expect("builder");
 
-        // cons is in LISTS preset, not allowed — should produce SandboxViolation
-        let err = ctx.evaluate("(cons 1 2)").unwrap_err();
+        // map is from scheme/base — UX stub should hint at the providing module.
+        // use a literal arg so we don't trigger other stubs during argument evaluation.
+        let err = ctx.evaluate("(map 1)").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
-            "expected SandboxViolation for stubbed binding, got: {:?}",
+            "expected SandboxViolation for UX stub, got: {:?}",
             err
         );
         let msg = format!("{}", err);
         assert!(
-            msg.contains("not available in this sandbox"),
-            "expected 'not available in this sandbox', got: {}",
-            msg
-        );
-        assert!(
-            msg.contains("cons"),
-            "expected stub message to name 'cons', got: {}",
+            msg.contains("requires (import"),
+            "expected hint with '(import ...)', got: {}",
             msg
         );
     }
 
     #[test]
-    fn test_sandbox_stub_does_not_shadow_allowed() {
-        // allowed primitives should work normally, not be replaced by stubs
-        use crate::sandbox::*;
+    fn test_ux_stub_absent_after_import() {
+        // after importing scheme/base, its bindings work and are not stubbed
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&ARITHMETIC)
-            .preset(&LISTS)
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
             .expect("builder");
 
-        let result = ctx.evaluate("(cons 1 2)").expect("cons should work");
+        ctx.evaluate("(import (scheme base))").expect("import");
+        let result = ctx.evaluate("(cons 1 2)").expect("cons should work after import");
         assert_eq!(
             result,
             Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)))
@@ -6958,11 +6648,10 @@ mod tests {
     fn test_reader_dispatch_via_import_sandbox() {
         // regression test for #31: (import (tein reader)) must work in
         // sandboxed contexts where the module is loaded via C static lib
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import", "define"])
+            .sandboxed(Modules::Safe)
             .build()
             .expect("sandboxed context");
         ctx.evaluate("(import (tein reader))").expect("import");
@@ -7183,14 +6872,14 @@ mod tests {
     fn test_macro_expand_hook_sandbox() {
         // regression test for #31: (import (tein macro)) must work in
         // sandboxed contexts via C static library init.
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import", "define-syntax", "syntax-rules", "set!", "define"])
+            .sandboxed(Modules::Safe)
             .build()
             .expect("sandboxed context");
-        ctx.evaluate("(import (tein macro))").expect("import");
+        ctx.evaluate("(import (scheme base))").expect("import base");
+        ctx.evaluate("(import (tein macro))").expect("import macro");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -7275,48 +6964,47 @@ mod tests {
 
     #[test]
     fn test_sandbox_eval_escape_blocked() {
-        // eval + interaction-environment must be stubbed even when not in any preset.
-        // we call each one (with no args or a dummy arg) to trigger the stub.
-        // the stub fires on *call*, not on reference — so we wrap in (apply ... '()).
+        // env-escape names are not defined in sandboxed(Modules::Safe) null env.
+        // they cannot be imported (scheme/eval is excluded from Safe), so any
+        // attempt to call them must fail — either undefined or import-blocked.
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
 
-        for name in [
-            "eval",
-            "interaction-environment",
-            "primitive-environment",
-            "scheme-report-environment",
-            "current-environment",
-            "set-current-environment!",
-            "%load",
-        ] {
-            // call with no args to trigger the stub (SandboxViolation fires on call, not reference)
-            let call = format!("({})", name);
-            let err = ctx.evaluate(&call).unwrap_err();
-            assert!(
-                matches!(err, Error::SandboxViolation(_)),
-                "`{}` should be SandboxViolation in sandboxed env, got: {:?}",
-                name,
-                err
-            );
-        }
+        // (import (scheme eval)) must be blocked — scheme/eval is not in Safe
+        let err = ctx.evaluate("(import (scheme eval))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "scheme/eval import should fail in Modules::Safe, got: {:?}",
+            err
+        );
+
+        // eval itself is not in scope (not defined in null env), so any call errors
+        let err = ctx.evaluate("(eval '(+ 1 2) #f)").unwrap_err();
+        assert!(
+            err.to_string().contains("eval") || matches!(err, Error::EvalError(_)),
+            "eval call should error in sandboxed env, got: {:?}",
+            err
+        );
     }
 
     #[test]
     fn test_sandbox_eval_escape_attempt() {
-        // the classic escape: (eval expr (interaction-environment))
+        // the classic escape: eval via import of scheme/eval must be blocked
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
-        let err = ctx
-            .evaluate("(eval '(+ 1 2) (interaction-environment))")
-            .unwrap_err();
+        // scheme/eval is not in the safe set — import must fail
+        let err = ctx.evaluate("(import (scheme eval))").unwrap_err();
         assert!(
-            matches!(err, Error::SandboxViolation(_)),
-            "eval escape attempt should be SandboxViolation, got: {:?}",
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "scheme/eval escape attempt should fail, got: {:?}",
             err
         );
     }
@@ -7778,7 +7466,9 @@ mod tests {
             .expect_err("scheme/eval should be blocked");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("eval") || msg.contains("module") || msg.contains("import")
+            msg.contains("eval")
+                || msg.contains("module")
+                || msg.contains("import")
                 || msg.contains("not found"),
             "unexpected error message: {msg}"
         );
@@ -7813,8 +7503,9 @@ mod tests {
         let _builder = Context::builder().standard_env().sandboxed(Modules::Safe);
         let _builder2 = Context::builder().standard_env().sandboxed(Modules::All);
         let _builder3 = Context::builder().standard_env().sandboxed(Modules::None);
-        let _builder4 =
-            Context::builder().standard_env().sandboxed(Modules::only(&["scheme/base"]));
+        let _builder4 = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]));
     }
 
     // --- task 9: allow_module() with new sandbox path ---
@@ -7889,8 +7580,11 @@ mod tests {
             .expect_err("should be blocked");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("policy") || msg.contains("denied") || msg.contains("not allowed")
-                || msg.contains("SandboxViolation") || msg.contains("error"),
+            msg.contains("policy")
+                || msg.contains("denied")
+                || msg.contains("not allowed")
+                || msg.contains("SandboxViolation")
+                || msg.contains("error"),
             "unexpected error: {msg}"
         );
     }
