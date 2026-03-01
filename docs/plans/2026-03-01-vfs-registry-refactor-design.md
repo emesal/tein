@@ -2,146 +2,244 @@
 
 issue: #95
 
-## problem
+## problems
+
+### 1. phantom modules
 
 the VFS module registry (`VFS_MODULES_SAFE` / `VFS_MODULES_ALL` in `sandbox.rs`) lists ~80
 modules, but only ~35 have their `.sld`/`.scm` files actually embedded in the VFS
 (`build.rs` `VFS_FILES`). the rest are phantom entries — in the allowlist but not
 importable, because chibi's module resolver only searches `/vfs/lib`.
 
-this means `(import (srfi 1))` silently fails in a sandbox despite being in
-`VFS_MODULES_SAFE`. the entire module allowlist system gives a false sense of functionality.
+`(import (srfi 1))` silently fails in a sandbox despite being in `VFS_MODULES_SAFE`.
 
-## root cause
+### 2. dual-list architecture
 
-`VFS_FILES` (build.rs) and `VFS_MODULES_SAFE`/`VFS_MODULES_ALL` (sandbox.rs) evolved
-independently. modules were added to the registry without embedding their files, or the
-registry was built aspirationally. no test validates that registry entries are importable.
+`VFS_MODULES_SAFE` and `VFS_MODULES_ALL` are separate lists with overlapping entries.
+the relationship between "files embedded in VFS" and "modules in allowlist" is implicit
+and has drifted.
+
+### 3. preset layer is unnecessary
+
+the `preset()` / `allow()` API controls which individual *bindings* (like `+`, `map`,
+`string-append`) are available in the restricted env, separate from which *modules* can
+be imported. this is a second axis of control with no compelling use case:
+
+- the "arithmetic only" sandbox is a demo curiosity, not a real product need
+- real security boundaries are filesystem access, network, process, step limits, heap —
+  all controlled at the module or context level
+- removing `string-append` from a sandbox achieves nothing security-relevant
+- the machinery is complex: `env_copy_named`, `Preset` structs, `ALL_PRESETS`,
+  `ALWAYS_STUB`, per-binding cherry-picking from the source env
+
+modules already provide granular control: either you have `(scheme base)` or you don't.
 
 ## design
 
 ### single source of truth: `VfsRegistry`
 
-one master registry replaces both `VFS_MODULES_SAFE` and `VFS_MODULES_ALL`. each entry
-specifies:
+one master registry replaces `VFS_MODULES_SAFE`, `VFS_MODULES_ALL`, and `VFS_FILES`.
+each entry declares everything needed for that module:
 
 ```rust
 struct VfsEntry {
     /// module path, e.g. "scheme/char", "srfi/1"
     path: &'static str,
-    /// transitive module deps (resolved at builder time)
+    /// module deps (resolved transitively at builder time)
     deps: &'static [&'static str],
-    /// files to embed: .sld and any .scm includes, relative to chibi lib/
+    /// files to embed: .sld + included .scm, relative to chibi lib/
+    /// manually listed as part of vetting. build.rs validates against
+    /// actual (include ...) directives in the .sld — fails if mismatched.
     files: &'static [&'static str],
+    /// C static library entry, if any (replaces CLIB_ENTRIES)
+    clib: Option<ClibEntry>,
     /// whether this module is in the default safe set
     default_safe: bool,
 }
+
+struct ClibEntry {
+    /// C source file relative to chibi dir, e.g. "lib/chibi/ast.c"
+    source: &'static str,
+    /// init function suffix for the static lib table
+    init_suffix: &'static str,
+    /// VFS key for static lib lookup, e.g. "/vfs/lib/chibi/ast"
+    vfs_key: &'static str,
+}
 ```
 
-`files` is the key addition — it declares exactly which files must be in the VFS for
-this module to work. `build.rs` reads this registry (or a generated manifest) to know
-what to embed. "on the list" = "files embedded" = "importable".
+**"on the list" = "files embedded" = "importable".**
 
-modules that are dynamically generated (uuid, time) or feature-gated (json, toml) are
-handled separately — they register into the dynamic VFS at runtime and have their own
-feature-conditional registry entries.
+the registry lives in a shared file (`src/vfs_registry.rs`) that's `include!`d by both
+`sandbox.rs` and `build.rs`. pure const data, no dependencies.
 
-### builder API
+### file listing: manual with validation
 
-the builder API matches the user's mental model:
+each `VfsEntry` manually lists its files as part of the security vetting process. adding
+a module to the registry requires reviewing which files it includes.
+
+build.rs validates: for each `.sld` in the registry, parse `(include ...)` /
+`(include-ci ...)` / `(include-shared ...)` directives (including inside `cond-expand`
+branches) and verify all referenced files are in the entry's `files` list. if a `.sld`
+references a file not in the list, the build fails.
+
+for `cond-expand`, embed files from ALL branches (both threads and no-threads variants
+etc.). the cost is a few extra KiB; the benefit is one binary works for all configs.
+
+### drop the preset layer
+
+remove:
+- `Preset` struct and all 16 preset definitions
+- `ALL_PRESETS`, `ALWAYS_STUB`
+- `allow()` method (the per-binding variant)
+- `preset()` method
+- `allowed_primitives` field on `ContextBuilder`
+- the `env_copy_named` / cherry-picking / sandbox-stub machinery in `build()`
+- `has_io_wrappers` field on `Context` (IO unification from #91 design)
+
+the sandbox model becomes: `sandboxed()` creates a restricted env with syntax forms +
+`import`. all other bindings come through module imports. the VFS gate controls which
+modules are importable.
+
+the preset layer provided per-binding granularity (e.g. "allow `+` but not
+`string-append`") which has no compelling use case. real security boundaries are
+filesystem, network, process, step limits, heap — all controlled at the module or
+context level. modules already provide sufficient granularity.
+
+### new builder API
 
 ```rust
-// empty sandbox — no modules available
-ContextBuilder::new().standard_env().allow_no_modules()
+/// module set presets for sandboxed contexts.
+enum Modules {
+    /// conservative safe set — default for sandboxed contexts.
+    /// scheme/base, scheme/write, scheme/read, scheme/char, tein/*, etc.
+    Safe,
+    /// all vetted modules in the registry.
+    All,
+    /// no modules — syntax + import only.
+    None,
+    /// custom explicit module list (deps resolved automatically).
+    Only(&'static [&'static str]),
+}
 
-// default safe set
-ContextBuilder::new().standard_env().safe()
-
-// all vetted modules
-ContextBuilder::new().standard_env().safe().allow_all_modules()
-
-// custom: default + extras
-ContextBuilder::new().standard_env().safe().allow_module("tein/process")
-
-// custom: specific modules only
-ContextBuilder::new().standard_env().allow_no_modules().allow_module("srfi/1")
+impl Default for Modules {
+    fn default() -> Self { Modules::Safe }
+}
 ```
 
-`allow_module()` automatically resolves transitive deps from the registry.
+```rust
+// unsandboxed — full chibi env, no restrictions
+Context::builder().standard_env().build()
 
-### where the registry lives
+// sandboxed with default safe modules
+Context::builder().standard_env().sandboxed(Modules::Safe).build()
 
-the registry must be accessible to both `sandbox.rs` (runtime) and `build.rs` (compile
-time). options:
+// sandboxed + extra modules beyond default set
+Context::builder().standard_env().sandboxed(Modules::Safe)
+    .allow_module("tein/process")
+    .build()
 
-**option A: shared const in sandbox.rs, build.rs reads it.**
-build.rs can `include!()` a shared file, or we generate a manifest file. slightly awkward
-because build.rs runs before the crate is compiled.
+// sandboxed with all vetted modules
+Context::builder().standard_env().sandboxed(Modules::All).build()
 
-**option B: registry in a separate file, both import it.**
-a `vfs_registry.rs` that's `include!`d by both sandbox.rs and build.rs. pure const data,
-no dependencies.
+// sandboxed with specific modules only
+Context::builder().standard_env()
+    .sandboxed(Modules::only(&["scheme/base", "scheme/write"]))
+    .build()
 
-**option C: build.rs generates the file list from the registry at compile time.**
-the registry lives in sandbox.rs. build.rs generates a manifest by parsing it (or we use
-a build-time data file). build.rs collects all `files` arrays and embeds them.
+// sandboxed with nothing — syntax + import only
+Context::builder().standard_env().sandboxed(Modules::None).build()
 
-recommend **option B** — a shared data file keeps the single-source-of-truth principle
-clean. both sandbox.rs and build.rs include the same file.
+// step limit + sandbox
+Context::builder().standard_env().sandboxed(Modules::Safe)
+    .step_limit(50_000)
+    .build()
 
-### c static library entries
+// sandbox + file IO policy
+Context::builder().standard_env().sandboxed(Modules::Safe)
+    .file_read(&["/data/"])
+    .build()
+```
 
-some modules need C backends (chibi/ast, chibi/io, srfi/39, srfi/69, srfi/151,
-tein/reader, tein/macro). these are currently in `CLIB_ENTRIES` in build.rs. they should
-be part of the registry too, so the relationship between a module's .sld, .scm, and .c
-files is explicit in one place.
+- `sandboxed(preset)` = restricted env + VFS gate with given module set
+- `allow_module(path)` = additive, extends the set + transitive deps
+- `file_read()` / `file_write()` = configure FsPolicy (unchanged)
 
-### what about modules NOT in the registry?
+`Modules::Safe` is the recommended default. future presets (e.g. `Modules::Minimal`,
+`Modules::Compute`) can be added as enum variants without new API methods.
 
-modules not in the registry are not embeddable and not importable in sandboxes. in
-unsandboxed contexts (VFS gate off), chibi can still find them on the filesystem if
-`CHIBI_MODULE_PATH` is set or if they're in `./lib/`. this is fine — the registry only
-governs sandbox behaviour.
+### sandbox env construction (simplified)
 
-### migration path
+current flow: create null env → cherry-pick bindings via `env_copy_named` → install
+stubs for uncovered bindings → install IO wrappers.
 
-1. audit every module in current `VFS_MODULES_SAFE` + `VFS_MODULES_ALL`
-2. for each, determine the files needed (.sld + included .scm files)
-3. build the unified registry with `files` arrays
-4. update build.rs to read file lists from the registry
-5. remove `VFS_FILES` — it's now derived from the registry
-6. update builder API
-7. add integration test: for every registry entry, verify `(import (...))` works in sandbox
+new flow:
+1. create null env with syntax forms
+2. define `import` in null env
+3. set VFS gate with allowlist
+4. set `IS_SANDBOXED = true`
+5. set `FsPolicy` if configured
+6. set as context env
 
-### file inventory needed
-
-for each module in the registry, we need to know exactly which files chibi loads. an
-`.sld` file may `(include "foo.scm")` which may itself have deps. the safest approach:
-parse each `.sld` for `(include ...)` directives and collect transitively.
-
-build.rs could do this automatically: given a module path, find the `.sld`, parse its
-includes, and embed all referenced files. this eliminates manual file tracking entirely.
+that's it. no binding enumeration, no stubs, no presets. the module system handles
+everything — if you try to use `+` without importing `(scheme base)`, you get
+"undefined variable", which is the correct r7rs behaviour.
 
 ### dynamic / feature-gated modules
 
 - **uuid, time**: generated by `#[tein_module]`, registered at runtime via
-  `tein_vfs_register()`. not in the shared registry's `files` arrays. instead, the
-  registry marks them as `generated = true` and build.rs skips them.
-- **json, toml**: feature-gated in cargo. the registry marks them with a feature flag.
-  build.rs conditionally includes their files.
+  `tein_vfs_register()`. registry entry has `files: &[]` and a marker indicating dynamic
+  generation. build.rs skips them for embedding.
+- **json, toml**: feature-gated. registry entry has a feature marker. build.rs
+  conditionally includes their files. runtime registry lookup is also conditional.
+
+### what about modules NOT in the registry?
+
+not embeddable, not importable in sandboxes. in unsandboxed contexts (VFS gate off),
+chibi can find them on the filesystem via `CHIBI_MODULE_PATH` as usual.
+
+### bootstrap modules
+
+`init-7.scm` and `meta-7.scm` are bootstrap files, not modules. they're loaded before
+the module system exists. they stay as separate entries in build.rs, outside the registry.
+
+similarly, `scheme/base.sld` and its `.scm` includes are special — they're loaded during
+`load_standard_env` before the sandbox is set up. they must always be embedded regardless
+of module selection. the registry still lists them (for allowlist purposes) but build.rs
+embeds them unconditionally.
 
 ### VFS shadow modules (future, #91)
 
-the shadow system (dynamic VFS registration of replacement `.sld` files) sits on top of
-this foundation. once the registry is solid, shadows are just additional dynamic VFS
-entries registered during sandboxed context build.
+the shadow system (dynamic VFS registration of replacement `.sld` files for
+`scheme/file`, `scheme/load`, etc.) sits on top of this foundation. once the registry is
+solid, shadows are just additional dynamic VFS entries registered during sandboxed
+context build.
+
+## backward compatibility
+
+this is a **breaking API change**. `preset()`, `allow()`, `safe()`, `pure_computation()`
+are all removed. migration guide:
+
+```rust
+// before                                  // after
+.safe()                                    .sandboxed(Modules::Safe)
+.safe().allow_module("tein/process")       .sandboxed(Modules::Safe).allow_module("tein/process")
+.preset(&ARITHMETIC)                       .sandboxed(Modules::only(&["scheme/base"]))
+.pure_computation()                        .sandboxed(Modules::only(&["scheme/base"]))
+.preset(&ARITHMETIC).allow(&["import"])    .sandboxed(Modules::only(&["scheme/base"]))
+```
+
+backward compat is not a priority per AGENTS.md. version bump accordingly.
 
 ## tests
 
-- for every module in the registry: `(import (...))` succeeds in a sandboxed context
-- for every module NOT in the registry: `(import (...))` fails in a sandboxed context
-- `allow_module("X")` makes X and its transitive deps importable
-- `allow_no_modules()` results in no imports possible
-- default safe set matches documented expectations
-- feature-gated modules only available when feature is enabled
-- dynamic modules (uuid, time) available when feature is enabled
+- for every default-safe module: `(import (...))` succeeds in `Modules::Safe` context
+- for every non-default module: `(import (...))` fails in `Modules::Safe` but succeeds
+  when explicitly allowed via `allow_module()`
+- `Modules::None`: only syntax available, `(+ 1 2)` → undefined variable
+- `Modules::All`: every registry module importable
+- `allow_module("X")` automatically makes transitive deps importable
+- feature-gated modules only available when feature enabled
+- dynamic modules (uuid, time) available when feature enabled
+- build.rs validation: `.sld` with undeclared `(include ...)` fails the build
+- unsandboxed context: all modules importable regardless of registry
+- `file_read()` / `file_write()` still works with new sandbox model
