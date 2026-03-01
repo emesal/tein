@@ -18,53 +18,12 @@
 - ✅ task 4 — VFS files pushed to emesal/chibi-scheme emesal-tein (commits 943ab8f + chibi fork eaff5d3a/3419bda8)
 - ✅ task 5 — build.rs VFS_FILES updated (commit 3948c82)
 - ✅ task 6 — (tein file) trampolines implemented (commit 127a96c)
-- 🔴 task 7 — (tein load) trampoline BLOCKED: `(import (tein load))` fails, see blocker notes below
+- ✅ task 7 — (tein load) trampoline fixed (chibi fork commit f6032248): use `(export (rename tein-load-vfs-internal load))` in load.sld — library body `(include ...)` cannot see globals registered via define_fn_variadic, but export resolution can. 655/655 tests pass.
 - ✅ task 8 — (tein process) trampolines implemented (commit 127a96c)
 - ✅ task 9 — scheme integration tests added (commit 8893cf4)
 - ✅ task 10 — AGENTS.md + sandbox.rs doc updated (commit ff0b91d)
-- ⏳ task 11 — resolve (tein load) import blocker, then final lint + full test run
-- ⏳ task 12 — final lint + full test run (blocked by task 11)
-
-## notes for next session
-
-**BLOCKER: (tein load) import fails**
-
-`(import (tein load))` returns `EvalError("")` (chibi's silent error). root cause not yet identified.
-
-Findings:
-- `tein-load-vfs-internal` IS accessible in the global env (confirmed via test: `Ok(Procedure(...))`)
-- `load.scm` in VFS contains `(define load tein-load-vfs-internal)` and the VFS data is correct
-- `load.sld` uses `(include "load.scm")` — same pattern as `json.sld` and `test.sld`
-- json import works fine; load doesn't — something specific to `load.scm`
-- When DEBUG tested with manual `(define load tein-load-vfs-internal)` before import, got `"undefined variable: (include)"` and `WARNING: exception inside undefined operator: define-library`
-
-Hypothesis: the `(define load tein-load-vfs-internal)` inside `load.scm` is being evaluated **without** the library environment context, possibly because chibi's `include` mechanism for library bodies doesn't give access to `tein-load-vfs-internal` which is in the top-level env (not the library's import chain). The library only imports `(scheme base)` so `tein-load-vfs-internal` may be invisible.
-
-**Option A**: Move `tein-load-vfs-internal` registration into a chibi static library (like `reader.c` / `macro.c`) that gets loaded at library import time. Complex.
-
-**Option B**: Export `tein-load-vfs-internal` from `load.sld` directly (same pattern as json/toml exports) and have scheme code alias it: but scheme callers would need to do `(define load tein-load-vfs-internal)` themselves.
-
-**Option C**: Register `tein-load-vfs-internal` at the scheme level in `load.scm` via eval — but that requires interaction-environment access.
-
-**Option D (simplest to try)**: Remove `load.scm` content. Instead, have `load.sld` export `tein-load-vfs-internal` as `load` directly using chibi's `rename` in export:
-```scheme
-(define-library (tein load)
-  (import (scheme base))
-  (export (rename tein-load-vfs-internal load)))
-```
-This would work if chibi can find `tein-load-vfs-internal` in the global env during export resolution.
-
-**Option E**: Don't export `load` at all from `(tein load)`. Instead, let users do `(define load tein-load-vfs-internal)` manually. Ugly.
-
-**Current state of tests**: all tests pass EXCEPT the 3 `test_tein_load_*` tests. `just test` fails. Need to resolve before PR.
-
-**chibi fork location**: `~/forks/chibi-scheme` (NOT `target/chibi-scheme` which gets cargo-reset). changes must be committed + pushed from `~/forks/chibi-scheme`.
-
-**IS_SANDBOXED thread-local**: added to context.rs to distinguish unsandboxed (allow all) from sandboxed (deny without FsPolicy). set when presets are applied in build(). prev_is_sandboxed stored in Context struct, restored on drop.
-
-**file module simplified**: `(tein file)` exports only `file-exists?` and `delete-file`. open-* wrappers dropped from exports — available from standard env already. `file.scm` is just doc comments.
-
-**load module trampoline name**: registered as `tein-load-vfs-internal` (not `load`) to avoid breaking chibi's module loader. the intention is for `load.scm` to alias it as `load` in the library body — but this is currently failing.
+- ✅ task 11 — resolved (tein load) import blocker + final lint + full test run (655/655 pass)
+- ⏳ task 12 — commit + PR
 
 ---
 
