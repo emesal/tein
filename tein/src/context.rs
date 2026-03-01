@@ -1030,104 +1030,6 @@ unsafe extern "C" fn ux_stub(
     }
 }
 
-/// Shared policy check + delegation for all file-open wrappers.
-///
-/// Extracts the filename from the first arg, checks against FsPolicy,
-/// and either delegates to the original primitive or returns a policy error.
-unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::sexp {
-    unsafe {
-        // extract filename string from first arg
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "open-file: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let path =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
-
-        // check policy
-        let allowed = FS_POLICY.with(|cell| {
-            let policy = cell.borrow();
-            match &*policy {
-                Some(p) => {
-                    if op.is_read() {
-                        p.check_read(path)
-                    } else {
-                        p.check_write(path)
-                    }
-                }
-                None => false,
-            }
-        });
-
-        if !allowed {
-            let op_kind = if op.is_read() { "read" } else { "write" };
-            let msg = format!("[sandbox:file] {} ({} not permitted)", path, op_kind);
-            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        // delegate to original primitive
-        let original = ORIGINAL_PROCS.with(|procs| procs[op as usize].get());
-        ffi::sexp_apply_proc(ctx, original, args)
-    }
-}
-
-// 4 wrapper functions — one per file-opening primitive.
-// each is a thin shim that calls check_and_delegate with the right IoOp.
-
-unsafe extern "C" fn wrapper_open_input_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::InputFile) }
-}
-
-unsafe extern "C" fn wrapper_open_binary_input_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::BinaryInputFile) }
-}
-
-unsafe extern "C" fn wrapper_open_output_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::OutputFile) }
-}
-
-unsafe extern "C" fn wrapper_open_binary_output_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::BinaryOutputFile) }
-}
-
-/// Get the wrapper function pointer for a given IoOp.
-fn wrapper_fn_for(
-    op: IoOp,
-) -> unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp {
-    match op {
-        IoOp::InputFile => wrapper_open_input_file,
-        IoOp::BinaryInputFile => wrapper_open_binary_input_file,
-        IoOp::OutputFile => wrapper_open_output_file,
-        IoOp::BinaryOutputFile => wrapper_open_binary_output_file,
-    }
-}
-
 // --- trampoline helpers ---
 
 /// Extract the first argument as a `&str`, returning an error sexp on type mismatch.
@@ -1265,8 +1167,7 @@ unsafe fn capture_file_originals(ctx: ffi::sexp, env: ffi::sexp) {
         for op in IoOp::ALL {
             let name = op.name();
             let c_name = CString::new(name).unwrap();
-            let sym =
-                ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+            let sym = ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
             let val = ffi::sexp_env_ref(ctx, env, sym, undefined);
             if val != undefined {
                 ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
@@ -1909,44 +1810,16 @@ impl ContextBuilder {
                     );
                 }
 
-                // IO wrappers: capture original procs from source env, register wrappers
+                ffi::sexp_context_env_set(ctx, null_env);
+            }
+
+            // set FsPolicy if file_read() or file_write() was configured.
+            // placed outside the sandbox block so it works for both sandboxed and
+            // unsandboxed contexts with file policy configured.
+            {
                 let file_read_prefixes = self.file_read_prefixes.take();
                 let file_write_prefixes = self.file_write_prefixes.take();
-                let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
-                if has_io {
-                    let undefined = ffi::get_void();
-                    for op in IoOp::ALL {
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let sym =
-                            ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
-                        if val != undefined {
-                            ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
-                        }
-                    }
-
-                    let read_ops = file_read_prefixes.is_some();
-                    let write_ops = file_write_prefixes.is_some();
-                    for op in IoOp::ALL {
-                        let want = if op.is_read() { read_ops } else { write_ops };
-                        if !want {
-                            continue;
-                        }
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let wrapper = wrapper_fn_for(op);
-                        ffi::sexp_define_foreign_proc(
-                            ctx,
-                            null_env,
-                            c_name.as_ptr(),
-                            0,
-                            ffi::SEXP_PROC_VARIADIC,
-                            c_name.as_ptr(),
-                            Some(wrapper),
-                        );
-                    }
-
+                if file_read_prefixes.is_some() || file_write_prefixes.is_some() {
                     FS_POLICY.with(|cell| {
                         *cell.borrow_mut() = Some(FsPolicy {
                             read_prefixes: file_read_prefixes.unwrap_or_default(),
@@ -1954,8 +1827,6 @@ impl ContextBuilder {
                         });
                     });
                 }
-
-                ffi::sexp_context_env_set(ctx, null_env);
             }
 
             let context = Context {
@@ -3042,7 +2913,10 @@ impl Context {
         self.define_fn_variadic("open-input-file", open_input_file_trampoline)?;
         self.define_fn_variadic("open-binary-input-file", open_binary_input_file_trampoline)?;
         self.define_fn_variadic("open-output-file", open_output_file_trampoline)?;
-        self.define_fn_variadic("open-binary-output-file", open_binary_output_file_trampoline)?;
+        self.define_fn_variadic(
+            "open-binary-output-file",
+            open_binary_output_file_trampoline,
+        )?;
         Ok(())
     }
 
@@ -5119,10 +4993,7 @@ mod tests {
         // unsandboxed: open-input-file trampoline delegates to chibi original unconditionally
         let tmp = "/tmp/tein_open_unsandboxed_test.txt";
         std::fs::write(tmp, "test").expect("write");
-        let ctx = Context::builder()
-            .standard_env()
-            .build()
-            .expect("builder");
+        let ctx = Context::builder().standard_env().build().expect("builder");
         let r = ctx.evaluate(&format!(
             "(import (tein file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
         ));
@@ -7766,9 +7637,8 @@ mod tests {
             .build()
             .expect("builder");
         // (scheme repl) in sandbox should resolve to our shadow
-        let r = ctx.evaluate(
-            "(import (scheme base) (scheme repl)) (procedure? interaction-environment)"
-        );
+        let r = ctx
+            .evaluate("(import (scheme base) (scheme repl)) (procedure? interaction-environment)");
         assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
     }
 }
