@@ -91,6 +91,13 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   lib/tein/json.scm  — module documentation (trampolines registered by rust runtime)
   lib/tein/toml.sld  — (tein toml) library definition + exports toml-parse, toml-stringify
   lib/tein/toml.scm  — module documentation (trampolines registered by rust runtime)
+  lib/tein/file.sld  — (tein file) library definition + exports file-exists?, delete-file
+  lib/tein/file.scm  — module documentation (trampolines registered by rust runtime)
+  lib/tein/load.sld  — (tein load) library definition; aliases tein-load-vfs-internal as load
+  lib/tein/load.scm  — module documentation (trampoline registered as tein-load-vfs-internal)
+  lib/tein/process.sld — (tein process) library definition + exports get-environment-variable,
+                        get-environment-variables, command-line, exit (NOT in SAFE_MODULES)
+  lib/tein/process.scm — module documentation (trampolines registered by rust runtime)
 build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-level tests)
@@ -100,9 +107,11 @@ tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-le
 
 **standard env flow**: ContextBuilder with `.standard_env()` → load_standard_env (init-7 + meta-7 via VFS) → load_standard_ports → ~200 bindings (map, for-each, values, dynamic-wind, etc.)
 
-**sandboxing flow**: ContextBuilder with presets → get source env (primitive or standard) → GC-root both envs → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames, NULL-safe parent walk) → set as active env. `.allow(&["import"])` enables idiomatic r7rs imports (VFS-only via module policy)
+**sandboxing flow**: ContextBuilder with presets → set IS_SANDBOXED thread-local → get source env (primitive or standard) → GC-root both envs → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames, NULL-safe parent walk) → set as active env. `.allow(&["import"])` enables idiomatic r7rs imports (VFS-only via module policy). IS_SANDBOXED is used by (tein file) trampolines to distinguish unsandboxed (allow all) from sandboxed (require FsPolicy); restored to previous value on drop.
 
 **IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
+
+**exit escape hatch flow**: `(import (tein process))` → `(exit)` / `(exit obj)` sets EXIT_REQUESTED + EXIT_VALUE thread-locals + returns exception to stop VM immediately → eval loop (`evaluate`/`evaluate_port`/`call`) intercepts via `check_exit()` → clears flags → converts EXIT_VALUE to `Value` → returns `Ok(value)` to rust caller. `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj. does not invoke dynamic-wind cleanup (emergency-exit semantics). EXIT_REQUESTED/EXIT_VALUE cleared on Context::drop().
 
 **module policy flow**: ContextBuilder with standard_env + presets → resolve policy (explicit builder policy, or default Allowlist(SAFE_MODULES + IMPLICIT_DEPS) for sandboxed, Unrestricted otherwise) → set MODULE_POLICY level (u8) + MODULE_ALLOWLIST (Vec<String>) thread-locals + C-level tein_module_policy → sexp_find_module_file_raw calls tein_module_allowed() → policy 0: allow all, policy 1: VFS prefix check only, policy 2: .sld files checked via rust callback (tein_module_allowlist_check) strips /vfs/lib/ prefix and checks against MODULE_ALLOWLIST; .scm includes pass unconditionally (reachable only after .sld allowed) → policy + allowlist cleared on Context::drop() via RAII
 
@@ -154,6 +163,10 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **chibi feature flags**: on linux, `SEXP_USE_GREEN_THREADS` defaults to 1, so the `threads` cond-expand feature is active (affects which VFS files are loaded, e.g. `srfi/39/syntax.scm` vs `syntax-no-threads.scm`). `full-unicode` is always enabled (affects `scheme/char.sld` path selection).
 
 **json alist round-trip via chibi**: `Value::from_raw` collapses dotted pairs `(key . val)` into proper lists when `val` is itself a proper list — e.g. `("x" . (("y" . 1)))` becomes `Value::List(["x", Value::Pair("y",1)])`. this loses alist structure needed for json object detection. `json_stringify_raw` (used by the scheme trampoline) works directly at the raw sexp level to detect alist entries via `sexp_pairp + sexp_stringp(car)`, bypassing `from_raw`. the rust-only `json_stringify` path (test-only) via sexp_bridge remains correct since it operates on hand-built `Value`s that haven't been through chibi.
+
+**load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(begin (define load tein-load-vfs-internal))` in `load.sld`, so it's only active in scopes that explicitly import the module.
+
+**SAFE_MODULES excludes (tein process)**: the module allowlist for `Preset::Safe` does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_all()` to enable it explicitly.
 
 ## adding a new scheme type
 

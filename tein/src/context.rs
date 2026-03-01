@@ -4579,9 +4579,7 @@ mod tests {
     fn test_tein_process_get_env_vars() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
-        let r = ctx
-            .evaluate("(pair? (get-environment-variables))")
-            .unwrap();
+        let r = ctx.evaluate("(pair? (get-environment-variables))").unwrap();
         assert_eq!(r, Value::Boolean(true), "should return non-empty alist");
     }
 
