@@ -1958,7 +1958,7 @@ impl ContextBuilder {
             };
 
             // register feature-gated module trampolines for standard-env contexts.
-            // these are pure data operations (format conversion, uuid generation),
+            // these are pure data operations (format conversion, uuid generation, time),
             // no IO — always safe and cheap to register.
             #[cfg(feature = "json")]
             if self.standard_env {
@@ -1973,6 +1973,11 @@ impl ContextBuilder {
             #[cfg(feature = "uuid")]
             if self.standard_env {
                 crate::uuid::uuid_impl::register_module_uuid(&context)?;
+            }
+
+            #[cfg(feature = "time")]
+            if self.standard_env {
+                crate::time::time_impl::register_module_time(&context)?;
             }
 
             if self.standard_env {
