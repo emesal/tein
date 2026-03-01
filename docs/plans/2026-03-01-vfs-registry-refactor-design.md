@@ -118,7 +118,14 @@ enum Modules {
     /// no modules — syntax + import only.
     None,
     /// custom explicit module list (deps resolved automatically).
-    Only(&'static [&'static str]),
+    Only(Vec<String>),
+}
+
+impl Modules {
+    /// construct a custom module list. deps resolved automatically.
+    pub fn only(modules: &[&str]) -> Self {
+        Modules::Only(modules.iter().map(|s| s.to_string()).collect())
+    }
 }
 
 impl Default for Modules {
