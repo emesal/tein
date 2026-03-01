@@ -5347,7 +5347,7 @@ mod tests {
             assert_eq!(cell.get(), GATE_CHECK);
         });
 
-        // (chibi string) is in VFS but not in VFS_MODULES_SAFE — should work under gate_all
+        // (chibi string) is in VFS_MODULES_SAFE (transitive dep of scheme/base) — works under gate_all
         let r = ctx.evaluate("(import (chibi string))");
         assert!(
             r.is_ok(),
