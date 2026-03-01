@@ -1734,11 +1734,25 @@ fn gen_arg_extraction(arg_name: &syn::Ident, ty: &Type, index: usize) -> proc_ma
             };
             __tein_current_args = tein::raw::sexp_cdr(__tein_current_args);
         },
+        // accept any scheme value as a tein::Value — no type check needed,
+        // from_raw converts whatever sexp chibi passes. on conversion failure
+        // (shouldn't happen for valid sexps) returns a descriptive error string
+        // so LLM callers get actionable diagnostics rather than silent Nil.
         "Value" => quote! {
             let #arg_name: tein::Value = {
                 let raw = tein::raw::sexp_car(__tein_current_args);
                 // safety: ctx and raw come from chibi-scheme internals
-                unsafe { tein::Value::from_raw(ctx, raw).unwrap_or(tein::Value::Nil) }
+                match unsafe { tein::Value::from_raw(ctx, raw) } {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let msg = format!(
+                            "failed to convert argument '{}': {}",
+                            stringify!(#arg_name), e
+                        );
+                        let c_msg = ::std::ffi::CString::new(msg.clone()).unwrap();
+                        return tein::raw::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as tein::raw::sexp_sint_t);
+                    }
+                }
             };
             __tein_current_args = tein::raw::sexp_cdr(__tein_current_args);
         },

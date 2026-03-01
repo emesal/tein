@@ -1531,6 +1531,12 @@ impl ContextBuilder {
     /// When combined with presets, the standard env is loaded first, then
     /// the sandbox restricts it — so sandboxed code can use allowed R7RS
     /// procedures that aren't bare primitives.
+    ///
+    /// **Required for tein modules.** Feature-gated modules (json, toml, uuid)
+    /// and IO modules (file, load, process) only register their trampolines
+    /// when `standard_env` is active. Without this, `(import (tein ...))` will
+    /// fail even if the module is in the allowlist. Typical sandboxed usage:
+    /// `Context::builder().standard_env().safe().allow(&["import"])`.
     pub fn standard_env(mut self) -> Self {
         self.standard_env = true;
         self
@@ -1567,6 +1573,8 @@ impl ContextBuilder {
     /// Convenience: allow arithmetic + math + lists + vectors + strings + characters + type predicates.
     ///
     /// Suitable for pure computation with no side effects or mutation.
+    /// Does **not** include `standard_env()` — add it explicitly if you need
+    /// R7RS libraries or tein modules.
     pub fn pure_computation(self) -> Self {
         use crate::sandbox::*;
         self.preset(&ARITHMETIC)
@@ -1581,6 +1589,8 @@ impl ContextBuilder {
     /// Convenience: pure_computation + mutation + string_ports + stdout_only + exceptions.
     ///
     /// Suitable for most sandboxed use cases that don't need file/network IO.
+    /// Does **not** include `standard_env()` — chain `.standard_env().safe()`
+    /// if you need R7RS libraries or tein modules (json, toml, uuid, etc.).
     pub fn safe(self) -> Self {
         use crate::sandbox::*;
         self.pure_computation()
@@ -1959,8 +1969,9 @@ impl ContextBuilder {
                 ext_api: RefCell::new(None),
             };
 
-            // register built-in module trampolines for standard-env contexts.
-            // pure data conversion, no IO — always safe and cheap to register.
+            // register feature-gated module trampolines for standard-env contexts.
+            // these are pure data operations (format conversion, uuid generation),
+            // no IO — always safe and cheap to register.
             #[cfg(feature = "json")]
             if self.standard_env {
                 context.register_json_module()?;
@@ -2080,6 +2091,10 @@ impl Context {
     }
 
     /// Create a builder for configuring a context.
+    ///
+    /// Defaults to bare primitives only (no standard env, no sandboxing).
+    /// Call `.standard_env()` to load R7RS libraries and tein modules,
+    /// then optionally `.safe()` / `.preset()` to sandbox.
     pub fn builder() -> ContextBuilder {
         ContextBuilder {
             heap_size: DEFAULT_HEAP_SIZE,

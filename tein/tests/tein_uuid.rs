@@ -117,3 +117,29 @@ fn test_uuid_docs() {
         panic!("describe returned non-string: {:?}", desc);
     }
 }
+
+#[test]
+fn test_uuid_in_sandbox() {
+    let ctx = Context::builder()
+        .standard_env()
+        .safe()
+        .allow(&["import"])
+        .build()
+        .expect("sandboxed context");
+    ctx.evaluate("(import (tein uuid))")
+        .expect("import in sandbox");
+    let val = ctx.evaluate("(make-uuid)").expect("make-uuid in sandbox");
+    assert!(
+        matches!(val, Value::String(_)),
+        "expected string, got {:?}",
+        val
+    );
+    assert_eq!(
+        ctx.evaluate("(uuid? (make-uuid))").unwrap(),
+        Value::Boolean(true)
+    );
+    assert_eq!(
+        ctx.evaluate("uuid-nil").unwrap(),
+        Value::String("00000000-0000-0000-0000-000000000000".to_string())
+    );
+}
