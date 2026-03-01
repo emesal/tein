@@ -94,8 +94,7 @@ fn test_jiffies_per_second_value() {
 fn test_time_in_sandbox() {
     let ctx = Context::builder()
         .standard_env()
-        .safe()
-        .allow(&["import"])
+        .sandboxed(tein::sandbox::Modules::Safe)
         .build()
         .expect("sandboxed context");
     ctx.evaluate("(import (tein time))")

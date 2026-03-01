@@ -143,24 +143,23 @@ In a standard-env context, Scheme code can use `import`:
 (import (srfi 1))   ; SRFI-1 list library, also in the VFS
 ```
 
-In a sandboxed context, `import` is not available unless you explicitly allow it:
+In a sandboxed context, `import` is available and restricted to vetted VFS modules:
 
 ```rust
 let ctx = Context::builder()
     .standard_env()
-    .preset(&tein::sandbox::ARITHMETIC)
-    .allow(&["import"])   // enable (import ...) — VFS-only, filesystem blocked
+    .sandboxed(tein::sandbox::Modules::Safe)
     .build()?;
 ```
 
 ```scheme
-(import (scheme base))         ; works — VFS module
-(import (scheme file))         ; blocked — sandbox preset doesn't include file ops
+(import (scheme base))         ; works — in the safe module set
+(import (scheme eval))         ; blocked — scheme/eval is not in Modules::Safe
 ```
 
-The VFS gate is automatic: any context with `.standard_env()` + a preset
+The VFS gate is automatic: any context with `.standard_env()` + `.sandboxed(...)`
 restricts `import` to vetted VFS modules only. Filesystem modules are always
-blocked in sandboxed contexts, even if you enable `import`.
+blocked in sandboxed contexts.
 
 ---
 
@@ -168,43 +167,51 @@ blocked in sandboxed contexts, even if you enable `import`.
 
 tein's sandboxing has four independent layers you can combine freely.
 
-### Layer 1: Environment restriction (presets)
+### Layer 1: Module restriction
 
-Presets define which Scheme primitives are visible. A sandboxed context starts with
-core syntax only and gets exactly the primitives you add via presets.
+`sandboxed(modules)` restricts which VFS modules Scheme code can import. The full
+standard env is built first; then a restricted null env is constructed containing only
+the bindings exported by the allowed modules.
 
 ```rust
-use tein::sandbox::{ARITHMETIC, LISTS, STRINGS};
+use tein::sandbox::Modules;
 
+// conservative safe set — scheme/base, scheme/write, scheme/read, srfi/*, tein/* (no eval/repl)
 let ctx = Context::builder()
-    .preset(&ARITHMETIC)  // +, -, *, /, =, <, >, number?, ...
-    .preset(&LISTS)       // cons, car, cdr, list, map, filter, ...
-    .preset(&STRINGS)     // string-length, substring, string-append, ...
+    .standard_env()
+    .sandboxed(Modules::Safe)
+    .build()?;
+
+// all vetted modules — superset of Safe, includes scheme/eval, scheme/repl
+let ctx = Context::builder()
+    .standard_env()
+    .sandboxed(Modules::All)
+    .build()?;
+
+// syntax only — core syntax + import, but all module imports rejected by VFS gate
+let ctx = Context::builder()
+    .standard_env()
+    .sandboxed(Modules::None)
+    .build()?;
+
+// explicit list — transitive deps resolved automatically
+let ctx = Context::builder()
+    .standard_env()
+    .sandboxed(Modules::only(&["scheme/base", "scheme/write"]))
     .build()?;
 ```
 
-Available presets: `ARITHMETIC`, `MATH`, `LISTS`, `STRINGS`, `CHARACTERS`, `BOOLEANS`,
-`TYPE_PREDICATES`, `VECTORS`, `BYTEVECTORS`, `MUTATION`, `STRING_PORTS`, `STDOUT_ONLY`,
-`CONTROL`, `EXCEPTIONS`, `FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`.
+With `Modules::None`, UX stubs are injected for every known binding — calling `map`
+in a `None` context returns an informative error like `"sandbox: 'map' requires
+(import (scheme base))"` rather than an opaque undefined-variable error.
 
-Convenience builders combine common presets:
-
-```rust
-let ctx = Context::builder()
-    .pure_computation()   // ARITHMETIC + MATH + LISTS + STRINGS + CHARACTERS + TYPE_PREDICATES + VECTORS
-    .build()?;
-
-let ctx = Context::builder()
-    .safe()               // pure_computation + MUTATION + STRING_PORTS + STDOUT_ONLY + EXCEPTIONS
-    .build()?;
-```
-
-You can also allow individual bindings by name:
+You can add extra modules on top of any `Modules` variant:
 
 ```rust
 let ctx = Context::builder()
-    .preset(&ARITHMETIC)
-    .allow(&["display", "newline"])  // add specific bindings
+    .standard_env()
+    .sandboxed(Modules::Safe)
+    .allow_module("tein/process")  // explicitly enable process module
     .build()?;
 ```
 
@@ -230,21 +237,27 @@ Allow filesystem access only to specific path prefixes:
 ```rust
 let ctx = Context::builder()
     .standard_env()
-    .preset(&tein::sandbox::MUTATION)
+    .sandboxed(Modules::Safe)
     .file_read(&["/data/config/"])    // read allowed under this prefix
     .file_write(&["/tmp/output/"])   // write allowed under this prefix
     .build()?;
 ```
 
-Path canonicalisation protects against `../` traversal and symlink attacks.
+File IO wrappers are injected directly into the restricted env — no `(import (scheme file))`
+is needed in Scheme code. Path canonicalisation protects against `../` traversal and symlink
+attacks.
 
-### Layer 4: Module policy
+### Layer 4: VFS gate
 
-When `.standard_env()` + any preset is used, `import` is automatically restricted
-to VFS modules. No configuration needed — this is automatic.
+When `.sandboxed(...)` is used, `import` is automatically restricted to vetted VFS modules.
+The gate is set at build time from the `Modules` configuration — no extra configuration
+needed.
 
-See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module for the full
-preset reference.
+To widen to all vetted modules (superset of Safe), use `Modules::All`. To start with
+nothing and add specific modules, use `Modules::None` + `.allow_module("...")`.
+
+See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module for the full API
+reference.
 
 ---
 

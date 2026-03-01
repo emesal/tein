@@ -122,8 +122,7 @@ fn test_uuid_docs() {
 fn test_uuid_in_sandbox() {
     let ctx = Context::builder()
         .standard_env()
-        .safe()
-        .allow(&["import"])
+        .sandboxed(tein::sandbox::Modules::Safe)
         .build()
         .expect("sandboxed context");
     ctx.evaluate("(import (tein uuid))")

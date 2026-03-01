@@ -34,6 +34,53 @@ tasks are ordered for incremental compilation — each task produces a compiling
 
 ---
 
+## progress notes
+
+**batch 4 complete — all tasks done, 699/699 tests pass.**
+
+### batch 4 notes
+
+- task 10 complete: old preset system removed from sandbox.rs and context.rs
+- task 11 complete: all tests migrated to new Modules API. key fixes needed during verification:
+  - `test_ux_stub_binding_hint`: `(map + '(1 2 3) '(10 20 30))` → `(map 1)` — calling `map` with `+` as arg triggers the `+` stub during arg eval, producing confusing errors instead of the `map` stub error
+  - file IO tests: `(import (scheme file))` is blocked by VFS gate (not in safe set); wrappers are in env directly; `(scheme read)` provides read/close-input-port
+  - step_limit for sandboxed contexts must be generous (5_000_000+) when `(import (scheme base))` is called under the limit — module loading consumes many steps
+- task 12 complete: sandbox.rs example rewritten, AGENTS.md/README.md/guide.md/ARCHITECTURE.md updated, all preset references removed from user-facing docs
+
+**batch 3 complete (tasks 6–9).**
+
+### batch 3 notes
+
+- `Modules` enum needs `#[derive(Default)]` with `#[default]` on `Safe` — clippy catches manual `impl Default` for enums
+- the new sandbox build path is an `else if` branch off the old `allowed_primitives` path — mutually exclusive, both coexist until task 10
+- IO prefix extraction moved inside each branch (old path does `self.file_*_prefixes.take()` at its start; new path does the same inside its block). `has_io` is now `mut` and assigned by whichever branch runs
+- `scheme/file` is NOT in the VFS registry — file IO in the new sandbox path requires the IO wrapper fns (registered via `file_read()`/`file_write()`) plus `(scheme read)` for `read`. tests verify this correctly
+- `allow_module()` with `sandbox_modules` set: expands `Safe`/`All`/`None` to `Only(resolved_list + module)`. `registry_resolve_deps` handles transitive deps at build time inside the branch
+- the import warnings ("importing already defined binding: define", etc.) appear when `(import (scheme base))` is called in a null env that already has core syntax from `sexp_make_null_env`. this is harmless and expected; chibi's null env always includes the 8 core syntax forms
+- 701 tests pass after batch 3
+
+### batch 2 notes
+
+### implementation notes discovered
+
+- `vfs_registry.rs` uses `#[allow(dead_code)]` on each struct/enum, not `#![allow(dead_code)]` — the inner attr form doesn't work in `include!`'d files
+- `registry_safe_allowlist` / `registry_all_allowlist` have `#[allow(dead_code)]` until task 7 wires them into context.rs
+- `validate_sld_includes` in build.rs caught 6 missing includes in the initial registry (char/ascii.scm, srfi/1/immutable's 9 scm files, srfi/27/constructors.scm, srfi/41.scm, srfi/95/sort.scm, srfi/135/kernel8.body.scm) — the validator is working as intended
+- old `VFS_FILES` / `CLIB_ENTRIES` constants removed from build.rs immediately (were unused); old `VFS_MODULES_SAFE` / `VFS_MODULES_ALL` in sandbox.rs stay until task 10
+- `feature_enabled` duplicated between build.rs and sandbox.rs (acceptable — they live in different compilation contexts; the include!'d vfs_registry.rs can't define it since it needs `cfg!()` which is context-dependent)
+- registry now embeds significantly more files than old VFS_FILES (220 vs ~64) — all vetted modules get embedded, not just the minimal set. this is correct and intentional.
+- srfi/18 clib entry added to registry (was previously absent; srfi/18 is pulled in by scheme/time but only used in the "all" set)
+- **task 4**: `collect_exports_from_sexps` recurses via an inner `fn walk()` — `use SexpKind` must be in the outer fn scope for the inner fn to see it. `#[allow(dead_code)]` on the generated `MODULE_EXPORTS` const goes into the generated file itself (the `include!` macro doesn't accept attributes on itself)
+- **task 4**: alias libraries (`scheme/bitwise`, `scheme/box`) use `(alias-for ...)` with no `(export ...)` — they produce empty exports lists. this is correct; they have no top-level names of their own to stub
+- **task 5**: `map` appears in `srfi/1/immutable` and `srfi/101` as well as `scheme/base` — stub tests should use `+` or `number->string` (scheme/base-only) for precise assertions
+- **task 5**: `#[allow(dead_code)]` on `include!` is silently ignored by rustc; instead put the allow attr in the generated file content
+
+### next batch
+
+bootstrap context: this plan file + branch `feature/refactor/vfs-registry-2603`. start at task 10.
+
+---
+
 ## phase 1: registry data structure
 
 ### task 1: create `vfs_registry.rs` with `VfsEntry` and the registry

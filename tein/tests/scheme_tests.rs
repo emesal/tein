@@ -203,31 +203,14 @@ fn test_scheme_tein_process() {
 #[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
-    use tein::sandbox::*;
+    use tein::sandbox::Modules;
     let ctx = Context::builder()
         .standard_env()
-        .preset(&ARITHMETIC)
-        .preset(&LISTS)
-        .preset(&STRINGS)
-        .preset(&TYPE_PREDICATES)
-        .preset(&CHARACTERS)
-        .preset(&MUTATION)
-        .preset(&EXCEPTIONS)
-        .allow(&[
-            "import",
-            "define",
-            "define-syntax",
-            "syntax-rules",
-            "set!",
-            "if",
-            "let",
-            "lambda",
-            "begin",
-            "quote",
-        ])
+        .sandboxed(Modules::Safe)
         .step_limit(5_000_000)
         .build()
         .expect("sandboxed context");
+    ctx.evaluate("(import (scheme base))").expect("import base");
     ctx.evaluate("(import (tein test))")
         .expect("import tein test");
     ctx.evaluate("(import (tein reader))")
