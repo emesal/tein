@@ -153,9 +153,9 @@ explicit `.vfs_gate_none()` or `.vfs_gate_all()` overrides the default.
 4. ~~**refactor rust side**~~ ✅ — `ffi.rs`: `tein_module_policy_set` → `tein_vfs_gate_set`, callback `tein_module_allowlist_check` → `tein_vfs_gate_check` absorbing VFS prefix/traversal/.scm logic. `context.rs`: imports, builder fields/methods (`vfs_gate_all`, `vfs_gate_none`, `allow_module` with transitive dep resolution), `build()` simplified to 2-level gate, Context struct fields renamed, Drop updated. `value.rs`: `MODULE_POLICY` → `VFS_GATE`. `lib.rs` unchanged (no direct re-exports). all 669 tests pass, lint clean.
    - builder API change: `allow_only_modules()` removed in favour of composable `vfs_gate_none().allow_module(...)` pattern. `allow_module()` now resolves transitive deps automatically via `resolve_module_deps()`.
 5. ~~**update tests**~~ ✅ — all module policy tests renamed to VFS gate tests, assertions updated. existing sandbox tests confirm gate behaviour unchanged. done as part of step 4.
-6. **update docs** — `sandbox.rs` module doc, AGENTS.md (module policy flow), docstrings.
-7. **create github issue** — "vet chibi/* and srfi/* VFS modules for sandbox safety" to track broader module vetting beyond the initial safe + excluded-5 set.
-8. **collect AGENTS.md notes** — final step per workflow.
+6. ~~**update docs**~~ ✅ — `sandbox.rs` module doc updated (three-tier → VfsGate enum), `value.rs` docstring, `build.rs` comment, `docs/guide.md`, AGENTS.md (architecture, VFS gate flow, gotchas) — all references migrated from ModulePolicy/SAFE_MODULES/IMPLICIT_DEPS to VfsGate/VFS_MODULES_SAFE.
+7. ~~**create github issue**~~ ✅ — #92 "vet chibi/* and srfi/* VFS modules for sandbox safety"
+8. ~~**collect AGENTS.md notes**~~ ✅ — no new gotchas discovered. AGENTS.md already updated in step 6. key API change: `allow_only_modules()` removed → `vfs_gate_none().allow_module(...)` composable pattern.
 
 ## corrections from original plan
 
