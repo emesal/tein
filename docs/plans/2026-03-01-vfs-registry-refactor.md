@@ -36,7 +36,7 @@ tasks are ordered for incremental compilation — each task produces a compiling
 
 ## progress notes
 
-**batch 1 complete (tasks 1–3).**
+**batch 2 complete (tasks 4–5).**
 
 ### implementation notes discovered
 
@@ -47,10 +47,14 @@ tasks are ordered for incremental compilation — each task produces a compiling
 - `feature_enabled` duplicated between build.rs and sandbox.rs (acceptable — they live in different compilation contexts; the include!'d vfs_registry.rs can't define it since it needs `cfg!()` which is context-dependent)
 - registry now embeds significantly more files than old VFS_FILES (220 vs ~64) — all vetted modules get embedded, not just the minimal set. this is correct and intentional.
 - srfi/18 clib entry added to registry (was previously absent; srfi/18 is pulled in by scheme/time but only used in the "all" set)
+- **task 4**: `collect_exports_from_sexps` recurses via an inner `fn walk()` — `use SexpKind` must be in the outer fn scope for the inner fn to see it. `#[allow(dead_code)]` on the generated `MODULE_EXPORTS` const goes into the generated file itself (the `include!` macro doesn't accept attributes on itself)
+- **task 4**: alias libraries (`scheme/bitwise`, `scheme/box`) use `(alias-for ...)` with no `(export ...)` — they produce empty exports lists. this is correct; they have no top-level names of their own to stub
+- **task 5**: `map` appears in `srfi/1/immutable` and `srfi/101` as well as `scheme/base` — stub tests should use `+` or `number->string` (scheme/base-only) for precise assertions
+- **task 5**: `#[allow(dead_code)]` on `include!` is silently ignored by rustc; instead put the allow attr in the generated file content
 
 ### next batch
 
-bootstrap context: this plan file + branch `feature/refactor/vfs-registry-2603`. start at task 4.
+bootstrap context: this plan file + branch `feature/refactor/vfs-registry-2603`. start at task 6.
 
 ---
 
