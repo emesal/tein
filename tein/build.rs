@@ -188,6 +188,161 @@ fn feature_enabled(feature: Option<&str>) -> bool {
 /// bootstrap files embedded in the VFS but not in the registry (not importable modules)
 const BOOTSTRAP_FILES: &[&str] = &["lib/init-7.scm", "lib/meta-7.scm"];
 
+/// hardcoded exports for dynamic modules (registered via `#[tein_module]`, no .sld to parse)
+const DYNAMIC_MODULE_EXPORTS: &[(&str, &[&str])] = &[
+    ("tein/uuid", &["make-uuid", "uuid?", "uuid-nil"]),
+    ("tein/time", &["current-second", "current-jiffy", "jiffies-per-second"]),
+];
+
+/// extract exported binding names from each module's `.sld` file.
+///
+/// for embedded modules: parses the `.sld` to find `(export ...)` forms.
+/// for dynamic modules: uses the hardcoded [`DYNAMIC_MODULE_EXPORTS`] table.
+///
+/// `(rename old new)` export specs yield the external name `new`.
+/// returns a vec of `(module_path, exports)` pairs (stable order: registry order).
+fn extract_exports(chibi_dir: &str) -> Vec<(&'static str, Vec<String>)> {
+    use tein_sexp::parser;
+
+    let mut result = Vec::new();
+
+    for entry in VFS_REGISTRY.iter() {
+        if !feature_enabled(entry.feature) {
+            continue;
+        }
+
+        match entry.source {
+            VfsSource::Dynamic => {
+                // look up hardcoded exports for this dynamic module
+                if let Some((_, exports)) = DYNAMIC_MODULE_EXPORTS
+                    .iter()
+                    .find(|(path, _)| *path == entry.path)
+                {
+                    result.push((entry.path, exports.iter().map(|s| s.to_string()).collect()));
+                }
+                // dynamic modules with no hardcoded exports are silently skipped
+            }
+            VfsSource::Embedded => {
+                // find the .sld file in the entry's files list
+                let sld_rel = match entry.files.iter().find(|f| f.ends_with(".sld")) {
+                    Some(f) => *f,
+                    None => continue,
+                };
+
+                let sld_path = format!("{chibi_dir}/{sld_rel}");
+                let source = match std::fs::read_to_string(&sld_path) {
+                    Ok(s) => s,
+                    Err(e) => panic!("extract_exports: failed to read {sld_path}: {e}"),
+                };
+
+                let sexps = match parser::parse_all(&source) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("cargo:warning=extract_exports: parse error in {sld_path}: {e}");
+                        continue;
+                    }
+                };
+
+                // collect all exports from (export ...) forms at the top level
+                // (export ...) may appear inside (define-library ...)
+                let exports = collect_exports_from_sexps(&sexps);
+                result.push((entry.path, exports));
+            }
+        }
+    }
+
+    result
+}
+
+/// recursively collect export names from `(export ...)` forms in a list of sexps.
+///
+/// handles `(rename old new)` export specs by taking `new`.
+/// recurses into `(define-library ...)` and other list forms to find nested exports.
+fn collect_exports_from_sexps(sexps: &[tein_sexp::Sexp]) -> Vec<String> {
+    use tein_sexp::SexpKind;
+
+    let mut exports = Vec::new();
+
+    fn walk(sexp: &tein_sexp::Sexp, out: &mut Vec<String>) {
+        let items = match &sexp.kind {
+            SexpKind::List(items) => items,
+            _ => return,
+        };
+
+        let is_export = matches!(
+            items.first().map(|s| &s.kind),
+            Some(SexpKind::Symbol(name)) if name == "export"
+        );
+
+        if is_export {
+            // collect each export spec
+            for spec in items.iter().skip(1) {
+                match &spec.kind {
+                    SexpKind::Symbol(name) => {
+                        out.push(name.clone());
+                    }
+                    SexpKind::List(rename_items) => {
+                        // (rename old new) — take `new` (index 2)
+                        let is_rename = matches!(
+                            rename_items.first().map(|s| &s.kind),
+                            Some(SexpKind::Symbol(n)) if n == "rename"
+                        );
+                        if is_rename {
+                            if let Some(SexpKind::Symbol(new_name)) =
+                                rename_items.get(2).map(|s| &s.kind)
+                            {
+                                out.push(new_name.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            // recurse into all list children (handles define-library, cond-expand, etc.)
+            for item in items {
+                walk(item, out);
+            }
+        }
+    }
+
+    for sexp in sexps {
+        walk(sexp, &mut exports);
+    }
+
+    exports
+}
+
+/// generate `tein_exports.rs` in `OUT_DIR` — module path → exported binding names.
+///
+/// emits a `const MODULE_EXPORTS: &[(&str, &[&str])]` for use in sandbox.rs.
+fn generate_exports_rs(out_dir: &str, exports: &[(&'static str, Vec<String>)]) {
+    let out_path = std::path::Path::new(out_dir).join("tein_exports.rs");
+    let mut out = String::with_capacity(64 * 1024);
+
+    out.push_str("// generated by build.rs — do not edit\n\n");
+    out.push_str("/// auto-generated module path → exported binding names\n");
+    out.push_str("const MODULE_EXPORTS: &[(&str, &[&str])] = &[\n");
+
+    for (path, syms) in exports {
+        out.push_str("    (\"");
+        out.push_str(path);
+        out.push_str("\", &[");
+        for (i, sym) in syms.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push('"');
+            out.push_str(sym);
+            out.push('"');
+        }
+        out.push_str("]),\n");
+    }
+
+    out.push_str("];\n");
+    std::fs::write(&out_path, &out).expect("failed to write tein_exports.rs");
+}
+
 fn main() {
     let chibi_dir = fetch_chibi();
     let include_dir = format!("{chibi_dir}/include");
@@ -213,6 +368,10 @@ fn main() {
 
     // generate static C library table into OUT_DIR
     generate_clibs(&chibi_dir, &out_dir);
+
+    // extract module exports and generate tein_exports.rs
+    let exports = extract_exports(&chibi_dir);
+    generate_exports_rs(&out_dir, &exports);
 
     // core chibi-scheme source files (excluding main.c which has main())
     let sources = [
