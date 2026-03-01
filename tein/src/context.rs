@@ -1695,9 +1695,10 @@ impl ContextBuilder {
 
     /// Allow file reading from paths under the given prefixes.
     ///
-    /// Activates restricted mode and registers policy-checked wrapper
-    /// functions for `open-input-file` and `open-binary-input-file`.
-    /// Also adds port-reading support primitives (read, read-char, etc.).
+    /// When combined with [`sandboxed()`](Self::sandboxed), records the prefix
+    /// list for the module-level sandbox build path, which handles IO wrapper
+    /// registration. When called without `sandboxed()`, auto-activates
+    /// `sandboxed(Modules::Safe)` (legacy behaviour).
     ///
     /// Prefixes should be absolute paths (e.g. "/config/", "/data/").
     /// Paths are canonicalised before checking, so symlinks and `..`
@@ -1707,18 +1708,23 @@ impl ContextBuilder {
         for p in prefixes {
             list.push(p.to_string());
         }
-        // ensure restricted mode is active (IO wrappers require restricted env)
-        self.allowed_primitives.get_or_insert_with(Vec::new);
-        // ensure support primitives are in the allowlist
-        self = self.preset(&crate::sandbox::FILE_READ_SUPPORT);
-        self
+        if self.sandbox_modules.is_some() {
+            // new path: sandbox_modules handles IO wrapper registration in build()
+            self
+        } else {
+            // legacy path: ensure restricted mode + support primitives
+            self.allowed_primitives.get_or_insert_with(Vec::new);
+            self = self.preset(&crate::sandbox::FILE_READ_SUPPORT);
+            self
+        }
     }
 
     /// Allow file writing to paths under the given prefixes.
     ///
-    /// Activates restricted mode and registers policy-checked wrapper
-    /// functions for `open-output-file` and `open-binary-output-file`.
-    /// Also adds port-writing support primitives (write, write-char, etc.).
+    /// When combined with [`sandboxed()`](Self::sandboxed), records the prefix
+    /// list for the module-level sandbox build path, which handles IO wrapper
+    /// registration. When called without `sandboxed()`, auto-activates
+    /// `sandboxed(Modules::Safe)` (legacy behaviour).
     ///
     /// Parent directories must exist; files will be created as needed (R7RS).
     /// Prefixes should be absolute paths (e.g. "/tmp/", "/output/").
@@ -1727,11 +1733,15 @@ impl ContextBuilder {
         for p in prefixes {
             list.push(p.to_string());
         }
-        // ensure restricted mode is active (IO wrappers require restricted env)
-        self.allowed_primitives.get_or_insert_with(Vec::new);
-        // ensure support primitives are in the allowlist
-        self = self.preset(&crate::sandbox::FILE_WRITE_SUPPORT);
-        self
+        if self.sandbox_modules.is_some() {
+            // new path: sandbox_modules handles IO wrapper registration in build()
+            self
+        } else {
+            // legacy path: ensure restricted mode + support primitives
+            self.allowed_primitives.get_or_insert_with(Vec::new);
+            self = self.preset(&crate::sandbox::FILE_WRITE_SUPPORT);
+            self
+        }
     }
 
     /// set VFS gate to allow all vetted VFS modules.
@@ -7783,11 +7793,57 @@ mod tests {
     fn test_sandboxed_builder_compiles() {
         use crate::sandbox::Modules;
         // sandboxed() returns a ContextBuilder — just check it compiles and doesn't panic.
-        // behavioural test is in task 7 once build() is wired up.
         let _builder = Context::builder().standard_env().sandboxed(Modules::Safe);
         let _builder2 = Context::builder().standard_env().sandboxed(Modules::All);
         let _builder3 = Context::builder().standard_env().sandboxed(Modules::None);
-        let _builder4 = Context::builder().standard_env().sandboxed(Modules::only(&["scheme/base"]));
+        let _builder4 =
+            Context::builder().standard_env().sandboxed(Modules::only(&["scheme/base"]));
+    }
+
+    // --- task 8: file_read/file_write with new sandbox path ---
+
+    #[test]
+    fn test_sandboxed_file_read_allowed_path() {
+        use crate::sandbox::Modules;
+        // write a temp file to read from
+        let tmp = "/tmp/tein_sandbox_read_test.txt";
+        std::fs::write(tmp, "42").unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("build");
+        // open-input-file is the IO wrapper registered directly in the null env.
+        // (scheme read) provides `read`; (scheme base) provides close-input-port.
+        let code = format!(
+            r#"(import (scheme base)) (import (scheme read))
+               (let ((p (open-input-file "{tmp}")))
+                 (let ((v (read p))) (close-input-port p) v))"#
+        );
+        let result = ctx.evaluate(&code).expect("read from allowed path");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_sandboxed_file_read_blocked_path() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("build");
+        // reading from /etc/ should be blocked by IO policy
+        let err = ctx
+            .evaluate(r#"(import (scheme base)) (open-input-file "/etc/hostname")"#)
+            .expect_err("should be blocked");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("policy") || msg.contains("denied") || msg.contains("not allowed")
+                || msg.contains("SandboxViolation") || msg.contains("error"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
