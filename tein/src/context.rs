@@ -146,6 +146,16 @@ thread_local! {
     static IS_SANDBOXED: Cell<bool> = const { Cell::new(false) };
 }
 
+// --- UX stub module map thread-local ---
+//
+// populated during sandboxed() build path: maps binding name → module path
+// so ux_stub can emit a helpful "(import (module path))" message.
+// cleared on Context::drop() alongside IS_SANDBOXED.
+thread_local! {
+    static STUB_MODULE_MAP: RefCell<std::collections::HashMap<String, String>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
 // --- implementations of the 4 foreign protocol dispatch functions ---
 
 /// Dispatch a method call: (foreign-call obj 'method arg ...)
@@ -1013,6 +1023,53 @@ unsafe extern "C" fn sandbox_stub(
     }
 }
 
+/// UX stub for bindings excluded from module-level sandboxed contexts.
+///
+/// Like [`sandbox_stub`], extracts its name from the opcode slot, then looks
+/// up the providing module in `STUB_MODULE_MAP` to produce an actionable hint:
+/// `"sandbox: 'map' requires (import (scheme base))"`.
+/// Converts to `Error::SandboxViolation` via the `[sandbox:binding]` sentinel.
+unsafe extern "C" fn ux_stub(
+    ctx: ffi::sexp,
+    self_: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let name_sexp = ffi::sexp_opcode_name(self_);
+        let name = if ffi::sexp_stringp(name_sexp) != 0 {
+            let ptr = ffi::sexp_string_data(name_sexp);
+            let len = ffi::sexp_string_size(name_sexp) as usize;
+            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                .unwrap_or("unknown")
+                .to_string()
+        } else {
+            "unknown".to_string()
+        };
+        // look up providing module from the stub map
+        let module_hint = STUB_MODULE_MAP.with(|map| {
+            map.borrow()
+                .get(&name)
+                .map(|m| {
+                    // "scheme/base" → "(scheme base)", "srfi/1" → "(srfi 1)"
+                    let parts: Vec<&str> = m.splitn(2, '/').collect();
+                    if parts.len() == 2 {
+                        format!("({} {})", parts[0], parts[1].replace('/', " "))
+                    } else {
+                        format!("({m})")
+                    }
+                })
+                .unwrap_or_else(|| "the required module".to_string())
+        });
+        let msg = format!(
+            "[sandbox:binding] '{}' requires (import {})",
+            name, module_hint
+        );
+        let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+        ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+    }
+}
+
 /// Shared policy check + delegation for all file-open wrappers.
 ///
 /// Extracts the filename from the first arg, checks against FsPolicy,
@@ -1828,10 +1885,9 @@ impl ContextBuilder {
                 }
             }
 
-            // extract IO prefixes before borrowing self for allowed_primitives
-            let file_read_prefixes = self.file_read_prefixes.take();
-            let file_write_prefixes = self.file_write_prefixes.take();
-            let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
+            // has_io tracks whether any path set up IO wrappers, for Context::drop().
+            // each branch takes file_*_prefixes from self as needed.
+            let mut has_io = false;
 
             // apply environment restrictions if presets are active.
             // source_env is the context's current env — either the bare primitive
@@ -1839,6 +1895,11 @@ impl ContextBuilder {
             if let Some(ref allowed) = self.allowed_primitives {
                 // mark context as sandboxed so (tein file) trampolines apply policy
                 IS_SANDBOXED.with(|c| c.set(true));
+
+                // take IO prefixes for this path
+                let file_read_prefixes = self.file_read_prefixes.take();
+                let file_write_prefixes = self.file_write_prefixes.take();
+                has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
 
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
@@ -1975,6 +2036,147 @@ impl ContextBuilder {
                         );
                     }
                 }
+            } else if let Some(ref modules) = self.sandbox_modules.take() {
+                // new registry-based sandbox path (task 7).
+                // builds a null env + import, resolves module allowlist from the
+                // Modules enum, registers UX stubs for excluded module exports.
+                use crate::sandbox::{
+                    Modules, registry_all_allowlist, registry_resolve_deps, registry_safe_allowlist,
+                    unexported_stubs,
+                };
+
+                // mark sandboxed so (tein file) trampolines apply policy
+                IS_SANDBOXED.with(|c| c.set(true));
+
+                let source_env = ffi::sexp_context_env(ctx);
+                let version = ffi::sexp_make_fixnum(7);
+                let null_env = ffi::sexp_make_null_env(ctx, version);
+
+                if ffi::sexp_exceptionp(null_env) != 0 {
+                    ffi::sexp_destroy_context(ctx);
+                    return Err(crate::error::Error::InitError(
+                        "failed to create null environment".to_string(),
+                    ));
+                }
+
+                // root both envs across allocating calls below
+                let _source_env_guard = ffi::GcRoot::new(ctx, source_env);
+                let _null_env_guard = ffi::GcRoot::new(ctx, null_env);
+
+                // resolve module allowlist from the Modules variant
+                let allowlist: Vec<String> = match modules {
+                    Modules::Safe => registry_safe_allowlist(),
+                    Modules::All => registry_all_allowlist(),
+                    Modules::None => Vec::new(),
+                    Modules::Only(list) => {
+                        let refs: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+                        registry_resolve_deps(&refs)
+                    }
+                };
+
+                // set VFS gate to the resolved allowlist (overrides the gate set earlier)
+                VFS_GATE.with(|cell| cell.set(crate::sandbox::GATE_CHECK));
+                ffi::vfs_gate_set(crate::sandbox::GATE_CHECK as i32);
+                VFS_ALLOWLIST.with(|cell| {
+                    *cell.borrow_mut() = allowlist.clone();
+                });
+
+                // copy "import" from source env into null env so scheme can use
+                // (import ...) to load allowed modules
+                {
+                    let name = "import";
+                    let c_name = CString::new(name).unwrap();
+                    ffi::env_copy_named(
+                        ctx,
+                        source_env,
+                        null_env,
+                        c_name.as_ptr(),
+                        name.len() as ffi::sexp_sint_t,
+                    );
+                }
+
+                // build the UX stub map: binding name → providing module path
+                let stubs = unexported_stubs(&allowlist);
+                STUB_MODULE_MAP.with(|map| {
+                    let mut m = map.borrow_mut();
+                    m.clear();
+                    for (name, module) in &stubs {
+                        m.insert(name.to_string(), module.to_string());
+                    }
+                });
+
+                // register UX stubs in the null env
+                let ux_stub_fn: Option<
+                    unsafe extern "C" fn(
+                        ffi::sexp,
+                        ffi::sexp,
+                        ffi::sexp_sint_t,
+                        ffi::sexp,
+                    ) -> ffi::sexp,
+                > = Some(ux_stub);
+                for (name, _module) in &stubs {
+                    let c_name = CString::new(*name).unwrap_or_default();
+                    ffi::sexp_define_foreign_proc(
+                        ctx,
+                        null_env,
+                        c_name.as_ptr(),
+                        0,
+                        ffi::SEXP_PROC_VARIADIC,
+                        c_name.as_ptr(),
+                        ux_stub_fn,
+                    );
+                }
+
+                // IO wrappers: capture original procs from source env, register wrappers
+                let file_read_prefixes = self.file_read_prefixes.take();
+                let file_write_prefixes = self.file_write_prefixes.take();
+                has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
+                if has_io {
+                    let undefined = ffi::get_void();
+                    for op in IoOp::ALL {
+                        let name = op.name();
+                        let c_name = CString::new(name).unwrap();
+                        let sym = ffi::sexp_intern(
+                            ctx,
+                            c_name.as_ptr(),
+                            name.len() as ffi::sexp_sint_t,
+                        );
+                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
+                        if val != undefined {
+                            ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
+                        }
+                    }
+
+                    let read_ops = file_read_prefixes.is_some();
+                    let write_ops = file_write_prefixes.is_some();
+                    for op in IoOp::ALL {
+                        let want = if op.is_read() { read_ops } else { write_ops };
+                        if !want {
+                            continue;
+                        }
+                        let name = op.name();
+                        let c_name = CString::new(name).unwrap();
+                        let wrapper = wrapper_fn_for(op);
+                        ffi::sexp_define_foreign_proc(
+                            ctx,
+                            null_env,
+                            c_name.as_ptr(),
+                            0,
+                            ffi::SEXP_PROC_VARIADIC,
+                            c_name.as_ptr(),
+                            Some(wrapper),
+                        );
+                    }
+
+                    FS_POLICY.with(|cell| {
+                        *cell.borrow_mut() = Some(FsPolicy {
+                            read_prefixes: file_read_prefixes.unwrap_or_default(),
+                            write_prefixes: file_write_prefixes.unwrap_or_default(),
+                        });
+                    });
+                }
+
+                ffi::sexp_context_env_set(ctx, null_env);
             }
 
             let context = Context {
@@ -3199,6 +3401,9 @@ impl Drop for Context {
 
         // restore sandbox flag for the thread (defensive restore-previous pattern)
         IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
+
+        // clear UX stub module map so next context on this thread starts fresh
+        STUB_MODULE_MAP.with(|map| map.borrow_mut().clear());
 
         // clear any pending exit request — defensive safety net in case evaluation
         // was interrupted before the eval loop could consume the flag.
@@ -7471,6 +7676,108 @@ mod tests {
     }
 
     // --- task 6: Modules enum + sandboxed() builder ---
+    // --- task 7: new sandbox env construction ---
+
+    #[test]
+    fn test_sandboxed_modules_safe_can_import_and_compute() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("sandboxed safe eval");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_none_blocks_base_bindings() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("build");
+        // + should be stubbed — SandboxViolation
+        let err = ctx.evaluate("(+ 1 2)").expect_err("should fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("scheme") || msg.contains("import") || msg.contains("sandbox"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sandboxed_modules_only_scheme_base() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("eval with only scheme/base");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_all_allows_scheme_write() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::All)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (scheme write)) (begin (write 1) #t)")
+            .expect("sandboxed all with scheme/write");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_safe_blocks_scheme_env_escape() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        // scheme/eval is not in the safe set — import should fail
+        let err = ctx
+            .evaluate("(import (scheme eval))")
+            .expect_err("scheme/eval should be blocked");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("eval") || msg.contains("module") || msg.contains("import")
+                || msg.contains("not found"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sandboxed_ux_stub_message_mentions_module() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("build");
+        // + from scheme/base should have a UX stub with a module hint
+        let err = ctx.evaluate("(+ 1 2)").expect_err("should fail");
+        assert!(
+            matches!(err, crate::Error::SandboxViolation(_)),
+            "expected SandboxViolation, got {err:?}"
+        );
+        if let crate::Error::SandboxViolation(msg) = &err {
+            assert!(
+                msg.contains("scheme") || msg.contains("import"),
+                "stub message should mention module: {msg}"
+            );
+        }
+    }
 
     #[test]
     fn test_sandboxed_builder_compiles() {
