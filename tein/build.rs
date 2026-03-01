@@ -265,9 +265,7 @@ fn extract_exports(chibi_dir: &str) -> Vec<(&'static str, Vec<String>)> {
             }
             VfsSource::Shadow => {
                 // parse exports from inline shadow_sld content
-                let sld = entry
-                    .shadow_sld
-                    .expect("Shadow entry must have shadow_sld");
+                let sld = entry.shadow_sld.expect("Shadow entry must have shadow_sld");
                 let sexps = match parser::parse_all(sld) {
                     Ok(s) => s,
                     Err(e) => {

@@ -1,6 +1,9 @@
 # VFS shadow: (scheme file) + (scheme show) — design
 
-**status: BLOCKED** — depends on VFS module registry refactor (see below).
+**status: SUPERSEDED** — VFS registry refactor complete. architecture evolved during
+planning: `VfsSource::Shadow` variant in registry (data-driven) instead of separate
+`VFS_SHADOWS` array. added `scheme/repl` shadow. see implementation plan
+`2026-03-01-vfs-shadow-scheme-file.md`.
 
 issue: #91
 
