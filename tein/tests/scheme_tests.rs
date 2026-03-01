@@ -179,6 +179,16 @@ fn test_scheme_toml() {
 }
 
 #[test]
+fn test_scheme_tein_file() {
+    run_scheme_test(include_str!("scheme/tein_file.scm"));
+}
+
+#[test]
+fn test_scheme_tein_process() {
+    run_scheme_test(include_str!("scheme/tein_process.scm"));
+}
+
+#[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
     use tein::sandbox::*;

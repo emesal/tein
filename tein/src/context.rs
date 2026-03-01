@@ -3007,8 +3007,8 @@ impl Context {
     /// Register `file-exists?` and `delete-file` native functions.
     ///
     /// Called during `build()` for standard-env contexts. the VFS module
-    /// `(tein file)` exports these plus the 4 `open-*-file` re-exports and
-    /// 4 scheme-level higher-order wrappers.
+    /// `(tein file)` exports only these two names — the standard open-* and
+    /// higher-order wrappers are already in the env and don't need re-exporting.
     fn register_file_module(&self) -> Result<()> {
         self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
         self.define_fn_variadic("delete-file", delete_file_trampoline)?;
