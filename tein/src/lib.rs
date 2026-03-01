@@ -42,6 +42,7 @@
 //! | `json`  | yes     | Enables `(tein json)` module with `json-parse` and `json-stringify`. Pulls in `serde` + `serde_json`. |
 //! | `toml`  | yes     | Enables `(tein toml)` module with `toml-parse` and `toml-stringify`. Pulls in `toml` crate. |
 //! | `uuid`  | yes     | Enables `(tein uuid)` module with `make-uuid`, `uuid?`, and `uuid-nil`. Pulls in `uuid` crate. |
+//! | `time`  | yes     | Enables `(tein time)` module with `current-second`, `current-jiffy`, and `jiffies-per-second`. Pure `std::time` — no external deps. |
 //!
 //! Disable default features with `default-features = false` for a minimal build
 //! without format-module dependencies.
@@ -74,6 +75,8 @@ mod timeout;
 mod toml;
 #[cfg(feature = "uuid")]
 mod uuid;
+#[cfg(feature = "time")]
+mod time;
 mod value;
 
 pub use context::{Context, ContextBuilder};
