@@ -228,151 +228,519 @@ thread_local! {
 /// see github issues #90 and #91 for safe alternatives.
 pub const VFS_MODULES_SAFE: &[VfsModule] = &[
     // --- tein modules (tein/process excluded: leaks host argv) ---
-    VfsModule { path: "tein/foreign", deps: &["scheme/base"] },
-    VfsModule { path: "tein/reader", deps: &["scheme/base"] },
-    VfsModule { path: "tein/macro", deps: &["scheme/base"] },
-    VfsModule { path: "tein/test", deps: &["scheme/base", "scheme/write"] },
-    VfsModule { path: "tein/docs", deps: &["scheme/base"] },
-    VfsModule { path: "tein/json", deps: &["scheme/base"] },
-    VfsModule { path: "tein/toml", deps: &["scheme/base"] },
-    VfsModule { path: "tein/uuid", deps: &[] },
-    VfsModule { path: "tein/file", deps: &["scheme/base"] },
-    VfsModule { path: "tein/load", deps: &["scheme/base"] },
+    VfsModule {
+        path: "tein/foreign",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/reader",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/macro",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/test",
+        deps: &["scheme/base", "scheme/write"],
+    },
+    VfsModule {
+        path: "tein/docs",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/json",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/toml",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/uuid",
+        deps: &[],
+    },
+    VfsModule {
+        path: "tein/file",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "tein/load",
+        deps: &["scheme/base"],
+    },
     // --- r7rs standard libraries (safe subset) ---
-    VfsModule { path: "scheme/base", deps: &[
-        "chibi/equiv", "chibi/string", "chibi/io", "chibi/ast",
-        "srfi/9", "srfi/11", "srfi/39",
-    ]},
-    VfsModule { path: "scheme/bitwise", deps: &["srfi/151"] },
-    VfsModule { path: "scheme/box", deps: &["srfi/111"] },
-    VfsModule { path: "scheme/bytevector", deps: &["scheme/base", "srfi/151"] },
-    VfsModule { path: "scheme/case-lambda", deps: &["srfi/16"] },
-    VfsModule { path: "scheme/char", deps: &[
-        "scheme/base", "chibi/char-set/full", "chibi/char-set/base", "chibi/iset/base",
-    ]},
-    VfsModule { path: "scheme/charset", deps: &["srfi/14"] },
-    VfsModule { path: "scheme/comparator", deps: &["srfi/128"] },
-    VfsModule { path: "scheme/complex", deps: &[] },
-    VfsModule { path: "scheme/cxr", deps: &[] },
-    VfsModule { path: "scheme/division", deps: &["scheme/base"] },
-    VfsModule { path: "scheme/ephemeron", deps: &["srfi/124"] },
-    VfsModule { path: "scheme/eval", deps: &[] },
-    VfsModule { path: "scheme/fixnum", deps: &["srfi/143"] },
-    VfsModule { path: "scheme/flonum", deps: &["srfi/144"] },
-    VfsModule { path: "scheme/generator", deps: &["srfi/121"] },
-    VfsModule { path: "scheme/hash-table", deps: &["srfi/125"] },
-    VfsModule { path: "scheme/ideque", deps: &["srfi/134"] },
-    VfsModule { path: "scheme/ilist", deps: &["srfi/116"] },
-    VfsModule { path: "scheme/inexact", deps: &[] },
-    VfsModule { path: "scheme/lazy", deps: &[] },
-    VfsModule { path: "scheme/list", deps: &["srfi/1"] },
-    VfsModule { path: "scheme/list-queue", deps: &["srfi/117"] },
-    VfsModule { path: "scheme/lseq", deps: &["srfi/127"] },
-    VfsModule { path: "scheme/mapping", deps: &["srfi/146"] },
-    VfsModule { path: "scheme/read", deps: &["srfi/38"] },
-    VfsModule { path: "scheme/regex", deps: &["srfi/115"] },
-    VfsModule { path: "scheme/repl", deps: &[] },
-    VfsModule { path: "scheme/rlist", deps: &["srfi/101"] },
-    VfsModule { path: "scheme/set", deps: &["srfi/113"] },
-    VfsModule { path: "scheme/sort", deps: &["srfi/132"] },
-    VfsModule { path: "scheme/stream", deps: &["srfi/41"] },
-    VfsModule { path: "scheme/text", deps: &["srfi/135"] },
-    VfsModule { path: "scheme/vector", deps: &["srfi/133"] },
-    VfsModule { path: "scheme/write", deps: &["srfi/38"] },
+    VfsModule {
+        path: "scheme/base",
+        deps: &[
+            "chibi/equiv",
+            "chibi/string",
+            "chibi/io",
+            "chibi/ast",
+            "srfi/9",
+            "srfi/11",
+            "srfi/39",
+        ],
+    },
+    VfsModule {
+        path: "scheme/bitwise",
+        deps: &["srfi/151"],
+    },
+    VfsModule {
+        path: "scheme/box",
+        deps: &["srfi/111"],
+    },
+    VfsModule {
+        path: "scheme/bytevector",
+        deps: &["scheme/base", "srfi/151"],
+    },
+    VfsModule {
+        path: "scheme/case-lambda",
+        deps: &["srfi/16"],
+    },
+    VfsModule {
+        path: "scheme/char",
+        deps: &[
+            "scheme/base",
+            "chibi/char-set/full",
+            "chibi/char-set/base",
+            "chibi/iset/base",
+        ],
+    },
+    VfsModule {
+        path: "scheme/charset",
+        deps: &["srfi/14"],
+    },
+    VfsModule {
+        path: "scheme/comparator",
+        deps: &["srfi/128"],
+    },
+    VfsModule {
+        path: "scheme/complex",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/cxr",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/division",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "scheme/ephemeron",
+        deps: &["srfi/124"],
+    },
+    VfsModule {
+        path: "scheme/eval",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/fixnum",
+        deps: &["srfi/143"],
+    },
+    VfsModule {
+        path: "scheme/flonum",
+        deps: &["srfi/144"],
+    },
+    VfsModule {
+        path: "scheme/generator",
+        deps: &["srfi/121"],
+    },
+    VfsModule {
+        path: "scheme/hash-table",
+        deps: &["srfi/125"],
+    },
+    VfsModule {
+        path: "scheme/ideque",
+        deps: &["srfi/134"],
+    },
+    VfsModule {
+        path: "scheme/ilist",
+        deps: &["srfi/116"],
+    },
+    VfsModule {
+        path: "scheme/inexact",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/lazy",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/list",
+        deps: &["srfi/1"],
+    },
+    VfsModule {
+        path: "scheme/list-queue",
+        deps: &["srfi/117"],
+    },
+    VfsModule {
+        path: "scheme/lseq",
+        deps: &["srfi/127"],
+    },
+    VfsModule {
+        path: "scheme/mapping",
+        deps: &["srfi/146"],
+    },
+    VfsModule {
+        path: "scheme/read",
+        deps: &["srfi/38"],
+    },
+    VfsModule {
+        path: "scheme/regex",
+        deps: &["srfi/115"],
+    },
+    VfsModule {
+        path: "scheme/repl",
+        deps: &[],
+    },
+    VfsModule {
+        path: "scheme/rlist",
+        deps: &["srfi/101"],
+    },
+    VfsModule {
+        path: "scheme/set",
+        deps: &["srfi/113"],
+    },
+    VfsModule {
+        path: "scheme/sort",
+        deps: &["srfi/132"],
+    },
+    VfsModule {
+        path: "scheme/stream",
+        deps: &["srfi/41"],
+    },
+    VfsModule {
+        path: "scheme/text",
+        deps: &["srfi/135"],
+    },
+    VfsModule {
+        path: "scheme/vector",
+        deps: &["srfi/133"],
+    },
+    VfsModule {
+        path: "scheme/write",
+        deps: &["srfi/38"],
+    },
     // --- srfi modules (transitive deps of the above) ---
-    VfsModule { path: "srfi/1", deps: &[] },
-    VfsModule { path: "srfi/1/immutable", deps: &[] },
-    VfsModule { path: "srfi/2", deps: &[] },
-    VfsModule { path: "srfi/8", deps: &[] },
-    VfsModule { path: "srfi/9", deps: &[] },
-    VfsModule { path: "srfi/11", deps: &[] },
-    VfsModule { path: "srfi/14", deps: &["chibi/char-set"] },
-    VfsModule { path: "srfi/16", deps: &[] },
-    VfsModule { path: "srfi/27", deps: &[] },
-    VfsModule { path: "srfi/38", deps: &["srfi/69", "chibi/ast"] },
-    VfsModule { path: "srfi/39", deps: &[] },
-    VfsModule { path: "srfi/41", deps: &["scheme/base", "scheme/lazy", "srfi/1"] },
-    VfsModule { path: "srfi/69", deps: &["srfi/9"] },
-    VfsModule { path: "srfi/95", deps: &[] },
-    VfsModule { path: "srfi/101", deps: &[
-        "scheme/base", "srfi/16", "srfi/1", "srfi/125", "srfi/151",
-    ]},
-    VfsModule { path: "srfi/111", deps: &["scheme/base"] },
-    VfsModule { path: "srfi/113", deps: &["scheme/base", "srfi/1", "srfi/125", "srfi/128"] },
-    VfsModule { path: "srfi/115", deps: &["chibi/regexp"] },
-    VfsModule { path: "srfi/116", deps: &["scheme/base", "srfi/1/immutable", "srfi/128"] },
-    VfsModule { path: "srfi/117", deps: &["scheme/base", "srfi/1"] },
-    VfsModule { path: "srfi/121", deps: &["scheme/base", "srfi/130"] },
-    VfsModule { path: "srfi/124", deps: &["chibi/weak", "scheme/base"] },
-    VfsModule { path: "srfi/125", deps: &["scheme/base", "srfi/128", "srfi/69", "chibi/ast"] },
-    VfsModule { path: "srfi/127", deps: &["scheme/base", "srfi/1"] },
-    VfsModule { path: "srfi/128", deps: &[
-        "scheme/base", "scheme/char", "srfi/27", "srfi/69", "srfi/95",
-        "srfi/98", "srfi/151", "chibi/ast",
-    ]},
-    VfsModule { path: "srfi/130", deps: &["scheme/base", "scheme/char", "scheme/write", "chibi/string"] },
-    VfsModule { path: "srfi/132", deps: &["scheme/base", "srfi/95"] },
-    VfsModule { path: "srfi/133", deps: &["scheme/base"] },
-    VfsModule { path: "srfi/134", deps: &[
-        "scheme/base", "srfi/16", "srfi/1", "srfi/9", "srfi/121",
-    ]},
-    VfsModule { path: "srfi/135", deps: &["scheme/base", "srfi/16", "scheme/char", "srfi/135/kernel8"] },
-    VfsModule { path: "srfi/135/kernel8", deps: &["scheme/base"] },
-    VfsModule { path: "srfi/141", deps: &["scheme/base", "scheme/division"] },
-    VfsModule { path: "srfi/143", deps: &["scheme/base", "srfi/141", "srfi/151"] },
-    VfsModule { path: "srfi/144", deps: &["srfi/141"] },
-    VfsModule { path: "srfi/145", deps: &["scheme/base", "chibi/assert"] },
-    VfsModule { path: "srfi/146", deps: &[
-        "scheme/base", "srfi/16", "srfi/1", "srfi/2", "srfi/8",
-        "srfi/121", "srfi/128", "srfi/145",
-    ]},
-    VfsModule { path: "srfi/146/hamt", deps: &[
-        "scheme/base", "srfi/16", "srfi/143", "srfi/151",
-        "srfi/146/hamt-misc", "srfi/146/vector-edit",
-    ]},
-    VfsModule { path: "srfi/146/hamt-map", deps: &[
-        "scheme/base", "srfi/16", "srfi/1", "srfi/146/hamt", "srfi/146/hamt-misc",
-    ]},
-    VfsModule { path: "srfi/146/hamt-misc", deps: &["scheme/base", "srfi/16", "srfi/125", "srfi/128"] },
-    VfsModule { path: "srfi/146/vector-edit", deps: &["scheme/base"] },
-    VfsModule { path: "srfi/146/hash", deps: &[
-        "scheme/base", "srfi/16", "srfi/1", "srfi/8", "srfi/121",
-        "srfi/128", "srfi/145", "srfi/146/hamt-map",
-    ]},
-    VfsModule { path: "srfi/151", deps: &[] },
-    VfsModule { path: "srfi/165", deps: &[
-        "scheme/base", "srfi/1", "srfi/111", "srfi/125", "srfi/128", "srfi/146",
-    ]},
-    VfsModule { path: "srfi/98", deps: &[] },
+    VfsModule {
+        path: "srfi/1",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/1/immutable",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/2",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/8",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/9",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/11",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/14",
+        deps: &["chibi/char-set"],
+    },
+    VfsModule {
+        path: "srfi/16",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/27",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/38",
+        deps: &["srfi/69", "chibi/ast"],
+    },
+    VfsModule {
+        path: "srfi/39",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/41",
+        deps: &["scheme/base", "scheme/lazy", "srfi/1"],
+    },
+    VfsModule {
+        path: "srfi/69",
+        deps: &["srfi/9"],
+    },
+    VfsModule {
+        path: "srfi/95",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/101",
+        deps: &["scheme/base", "srfi/16", "srfi/1", "srfi/125", "srfi/151"],
+    },
+    VfsModule {
+        path: "srfi/111",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/113",
+        deps: &["scheme/base", "srfi/1", "srfi/125", "srfi/128"],
+    },
+    VfsModule {
+        path: "srfi/115",
+        deps: &["chibi/regexp"],
+    },
+    VfsModule {
+        path: "srfi/116",
+        deps: &["scheme/base", "srfi/1/immutable", "srfi/128"],
+    },
+    VfsModule {
+        path: "srfi/117",
+        deps: &["scheme/base", "srfi/1"],
+    },
+    VfsModule {
+        path: "srfi/121",
+        deps: &["scheme/base", "srfi/130"],
+    },
+    VfsModule {
+        path: "srfi/124",
+        deps: &["chibi/weak", "scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/125",
+        deps: &["scheme/base", "srfi/128", "srfi/69", "chibi/ast"],
+    },
+    VfsModule {
+        path: "srfi/127",
+        deps: &["scheme/base", "srfi/1"],
+    },
+    VfsModule {
+        path: "srfi/128",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "srfi/27",
+            "srfi/69",
+            "srfi/95",
+            "srfi/98",
+            "srfi/151",
+            "chibi/ast",
+        ],
+    },
+    VfsModule {
+        path: "srfi/130",
+        deps: &["scheme/base", "scheme/char", "scheme/write", "chibi/string"],
+    },
+    VfsModule {
+        path: "srfi/132",
+        deps: &["scheme/base", "srfi/95"],
+    },
+    VfsModule {
+        path: "srfi/133",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/134",
+        deps: &["scheme/base", "srfi/16", "srfi/1", "srfi/9", "srfi/121"],
+    },
+    VfsModule {
+        path: "srfi/135",
+        deps: &["scheme/base", "srfi/16", "scheme/char", "srfi/135/kernel8"],
+    },
+    VfsModule {
+        path: "srfi/135/kernel8",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/141",
+        deps: &["scheme/base", "scheme/division"],
+    },
+    VfsModule {
+        path: "srfi/143",
+        deps: &["scheme/base", "srfi/141", "srfi/151"],
+    },
+    VfsModule {
+        path: "srfi/144",
+        deps: &["srfi/141"],
+    },
+    VfsModule {
+        path: "srfi/145",
+        deps: &["scheme/base", "chibi/assert"],
+    },
+    VfsModule {
+        path: "srfi/146",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/1",
+            "srfi/2",
+            "srfi/8",
+            "srfi/121",
+            "srfi/128",
+            "srfi/145",
+        ],
+    },
+    VfsModule {
+        path: "srfi/146/hamt",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/143",
+            "srfi/151",
+            "srfi/146/hamt-misc",
+            "srfi/146/vector-edit",
+        ],
+    },
+    VfsModule {
+        path: "srfi/146/hamt-map",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/1",
+            "srfi/146/hamt",
+            "srfi/146/hamt-misc",
+        ],
+    },
+    VfsModule {
+        path: "srfi/146/hamt-misc",
+        deps: &["scheme/base", "srfi/16", "srfi/125", "srfi/128"],
+    },
+    VfsModule {
+        path: "srfi/146/vector-edit",
+        deps: &["scheme/base"],
+    },
+    VfsModule {
+        path: "srfi/146/hash",
+        deps: &[
+            "scheme/base",
+            "srfi/16",
+            "srfi/1",
+            "srfi/8",
+            "srfi/121",
+            "srfi/128",
+            "srfi/145",
+            "srfi/146/hamt-map",
+        ],
+    },
+    VfsModule {
+        path: "srfi/151",
+        deps: &[],
+    },
+    VfsModule {
+        path: "srfi/165",
+        deps: &[
+            "scheme/base",
+            "srfi/1",
+            "srfi/111",
+            "srfi/125",
+            "srfi/128",
+            "srfi/146",
+        ],
+    },
+    VfsModule {
+        path: "srfi/98",
+        deps: &[],
+    },
     // --- chibi internal modules (transitive deps) ---
-    VfsModule { path: "chibi/ast", deps: &[] },
-    VfsModule { path: "chibi/assert", deps: &[] },
-    VfsModule { path: "chibi/equiv", deps: &["srfi/69"] },
-    VfsModule { path: "chibi/io", deps: &["chibi/ast"] },
-    VfsModule { path: "chibi/optional", deps: &[] },
-    VfsModule { path: "chibi/string", deps: &["chibi/ast", "chibi/char-set/base"] },
-    VfsModule { path: "chibi/weak", deps: &[] },
-    VfsModule { path: "chibi/time", deps: &[] },
-    VfsModule { path: "chibi/char-set", deps: &["chibi/char-set/base", "chibi/char-set/extras"] },
-    VfsModule { path: "chibi/char-set/base", deps: &["chibi/iset/base"] },
-    VfsModule { path: "chibi/char-set/full", deps: &["chibi/iset/base", "chibi/char-set/base"] },
-    VfsModule { path: "chibi/char-set/ascii", deps: &["chibi/iset/base", "chibi/char-set/base"] },
-    VfsModule { path: "chibi/char-set/extras", deps: &["chibi/iset", "chibi/char-set/base"] },
-    VfsModule { path: "chibi/char-set/boundary", deps: &["chibi/char-set"] },
-    VfsModule { path: "chibi/iset", deps: &[
-        "scheme/base", "chibi/iset/base", "chibi/iset/iterators", "chibi/iset/constructors",
-    ]},
-    VfsModule { path: "chibi/iset/base", deps: &["srfi/9", "srfi/151"] },
-    VfsModule { path: "chibi/iset/iterators", deps: &["chibi/iset/base", "srfi/9", "srfi/151"] },
-    VfsModule { path: "chibi/iset/constructors", deps: &[
-        "chibi/iset/base", "chibi/iset/iterators", "srfi/151",
-    ]},
-    VfsModule { path: "chibi/regexp", deps: &[
-        "srfi/69", "scheme/char", "srfi/9", "chibi/char-set",
-        "chibi/char-set/full", "chibi/char-set/ascii", "srfi/151",
-        "chibi/char-set/boundary",
-    ]},
-    VfsModule { path: "chibi/show/shared", deps: &["scheme/base", "scheme/write", "srfi/69"] },
+    VfsModule {
+        path: "chibi/ast",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/assert",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/equiv",
+        deps: &["srfi/69"],
+    },
+    VfsModule {
+        path: "chibi/io",
+        deps: &["chibi/ast"],
+    },
+    VfsModule {
+        path: "chibi/optional",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/string",
+        deps: &["chibi/ast", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/weak",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/time",
+        deps: &[],
+    },
+    VfsModule {
+        path: "chibi/char-set",
+        deps: &["chibi/char-set/base", "chibi/char-set/extras"],
+    },
+    VfsModule {
+        path: "chibi/char-set/base",
+        deps: &["chibi/iset/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/full",
+        deps: &["chibi/iset/base", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/ascii",
+        deps: &["chibi/iset/base", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/extras",
+        deps: &["chibi/iset", "chibi/char-set/base"],
+    },
+    VfsModule {
+        path: "chibi/char-set/boundary",
+        deps: &["chibi/char-set"],
+    },
+    VfsModule {
+        path: "chibi/iset",
+        deps: &[
+            "scheme/base",
+            "chibi/iset/base",
+            "chibi/iset/iterators",
+            "chibi/iset/constructors",
+        ],
+    },
+    VfsModule {
+        path: "chibi/iset/base",
+        deps: &["srfi/9", "srfi/151"],
+    },
+    VfsModule {
+        path: "chibi/iset/iterators",
+        deps: &["chibi/iset/base", "srfi/9", "srfi/151"],
+    },
+    VfsModule {
+        path: "chibi/iset/constructors",
+        deps: &["chibi/iset/base", "chibi/iset/iterators", "srfi/151"],
+    },
+    VfsModule {
+        path: "chibi/regexp",
+        deps: &[
+            "srfi/69",
+            "scheme/char",
+            "srfi/9",
+            "chibi/char-set",
+            "chibi/char-set/full",
+            "chibi/char-set/ascii",
+            "srfi/151",
+            "chibi/char-set/boundary",
+        ],
+    },
+    VfsModule {
+        path: "chibi/show/shared",
+        deps: &["scheme/base", "scheme/write", "srfi/69"],
+    },
 ];
 
 /// all vetted VFS modules — superset of [`VFS_MODULES_SAFE`].
@@ -388,45 +756,105 @@ pub const VFS_MODULES_SAFE: &[VfsModule] = &[
 /// - `scheme/r5rs` — re-exports the above three unvetted modules.
 pub const VFS_MODULES_ALL: &[VfsModule] = &[
     // tein/process: safe rust-backed exit, but leaks host argv via command-line
-    VfsModule { path: "tein/process", deps: &["scheme/base"] },
+    VfsModule {
+        path: "tein/process",
+        deps: &["scheme/base"],
+    },
     // scheme/time: depends on scheme/process-context + scheme/file transitively.
     // allowed in ALL because the deps are also available when the user opts in.
     // see #90 for a future safe (tein time) alternative.
-    VfsModule { path: "scheme/time", deps: &[
-        "scheme/time/tai", "scheme/time/tai-to-utc-offset",
-    ]},
-    VfsModule { path: "scheme/time/tai", deps: &["scheme/base", "scheme/time/tai-to-utc-offset"] },
-    VfsModule { path: "scheme/time/tai-to-utc-offset", deps: &[
-        "scheme/base", "scheme/read", "srfi/18",
-    ]},
-    VfsModule { path: "srfi/18", deps: &["srfi/9", "chibi/ast", "chibi/time"] },
+    VfsModule {
+        path: "scheme/time",
+        deps: &["scheme/time/tai", "scheme/time/tai-to-utc-offset"],
+    },
+    VfsModule {
+        path: "scheme/time/tai",
+        deps: &["scheme/base", "scheme/time/tai-to-utc-offset"],
+    },
+    VfsModule {
+        path: "scheme/time/tai-to-utc-offset",
+        deps: &["scheme/base", "scheme/read", "srfi/18"],
+    },
+    VfsModule {
+        path: "srfi/18",
+        deps: &["srfi/9", "chibi/ast", "chibi/time"],
+    },
     // scheme/show: depends on scheme/file via srfi/166/columnar.
     // see #91 for a future safe (tein show) alternative.
-    VfsModule { path: "scheme/show", deps: &["srfi/166"] },
-    VfsModule { path: "scheme/mapping/hash", deps: &["srfi/146/hash"] },
-    VfsModule { path: "srfi/166", deps: &[
-        "srfi/166/base", "srfi/166/pretty", "srfi/166/columnar",
-        "srfi/166/unicode", "srfi/166/color",
-    ]},
-    VfsModule { path: "srfi/166/base", deps: &[
-        "scheme/base", "scheme/char", "scheme/complex", "scheme/inexact",
-        "scheme/repl", "scheme/write", "srfi/1", "srfi/69", "srfi/130",
-        "srfi/165", "chibi/show/shared",
-    ]},
-    VfsModule { path: "srfi/166/pretty", deps: &[
-        "scheme/base", "scheme/char", "scheme/write", "chibi/show/shared",
-        "srfi/1", "srfi/69", "srfi/130", "srfi/166/base", "srfi/166/color",
-    ]},
-    VfsModule { path: "srfi/166/columnar", deps: &[
-        "scheme/base", "scheme/char", "srfi/1", "srfi/117", "srfi/130",
-        "srfi/166/base", "chibi/optional",
-    ]},
-    VfsModule { path: "srfi/166/unicode", deps: &[
-        "scheme/base", "scheme/char", "srfi/130", "srfi/151", "srfi/166/base",
-    ]},
-    VfsModule { path: "srfi/166/color", deps: &[
-        "scheme/base", "srfi/130", "srfi/166/base",
-    ]},
+    VfsModule {
+        path: "scheme/show",
+        deps: &["srfi/166"],
+    },
+    VfsModule {
+        path: "scheme/mapping/hash",
+        deps: &["srfi/146/hash"],
+    },
+    VfsModule {
+        path: "srfi/166",
+        deps: &[
+            "srfi/166/base",
+            "srfi/166/pretty",
+            "srfi/166/columnar",
+            "srfi/166/unicode",
+            "srfi/166/color",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/base",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/complex",
+            "scheme/inexact",
+            "scheme/repl",
+            "scheme/write",
+            "srfi/1",
+            "srfi/69",
+            "srfi/130",
+            "srfi/165",
+            "chibi/show/shared",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/pretty",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/write",
+            "chibi/show/shared",
+            "srfi/1",
+            "srfi/69",
+            "srfi/130",
+            "srfi/166/base",
+            "srfi/166/color",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/columnar",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "srfi/1",
+            "srfi/117",
+            "srfi/130",
+            "srfi/166/base",
+            "chibi/optional",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/unicode",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "srfi/130",
+            "srfi/151",
+            "srfi/166/base",
+        ],
+    },
+    VfsModule {
+        path: "srfi/166/color",
+        deps: &["scheme/base", "srfi/130", "srfi/166/base"],
+    },
 ];
 
 /// resolve a set of module paths to the complete transitive closure of their deps.
