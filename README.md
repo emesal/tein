@@ -30,11 +30,14 @@ assert_eq!(result, Value::Integer(6));
 
 ### Sandboxing & resource limits
 
-Restrict the environment to exactly the primitives you need. Combine presets, step limits, wall-clock timeouts, and file IO policies.
+Restrict the environment to exactly the modules you allow. Combine module sets, step limits, wall-clock timeouts, and file IO policies.
 
 ```rust
+use tein::sandbox::Modules;
+
 let ctx = Context::builder()
-    .safe()                     // no filesystem, no eval
+    .standard_env()
+    .sandboxed(Modules::Safe)   // no filesystem, no eval/repl
     .step_limit(50_000)         // terminate infinite loops
     .build()?;
 
@@ -42,7 +45,7 @@ let ctx = Context::builder()
 assert!(ctx.evaluate(r#"(open-input-file "/etc/passwd")"#).is_err());
 ```
 
-16 composable presets (`ARITHMETIC`, `LISTS`, `STRINGS`, `IO`, ...) plus convenience builders (`.pure_computation()`, `.safe()`). See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module.
+`Modules` enum (`Safe`, `All`, `None`, `only(&[...])`) controls which VFS modules are importable. Transitive dependencies are resolved automatically. See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module.
 
 ### `#[tein_fn]` proc macro
 

@@ -33,22 +33,23 @@
 **Milestone 4a — sandboxing & resource limits**
 - `ContextBuilder` with fluent API for heap sizes, step limits, and environment restriction
 - Fuel-based step limiting via thread-local counters + vm.c patch
-- Allowlist-based sandbox presets using Chibi's null env (14 presets)
+- `Modules` enum (`Safe`, `All`, `None`, `only(&[...])`) for module-based sandbox configuration
+- `VfsGate` allowlist with transitive dep resolution via `VFS_REGISTRY`
 - `TimeoutContext` for wall-clock deadlines via dedicated thread
 - `Error::StepLimitExceeded` and `Error::Timeout` variants
 
-**Milestone 4b — parameterised IO presets**
+**Milestone 4b — parameterised IO policy**
 - `FsPolicy` with path prefix matching and canonicalisation
 - Wrapper foreign functions for all 4 file-open primitives
 - `.file_read(&[...])` / `.file_write(&[...])` builder API
-- Support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
+- IO wrappers injected directly — no `(scheme file)` import required
 - Path traversal and symlink protection via `canonicalize()`
 
 **R7RS standard environment**
 - VFS + static libs + eval.c patches for embedded module loading
 - `Context::new_standard()` / `ContextBuilder::standard_env()` API
 - ~200 bindings (map, for-each, values, dynamic-wind, etc.)
-- `ModulePolicy`: VFS-only import restriction in sandboxed standard-env contexts
+- `VfsGate`: VFS-only import restriction in sandboxed standard-env contexts
 - C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
 
 **Milestone 6 — Foreign type protocol** (completed)
@@ -93,7 +94,7 @@ tein/
     foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore, dispatch
     managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
     port.rs      — PortStore: Read/Write bridge via thread-local trampoline
-    sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
+    sandbox.rs   — Modules enum, FsPolicy, VfsGate, registry helpers, UX stub generation
     thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
     timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
   target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
@@ -131,11 +132,17 @@ rust code → Context::evaluate()
 ### Sandboxing flow
 
 ```
-ContextBuilder::build() with presets:
-  1. create context with full primitive env
-  2. create null env (syntax-only: define, if, lambda, begin, quote)
-  3. for each allowed primitive: look up in primitive env, copy to null env
-  4. set null env as active → only allowed primitives accessible
+ContextBuilder::build() with sandboxed(modules):
+  1. set IS_SANDBOXED thread-local → controls FsPolicy + VfsGate activation
+  2. resolve module allowlist from Modules variant via VFS_REGISTRY
+     (Modules::Safe → registry_safe_allowlist, Modules::All → registry_all_allowlist,
+      Modules::None → empty, Modules::Only(v) → registry_resolve_deps(&v))
+  3. set VFS_GATE (Allow(allowlist) or Off) + VFS_ALLOWLIST thread-locals
+  4. build full standard env (sexp_load_standard_env) — VFS gate active during load
+  5. create null env (syntax-only: define, if, lambda, begin, quote)
+  6. copy allowed bindings from full env → null env via env_copy_named
+  7. register UX stubs for bindings NOT in the allowlist (Modules::None: all modules)
+  8. set null env as active → only allowed bindings accessible
 ```
 
 ### IO policy flow
@@ -154,14 +161,14 @@ ContextBuilder with file_read/file_write:
 ### Module import policy
 
 ```
-ContextBuilder with standard_env + presets:
-  1. set MODULE_POLICY thread-local = VfsOnly
-  2. set C-level tein_module_policy = 1 (vfs-only)
-  3. load standard env (init-7, meta-7 via VFS — allowed under VfsOnly)
-  4. apply sandbox restrictions (presets, IO wrappers)
+ContextBuilder with standard_env + sandboxed(modules):
+  1. resolve allowlist from Modules variant via VFS_REGISTRY
+  2. set VFS_GATE thread-local = Allow(allowlist) → C-level tein_vfs_gate = 1
+  3. load standard env (init-7, meta-7 via VFS — pass allowlist check)
+  4. apply sandbox restrictions (module bindings, IO wrappers)
   5. on (import ...): sexp_find_module_file_raw calls tein_module_allowed()
-     → VFS paths (/vfs/lib/...) pass, filesystem paths blocked
-  6. on Context::drop(): reset both thread-local and C-level to Unrestricted
+     → VFS paths (/vfs/lib/...) checked against allowlist; filesystem paths blocked
+  6. on Context::drop(): restore VFS_GATE + VFS_ALLOWLIST + IS_SANDBOXED to prior values
 ```
 
 **VFS safety contract**: VFS modules are safe by construction — tein curates
@@ -173,8 +180,8 @@ exposed by VFS modules remain subject to these controls.
 
 | layer              | gates                                    |
 |--------------------|------------------------------------------|
-| module allowlist   | which libraries can be `import`ed        |
-| preset allowlist   | which primitives/bindings are in scope   |
+| VFS gate           | which libraries can be `import`ed        |
+| module allowlist   | which bindings are in scope              |
 | FsPolicy           | which filesystem paths can be opened     |
 | fuel/timeout       | resource exhaustion                      |
 
@@ -222,7 +229,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 **Rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping. Note: the env parent chain terminates with NULL, and `sexp_envp(NULL)` segfaults because `sexp_pointerp(NULL)` returns true (`SEXP_POINTER_TAG == 0`). The env walk loop must guard against NULL explicitly.
 
-**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. It can be copied into the restricted null env via `.allow(&["import"])` like any other binding. The module policy (VFS-only) still applies, so only curated VFS modules are importable. Both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
+**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. The `sandboxed()` builder always copies `import` into the restricted null env so Scheme code can use idiomatic `(import ...)` forms. The VFS gate (active for all sandboxed contexts) restricts which modules pass — only allowlisted VFS modules are importable. Both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
 
 **`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. Using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. This is a scope chain issue specific to the null env sandbox approach.
 

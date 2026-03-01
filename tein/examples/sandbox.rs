@@ -1,7 +1,7 @@
-// sandboxing example — step limits, restricted environments, timeouts
+// sandboxing example — module sets, step limits, timeouts, file IO policies
 
 use std::time::Duration;
-use tein::{Context, Error};
+use tein::{Context, Error, sandbox::Modules};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("--- step limits ---\n");
@@ -19,49 +19,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => println!("    unexpected: {:?}", other),
     }
 
-    println!("\n--- restricted environments ---\n");
+    println!("\n--- module-based sandboxing ---\n");
 
-    // arithmetic-only: no list ops, no io, no mutation
+    // Modules::Safe: conservative safe set — scheme/base, scheme/write, scheme/read,
+    // srfi/*, tein/* (excluding eval/repl/process). import only reads from VFS.
     let ctx = Context::builder()
-        .preset(&tein::sandbox::ARITHMETIC)
+        .standard_env()
+        .sandboxed(Modules::Safe)
         .build()?;
 
-    println!("==> (+ 1 2) in arithmetic-only env");
+    println!("==> (import (scheme base)) (+ 1 2) in Modules::Safe");
+    ctx.evaluate("(import (scheme base))")?;
     let result = ctx.evaluate("(+ 1 2)")?;
     println!("    {}", result);
 
-    println!("\n==> (cons 1 2) in arithmetic-only env");
-    match ctx.evaluate("(cons 1 2)") {
+    println!("\n==> (import (scheme eval)) blocked in Modules::Safe");
+    match ctx.evaluate("(import (scheme eval))") {
         Err(e) => println!("    blocked: {}", e),
         Ok(v) => println!("    unexpected: {}", v),
     }
 
-    // core syntax always available, even in restricted envs
-    println!("\n==> (define (sq x) (* x x)) (sq 7) in arithmetic-only env");
+    // Modules::Only: explicit module list with transitive deps resolved
+    let ctx = Context::builder()
+        .standard_env()
+        .sandboxed(Modules::only(&["scheme/base"]))
+        .build()?;
+
+    println!("\n==> (import (scheme base)) (define (sq x) (* x x)) (sq 7) in Modules::only");
+    ctx.evaluate("(import (scheme base))")?;
     let result = ctx.evaluate("(define (sq x) (* x x)) (sq 7)")?;
     println!("    {}", result);
 
-    // pure_computation: arithmetic + math + lists + vectors + strings + chars + predicates
-    let ctx = Context::builder().pure_computation().build()?;
-
-    println!("\n==> (car (cons 1 2)) in pure_computation env");
-    let result = ctx.evaluate("(car (cons 1 2))")?;
+    println!("\n==> (cons 1 2) after scheme/base import");
+    let result = ctx.evaluate("(cons 1 2)")?;
     println!("    {}", result);
 
-    println!("\n==> (string? \"hello\") in pure_computation env");
-    let result = ctx.evaluate("(string? \"hello\")")?;
-    println!("    {}", result);
+    // Modules::None: syntax + import only. UX stubs inform about missing bindings.
+    let ctx = Context::builder()
+        .standard_env()
+        .sandboxed(Modules::None)
+        .build()?;
 
-    println!("\n--- combining limits + restriction ---\n");
+    println!("\n==> (+ 1 2) in Modules::None — UX stub hints at providing module");
+    match ctx.evaluate("(+ 1 2)") {
+        Err(e) => println!("    blocked: {}", e),
+        Ok(v) => println!("    unexpected: {}", v),
+    }
 
-    // step limit + safe preset: can't escape, can't loop forever
-    let ctx = Context::builder().safe().step_limit(50_000).build()?;
+    println!("\n--- combining limits + sandboxing ---\n");
 
-    println!("==> (define x (cons 1 2)) (set-car! x 99) (car x) in safe env");
+    // step limit + Modules::Safe: import first (VFS loading costs many steps),
+    // then the step limit guards user computation.
+    // tip: set a generous limit to cover module loading, tighten for eval-time.
+    let ctx = Context::builder()
+        .standard_env()
+        .sandboxed(Modules::Safe)
+        .step_limit(5_000_000)
+        .build()?;
+    ctx.evaluate("(import (scheme base))")?;
+
+    println!("==> mutation works in Modules::Safe after import");
     let result = ctx.evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")?;
     println!("    {}", result);
 
-    println!("\n==> file io blocked in safe env");
+    println!("\n==> file io not accessible without file_read() policy");
     match ctx.evaluate("(open-input-file \"/etc/passwd\")") {
         Err(e) => println!("    blocked: {}", e),
         Ok(v) => println!("    unexpected: {}", v),
@@ -103,10 +124,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let canon_str = canon_dir.to_str().unwrap();
 
     // file_read: allow reading only from our temp dir
+    // open-input-file wrapper is injected directly — no (scheme file) import needed
     let ctx = Context::builder()
-        .safe()
+        .standard_env()
+        .sandboxed(Modules::Safe)
         .file_read(&[canon_str])
-        .step_limit(100_000)
+        .step_limit(5_000_000)
         .build()?;
 
     // write a test file from rust, then read it from scheme
@@ -114,6 +137,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&test_file, "hello-from-tein")?;
 
     println!("==> reading file from allowed path");
+    ctx.evaluate("(import (scheme base))")?;
+    ctx.evaluate("(import (scheme read))")?;
     let code = format!(
         r#"(define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
         test_file.display()
@@ -129,15 +154,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // file_write: allow writing only to our temp dir
     let ctx = Context::builder()
-        .safe()
+        .standard_env()
+        .sandboxed(Modules::Safe)
         .file_write(&[canon_str])
-        .step_limit(100_000)
+        .step_limit(5_000_000)
         .build()?;
 
+    ctx.evaluate("(import (scheme base))")?;
     let output_file = io_dir.join("output.txt");
     println!("\n==> writing file to allowed path");
     let code = format!(
-        r#"(define p (open-output-file "{}")) (write "hello" p) (close-output-port p)"#,
+        r#"(define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
         output_file.display()
     );
     ctx.evaluate(&code)?;

@@ -1750,7 +1750,8 @@ impl ContextBuilder {
             // - sandbox_modules path sets the gate internally
             // - everything else is Off
             let resolved_gate = self.vfs_gate.take().unwrap_or(VfsGate::Off);
-            let has_vfs_gate = !matches!(resolved_gate, VfsGate::Off) || self.sandbox_modules.is_some();
+            let has_vfs_gate =
+                !matches!(resolved_gate, VfsGate::Off) || self.sandbox_modules.is_some();
 
             // save current gate values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
@@ -4397,7 +4398,10 @@ mod tests {
             .build()
             .expect("builder");
         let err = ctx.evaluate("(import (scheme base)) (open-input-file \"/etc/passwd\")");
-        assert!(err.is_err(), "file io should be unavailable without file policy");
+        assert!(
+            err.is_err(),
+            "file io should be unavailable without file policy"
+        );
     }
 
     #[test]
@@ -4940,7 +4944,9 @@ mod tests {
             .expect("builder");
 
         // arithmetic works after import
-        let r = ctx.evaluate("(import (scheme base)) (+ 1 2)").expect("arithmetic");
+        let r = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("arithmetic");
         assert_eq!(r, Value::Integer(3));
 
         // mutation works
@@ -5142,7 +5148,7 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_active_when_sandboxed() {
-        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK};
+        use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::only(&["scheme/base"]))
@@ -5162,7 +5168,7 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_off_without_sandbox() {
-        use crate::sandbox::{VFS_GATE, GATE_OFF};
+        use crate::sandbox::{GATE_OFF, VFS_GATE};
         let ctx = Context::new_standard().expect("new_standard");
 
         VFS_GATE.with(|cell| {
@@ -5178,7 +5184,7 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_cleared_on_drop() {
-        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK, GATE_OFF};
+        use crate::sandbox::{GATE_CHECK, GATE_OFF, Modules, VFS_GATE};
         {
             let _ctx = Context::builder()
                 .standard_env()
@@ -5203,10 +5209,8 @@ mod tests {
     #[test]
     fn test_vfs_gate_not_set_without_sandboxed() {
         // unsandboxed context without standard_env should NOT activate VFS gate
-        use crate::sandbox::{VFS_GATE, GATE_OFF};
-        let ctx = Context::builder()
-            .build()
-            .expect("bare context");
+        use crate::sandbox::{GATE_OFF, VFS_GATE};
+        let ctx = Context::builder().build().expect("bare context");
 
         VFS_GATE.with(|cell| {
             assert_eq!(
@@ -5308,7 +5312,7 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_all() {
-        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK};
+        use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
@@ -5341,7 +5345,7 @@ mod tests {
 
     #[test]
     fn test_vfs_gate_allow_module() {
-        use crate::sandbox::{Modules, VFS_GATE, GATE_CHECK};
+        use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::only(&["scheme/base"]))
@@ -5755,7 +5759,9 @@ mod tests {
             .expect("builder");
 
         ctx.evaluate("(import (scheme base))").expect("import");
-        let result = ctx.evaluate("(cons 1 2)").expect("cons should work after import");
+        let result = ctx
+            .evaluate("(cons 1 2)")
+            .expect("cons should work after import");
         assert_eq!(
             result,
             Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)))
