@@ -10,6 +10,12 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 - missing or incorrect documentation including code comments are critical bugs.
 - comprehensive tests including edge cases.
 
+## important
+- every public item has a docstring
+- **base branch is dev** not main
+- chibi-scheme C code changes: cargo hard resets chibi-scheme from remote on build; changes to upstream chibi-scheme must be pushed to the remote repo
+- remember to GC root C vars where appropriate
+
 ## commands
 
 ```bash
@@ -91,6 +97,13 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   lib/tein/json.scm  — module documentation (trampolines registered by rust runtime)
   lib/tein/toml.sld  — (tein toml) library definition + exports toml-parse, toml-stringify
   lib/tein/toml.scm  — module documentation (trampolines registered by rust runtime)
+  lib/tein/file.sld  — (tein file) library definition + exports file-exists?, delete-file
+  lib/tein/file.scm  — module documentation (trampolines registered by rust runtime)
+  lib/tein/load.sld  — (tein load) library definition + `(export (rename tein-load-vfs-internal load))`
+  lib/tein/load.scm  — module documentation (trampoline registered as tein-load-vfs-internal by rust runtime)
+  lib/tein/process.sld — (tein process) library definition + exports get-environment-variable,
+                        get-environment-variables, command-line, exit (NOT in SAFE_MODULES)
+  lib/tein/process.scm — module documentation (trampolines registered by rust runtime)
 build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
 tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-level tests)
@@ -100,9 +113,11 @@ tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-le
 
 **standard env flow**: ContextBuilder with `.standard_env()` → load_standard_env (init-7 + meta-7 via VFS) → load_standard_ports → ~200 bindings (map, for-each, values, dynamic-wind, etc.)
 
-**sandboxing flow**: ContextBuilder with presets → get source env (primitive or standard) → GC-root both envs → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames, NULL-safe parent walk) → set as active env. `.allow(&["import"])` enables idiomatic r7rs imports (VFS-only via module policy)
+**sandboxing flow**: ContextBuilder with presets → set IS_SANDBOXED thread-local → get source env (primitive or standard) → GC-root both envs → create null env (syntax-only) → copy allowed bindings via env_copy_named (handles renames, NULL-safe parent walk) → set as active env. `.allow(&["import"])` enables idiomatic r7rs imports (VFS-only via module policy). IS_SANDBOXED is used by (tein file) trampolines to distinguish unsandboxed (allow all) from sandboxed (require FsPolicy); restored to previous value on drop.
 
 **IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
+
+**exit escape hatch flow**: `(import (tein process))` → `(exit)` / `(exit obj)` sets EXIT_REQUESTED + EXIT_VALUE thread-locals + returns exception to stop VM immediately → eval loop (`evaluate`/`evaluate_port`/`call`) intercepts via `check_exit()` → clears flags → converts EXIT_VALUE to `Value` → returns `Ok(value)` to rust caller. `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj. does not invoke dynamic-wind cleanup (emergency-exit semantics). EXIT_REQUESTED/EXIT_VALUE cleared on Context::drop().
 
 **module policy flow**: ContextBuilder with standard_env + presets → resolve policy (explicit builder policy, or default Allowlist(SAFE_MODULES + IMPLICIT_DEPS) for sandboxed, Unrestricted otherwise) → set MODULE_POLICY level (u8) + MODULE_ALLOWLIST (Vec<String>) thread-locals + C-level tein_module_policy → sexp_find_module_file_raw calls tein_module_allowed() → policy 0: allow all, policy 1: VFS prefix check only, policy 2: .sld files checked via rust callback (tein_module_allowlist_check) strips /vfs/lib/ prefix and checks against MODULE_ALLOWLIST; .scm includes pass unconditionally (reachable only after .sld allowed) → policy + allowlist cleared on Context::drop() via RAII
 
@@ -155,6 +170,12 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **json alist round-trip via chibi**: `Value::from_raw` collapses dotted pairs `(key . val)` into proper lists when `val` is itself a proper list — e.g. `("x" . (("y" . 1)))` becomes `Value::List(["x", Value::Pair("y",1)])`. this loses alist structure needed for json object detection. `json_stringify_raw` (used by the scheme trampoline) works directly at the raw sexp level to detect alist entries via `sexp_pairp + sexp_stringp(car)`, bypassing `from_raw`. the rust-only `json_stringify` path (test-only) via sexp_bridge remains correct since it operates on hand-built `Value`s that haven't been through chibi.
 
+**load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(export (rename tein-load-vfs-internal load))` in `load.sld`.
+
+**SAFE_MODULES excludes (tein process)**: the module allowlist for `Preset::Safe` does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_all()` to enable it explicitly.
+
+**edition 2024:** `unsafe fn` bodies need inner `unsafe { }` blocks
+
 ## adding a new scheme type
 
 1. add predicate wrapper to `tein_shim.c` in the fork (emesal/chibi-scheme, branch emesal-tein)
@@ -164,16 +185,6 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 5. add `to_raw()` conversion
 6. add Display impl
 7. add test in `src/context.rs`
-
-## conventions
-
-- edition 2024: `unsafe fn` bodies need inner `unsafe { }` blocks
-- every public item has a docstring
-- comments explain *why*, code shows *what*
-- lowercase style, casual but precise
-- norse mythology naming theme
-- see ARCHITECTURE.md for full architecture docs, TODO.md for roadmap
-- base branch is dev
 
 ## license
 - ISC

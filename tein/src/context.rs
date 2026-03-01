@@ -51,6 +51,7 @@ use crate::{
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
+use std::os::raw::c_char;
 use std::path::Path;
 
 /// RAII guard that clears the FOREIGN_STORE_PTR thread-local on drop.
@@ -122,6 +123,27 @@ thread_local! {
     /// current TeinExtApi pointer — set during load_extension() so ext method dispatch
     /// can call back into the host. null outside of ext loading and ext method calls.
     pub(crate) static EXT_API: Cell<*const tein_ext::TeinExtApi> = const { Cell::new(std::ptr::null()) };
+}
+
+// --- exit escape hatch thread-locals ---
+//
+// (exit) / (exit obj) in scheme sets these, then returns an exception to
+// stop the VM immediately. the eval loop checks the flag before converting
+// exceptions to errors and intercepts it to return Ok(value) to the rust caller.
+// cleared on Context::drop() as a safety net.
+thread_local! {
+    static EXIT_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    static EXIT_VALUE: Cell<ffi::sexp> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+// --- sandbox state thread-local ---
+//
+// set to true when env-restriction presets are active (i.e. the context was
+// built with .preset()/.safe()/.pure_computation()). used by (tein file)
+// trampolines to distinguish unsandboxed contexts (allow all) from sandboxed
+// contexts with no file policy configured (deny). cleared on Context::drop().
+thread_local! {
+    static IS_SANDBOXED: Cell<bool> = const { Cell::new(false) };
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -1089,6 +1111,352 @@ fn wrapper_fn_for(
     }
 }
 
+// --- trampoline helpers ---
+
+/// Extract the first argument as a `&str`, returning an error sexp on type mismatch.
+///
+/// # Safety
+/// `args` must be a valid scheme list with at least one element.
+unsafe fn extract_string_arg<'a>(
+    ctx: ffi::sexp,
+    args: ffi::sexp,
+    fn_name: &str,
+) -> std::result::Result<&'a str, ffi::sexp> {
+    unsafe {
+        let first = ffi::sexp_car(args);
+        if ffi::sexp_stringp(first) == 0 {
+            let msg = format!("{}: expected string argument", fn_name);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return Err(ffi::make_error(
+                ctx,
+                c_msg.as_ptr(),
+                msg.len() as ffi::sexp_sint_t,
+            ));
+        }
+        let ptr = ffi::sexp_string_data(first);
+        let len = ffi::sexp_string_size(first) as usize;
+        Ok(std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len)).unwrap_or(""))
+    }
+}
+
+/// FsPolicy access direction for [`check_fs_access`].
+enum FsAccess {
+    Read,
+    Write,
+}
+
+/// Check FsPolicy access for `path`.
+///
+/// - unsandboxed (IS_SANDBOXED=false): allows unconditionally
+/// - sandboxed with matching FsPolicy: delegates to `check_read`/`check_write`
+/// - sandboxed without FsPolicy configured: denies
+fn check_fs_access(path: &str, access: FsAccess) -> bool {
+    let sandboxed = IS_SANDBOXED.with(|c| c.get());
+    if !sandboxed {
+        return true;
+    }
+    FS_POLICY.with(|cell| {
+        let policy = cell.borrow();
+        match &*policy {
+            Some(p) => match access {
+                FsAccess::Read => p.check_read(path),
+                FsAccess::Write => p.check_write(path),
+            },
+            None => false, // sandboxed + no policy = deny
+        }
+    })
+}
+
+// --- (tein file) trampolines ---
+
+/// `file-exists?` trampoline: checks FsPolicy read access, returns boolean.
+///
+/// when no FsPolicy is set (unsandboxed context), allows unconditionally.
+/// in sandboxed contexts without file_read configured, returns a policy
+/// violation exception.
+unsafe extern "C" fn file_exists_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let path = match extract_string_arg(ctx, args, "file-exists?") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        if !check_fs_access(path, FsAccess::Read) {
+            let msg = format!("[sandbox:file] {} (read not permitted)", path);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        if std::path::Path::new(path).exists() {
+            ffi::get_true()
+        } else {
+            ffi::get_false()
+        }
+    }
+}
+
+/// `delete-file` trampoline: checks FsPolicy write access, deletes file.
+///
+/// when no FsPolicy is set (unsandboxed context), allows unconditionally.
+/// returns void on success, exception on policy violation or IO error.
+unsafe extern "C" fn delete_file_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let path = match extract_string_arg(ctx, args, "delete-file") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        if !check_fs_access(path, FsAccess::Write) {
+            let msg = format!("[sandbox:file] {} (write not permitted)", path);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        match std::fs::remove_file(path) {
+            Ok(()) => ffi::get_void(),
+            Err(e) => {
+                let msg = format!("delete-file: {}", e);
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+// --- (tein load) trampoline ---
+
+/// VFS-only load trampoline, registered as `tein-load-vfs-internal`.
+///
+/// exported as `load` by `(tein load)` via `(export (rename tein-load-vfs-internal load))`
+/// in `load.sld`. registered under an internal name to avoid overriding chibi's built-in `load`,
+/// which the module loader uses for `(include ...)` in `.sld` files.
+///
+/// resolves the path through `tein_vfs_lookup`, opens a string input port
+/// from the embedded content, and loops read+eval. rejects non-VFS paths
+/// with a sandbox violation error.
+unsafe extern "C" fn load_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let path = match extract_string_arg(ctx, args, "load") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        // VFS-only gate
+        if !path.starts_with("/vfs/") {
+            let msg = format!("[sandbox:load] {} (only VFS paths permitted)", path);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        // look up VFS content
+        let c_path = match CString::new(path) {
+            Ok(s) => s,
+            Err(_) => {
+                let msg = "load: path contains null bytes";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+        let content = match ffi::vfs_lookup(&c_path) {
+            Some(bytes) => bytes,
+            None => {
+                let msg = format!("load: VFS path not found: {}", path);
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+
+        // open input string port from VFS content
+        let scheme_str = ffi::sexp_c_str(
+            ctx,
+            content.as_ptr() as *const c_char,
+            content.len() as ffi::sexp_sint_t,
+        );
+        if ffi::sexp_exceptionp(scheme_str) != 0 {
+            return scheme_str;
+        }
+        let _str_root = ffi::GcRoot::new(ctx, scheme_str);
+
+        let port = ffi::sexp_open_input_string(ctx, scheme_str);
+        if ffi::sexp_exceptionp(port) != 0 {
+            return port;
+        }
+        let _port_root = ffi::GcRoot::new(ctx, port);
+
+        let env = ffi::sexp_context_env(ctx);
+        let mut result = ffi::get_void();
+
+        loop {
+            let expr = ffi::sexp_read(ctx, port);
+            if ffi::sexp_eofp(expr) != 0 {
+                break;
+            }
+            if ffi::sexp_exceptionp(expr) != 0 {
+                return expr;
+            }
+            let _expr_root = ffi::GcRoot::new(ctx, expr);
+            result = ffi::sexp_evaluate(ctx, expr, env);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return result;
+            }
+        }
+
+        result
+    }
+}
+
+// --- (tein process) trampolines ---
+
+/// `get-environment-variable` trampoline: returns env var value or `#f`.
+unsafe extern "C" fn get_env_var_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let name = match extract_string_arg(ctx, args, "get-environment-variable") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        match std::env::var(name) {
+            Ok(val) => {
+                let c_val = CString::new(val.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t)
+            }
+            Err(_) => ffi::get_false(),
+        }
+    }
+}
+
+/// `get-environment-variables` trampoline: returns alist of all env vars as `((name . value) ...)`.
+unsafe extern "C" fn get_env_vars_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let mut result = ffi::get_null();
+        for (key, val) in std::env::vars() {
+            // root accumulator so GC doesn't sweep the partial list
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            let c_key = CString::new(key.as_str()).unwrap_or_default();
+            let c_val = CString::new(val.as_str()).unwrap_or_default();
+            let s_key = ffi::sexp_c_str(ctx, c_key.as_ptr(), key.len() as ffi::sexp_sint_t);
+            if ffi::sexp_exceptionp(s_key) != 0 {
+                return s_key;
+            }
+            let _key_root = ffi::GcRoot::new(ctx, s_key);
+            let s_val = ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t);
+            if ffi::sexp_exceptionp(s_val) != 0 {
+                return s_val;
+            }
+            let _val_root = ffi::GcRoot::new(ctx, s_val);
+            let pair = ffi::sexp_cons(ctx, s_key, s_val);
+            if ffi::sexp_exceptionp(pair) != 0 {
+                return pair;
+            }
+            let _pair_root = ffi::GcRoot::new(ctx, pair);
+            result = ffi::sexp_cons(ctx, pair, result);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return result;
+            }
+        }
+        result
+    }
+}
+
+/// `command-line` trampoline: returns list of command-line args.
+unsafe extern "C" fn command_line_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let mut result = ffi::get_null();
+        let args: Vec<String> = std::env::args().collect();
+        // build list in reverse order so head = argv[0]
+        for arg in args.iter().rev() {
+            let c_arg = CString::new(arg.as_str()).unwrap_or_default();
+            let s_arg = ffi::sexp_c_str(ctx, c_arg.as_ptr(), arg.len() as ffi::sexp_sint_t);
+            if ffi::sexp_exceptionp(s_arg) != 0 {
+                return s_arg;
+            }
+            let _arg_root = ffi::GcRoot::new(ctx, s_arg);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, s_arg, result);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return result;
+            }
+        }
+        result
+    }
+}
+
+/// `exit` trampoline: eval escape hatch.
+///
+/// sets EXIT_REQUESTED + EXIT_VALUE thread-locals and returns a scheme
+/// exception to immediately stop the VM. the eval loop intercepts this
+/// via `check_exit()` and returns `Ok(value)` to the rust caller.
+///
+/// semantics: `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj
+unsafe extern "C" fn exit_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // determine exit value based on arg presence and value
+        let exit_val = if ffi::sexp_nullp(args) != 0 {
+            // (exit) — no args, return fixnum 0
+            ffi::sexp_make_fixnum(0)
+        } else {
+            let arg = ffi::sexp_car(args);
+            if ffi::sexp_booleanp(arg) != 0 {
+                // (exit #t) → 0, (exit #f) → 1
+                if ffi::sexp_truep(arg) != 0 {
+                    ffi::sexp_make_fixnum(0)
+                } else {
+                    ffi::sexp_make_fixnum(1)
+                }
+            } else {
+                arg
+            }
+        };
+
+        // GC-root the exit value — fixnums are immediates (no-op), but heap
+        // objects like strings need rooting so GC doesn't collect them before
+        // check_exit() converts them.
+        ffi::sexp_preserve_object(ctx, exit_val);
+        EXIT_REQUESTED.with(|c| c.set(true));
+        EXIT_VALUE.with(|c| c.set(exit_val));
+
+        // return exception to stop VM immediately
+        let msg = "exit";
+        let c_msg = CString::new(msg).unwrap_or_default();
+        ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+    }
+}
+
 // --- default sizes ---
 
 const DEFAULT_HEAP_SIZE: usize = 8 * 1024 * 1024;
@@ -1413,6 +1781,7 @@ impl ContextBuilder {
             let prev_module_policy = MODULE_POLICY.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
             let prev_module_allowlist = MODULE_ALLOWLIST.with(|cell| cell.borrow().clone());
+            let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
 
             if has_module_policy {
                 let level = resolved_policy.level();
@@ -1434,6 +1803,9 @@ impl ContextBuilder {
             // source_env is the context's current env — either the bare primitive
             // env or the enriched standard env if standard_env was loaded above.
             if let Some(ref allowed) = self.allowed_primitives {
+                // mark context as sandboxed so (tein file) trampolines apply policy
+                IS_SANDBOXED.with(|c| c.set(true));
+
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
                 let null_env = ffi::sexp_make_null_env(ctx, version);
@@ -1579,6 +1951,7 @@ impl ContextBuilder {
                 prev_module_policy,
                 prev_fs_policy,
                 prev_module_allowlist,
+                prev_is_sandboxed,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
@@ -1596,6 +1969,12 @@ impl ContextBuilder {
             #[cfg(feature = "toml")]
             if self.standard_env {
                 context.register_toml_module()?;
+            }
+
+            if self.standard_env {
+                context.register_file_module()?;
+                context.register_load_module()?;
+                context.register_process_module()?;
             }
 
             Ok(context)
@@ -1658,6 +2037,8 @@ pub struct Context {
     prev_fs_policy: Option<FsPolicy>,
     /// previous MODULE_ALLOWLIST, restored on drop
     prev_module_allowlist: Vec<String>,
+    /// previous IS_SANDBOXED value, restored on drop
+    prev_is_sandboxed: bool,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -1732,6 +2113,28 @@ impl Context {
             }
         }
         Ok(())
+    }
+
+    /// Check if `(exit)` was called during evaluation.
+    ///
+    /// If the exit flag is set, clears it, releases the GC root on the
+    /// stashed value, converts it to a `Value`, and returns `Some(Ok(value))`.
+    /// Returns `None` if no exit was requested.
+    fn check_exit(&self) -> Option<Result<Value>> {
+        if EXIT_REQUESTED.with(|c| c.replace(false)) {
+            let raw = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
+            // release GC root — sexp_release_object is a no-op for immediates
+            if !raw.is_null() {
+                unsafe { ffi::sexp_release_object(self.ctx, raw) };
+            }
+            // null or void → (exit) with no args, return 0
+            if raw.is_null() || unsafe { ffi::sexp_voidp(raw) != 0 } {
+                return Some(Ok(Value::Integer(0)));
+            }
+            Some(unsafe { Value::from_raw(self.ctx, raw) })
+        } else {
+            None
+        }
     }
 
     /// Evaluate one or more Scheme expressions.
@@ -1835,8 +2238,12 @@ impl Context {
                 // (fuel exhaustion returns a normal-looking value, not an exception)
                 self.check_fuel()?;
 
-                // evaluation error
+                // exit escape hatch — (exit) returns an exception to stop the
+                // VM immediately; intercept before converting to an error.
                 if ffi::sexp_exceptionp(result) != 0 {
+                    if let Some(exit_result) = self.check_exit() {
+                        return exit_result;
+                    }
                     return Value::from_raw(self.ctx, result);
                 }
             }
@@ -2526,6 +2933,9 @@ impl Context {
                 // root result before from_raw (see evaluate() for rationale)
                 let _result_root = ffi::GcRoot::new(self.ctx, result);
                 if ffi::sexp_exceptionp(result) != 0 {
+                    if let Some(exit_result) = self.check_exit() {
+                        return exit_result;
+                    }
                     return Value::from_raw(self.ctx, result);
                 }
                 last = Value::from_raw(self.ctx, result)?;
@@ -2595,6 +3005,40 @@ impl Context {
         Ok(())
     }
 
+    /// Register `file-exists?` and `delete-file` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts. the VFS module
+    /// `(tein file)` exports only these two names — the standard open-* and
+    /// higher-order wrappers are already in the env and don't need re-exporting.
+    fn register_file_module(&self) -> Result<()> {
+        self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
+        self.define_fn_variadic("delete-file", delete_file_trampoline)?;
+        Ok(())
+    }
+
+    /// Register the VFS-restricted `load` function (VFS-only).
+    ///
+    /// Registers as `tein-load-vfs-internal` to avoid overriding chibi's
+    /// built-in `load`, which the module loader uses for `(include ...)` in
+    /// `.sld` files. `(tein load)` exports it as `load` via
+    /// `(export (rename tein-load-vfs-internal load))` in `load.sld`.
+    fn register_load_module(&self) -> Result<()> {
+        self.define_fn_variadic("tein-load-vfs-internal", load_trampoline)?;
+        Ok(())
+    }
+
+    /// Register `get-environment-variable`, `get-environment-variables`,
+    /// `command-line`, and `exit` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts.
+    fn register_process_module(&self) -> Result<()> {
+        self.define_fn_variadic("get-environment-variable", get_env_var_trampoline)?;
+        self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
+        self.define_fn_variadic("command-line", command_line_trampoline)?;
+        self.define_fn_variadic("exit", exit_trampoline)?;
+        Ok(())
+    }
+
     /// Call a Scheme procedure from Rust.
     ///
     /// Invokes a `Value::Procedure` (lambda, named function, or builtin)
@@ -2659,6 +3103,9 @@ impl Context {
             let _result_root = ffi::GcRoot::new(self.ctx, result);
 
             if ffi::sexp_exceptionp(result) != 0 {
+                if let Some(exit_result) = self.check_exit() {
+                    return exit_result;
+                }
                 return Value::from_raw(self.ctx, result);
             }
 
@@ -2698,6 +3145,17 @@ impl Drop for Context {
                     p.set(std::ptr::null_mut());
                 }
             });
+        }
+
+        // restore sandbox flag for the thread (defensive restore-previous pattern)
+        IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
+
+        // clear any pending exit request — defensive safety net in case evaluation
+        // was interrupted before the eval loop could consume the flag.
+        EXIT_REQUESTED.with(|c| c.set(false));
+        let stashed = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
+        if !stashed.is_null() {
+            unsafe { ffi::sexp_release_object(self.ctx, stashed) };
         }
 
         // clear reader dispatch table so the next context on this thread
@@ -3970,6 +4428,208 @@ mod tests {
         let ctx = Context::builder().safe().build().expect("builder");
         let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
         assert!(err.is_err(), "file io should be unavailable in safe preset");
+    }
+
+    #[test]
+    fn test_tein_process_blocked_by_default_sandbox() {
+        let ctx = Context::builder()
+            .standard_env()
+            .safe()
+            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        let r = ctx.evaluate("(import (tein process))");
+        assert!(
+            r.is_err() || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
+            "expected (tein process) to be blocked in default sandbox, got: {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_tein_process_allowed_with_allow_module() {
+        let ctx = Context::builder()
+            .standard_env()
+            .safe()
+            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .allow_module("tein/process")
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        // module import should succeed once trampolines are registered
+        let r = ctx.evaluate("(import (tein process))");
+        assert!(
+            r.is_ok(),
+            "expected (tein process) import to succeed: {:?}",
+            r
+        );
+    }
+
+    // --- (tein file) tests ---
+
+    #[test]
+    fn test_tein_file_exists() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        // test with a file that exists (Cargo.toml in workspace root)
+        let r = ctx.evaluate("(file-exists? \"Cargo.toml\")").unwrap();
+        assert_eq!(r, Value::Boolean(true));
+        // test with a file that doesn't exist
+        let r = ctx
+            .evaluate("(file-exists? \"/nonexistent/path/xyz\")")
+            .unwrap();
+        assert_eq!(r, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_tein_file_delete() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_delete_file.txt");
+        // create a temp file
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"test").unwrap();
+        drop(f);
+
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let code = format!("(delete-file \"{}\")", path.display());
+        let r = ctx.evaluate(&code);
+        assert!(r.is_ok(), "delete-file failed: {:?}", r);
+        assert!(!path.exists(), "file should be deleted");
+    }
+
+    #[test]
+    fn test_tein_file_exists_sandboxed() {
+        let ctx = Context::builder()
+            .standard_env()
+            .safe()
+            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .step_limit(5_000_000)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        // no FsPolicy configured, file-exists? should return a policy error
+        let r = ctx.evaluate("(file-exists? \"/etc/passwd\")");
+        assert!(r.is_err(), "expected sandbox violation: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_file_exists_with_read_policy() {
+        let ctx = Context::builder()
+            .standard_env()
+            .safe()
+            .allow(&["import", "define", "if", "lambda", "begin", "quote"])
+            .file_read(&["/"])
+            .step_limit(5_000_000)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? \"Cargo.toml\")").unwrap();
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    // --- (tein load) tests ---
+
+    #[test]
+    fn test_tein_load_vfs_path() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        // load a VFS file that defines something — tein/test.scm is a safe target
+        let r = ctx.evaluate("(load \"/vfs/lib/tein/test.scm\")");
+        assert!(r.is_ok(), "VFS load failed: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_load_non_vfs_rejected() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load \"/etc/passwd\")");
+        assert!(r.is_err(), "expected non-VFS path to be rejected: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_load_nonexistent_vfs() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load \"/vfs/lib/nonexistent.scm\")");
+        assert!(r.is_err(), "expected missing VFS path to error: {:?}", r);
+    }
+
+    // --- (tein process) tests ---
+
+    #[test]
+    fn test_tein_process_get_env_var() {
+        unsafe { std::env::set_var("TEIN_TEST_VAR", "hello") };
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx
+            .evaluate("(get-environment-variable \"TEIN_TEST_VAR\")")
+            .unwrap();
+        assert_eq!(r, Value::String("hello".to_string()));
+        // unset var returns #f
+        let r = ctx
+            .evaluate("(get-environment-variable \"TEIN_NONEXISTENT_VAR_XYZ\")")
+            .unwrap();
+        assert_eq!(r, Value::Boolean(false));
+        unsafe { std::env::remove_var("TEIN_TEST_VAR") };
+    }
+
+    #[test]
+    fn test_tein_process_get_env_vars() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(pair? (get-environment-variables))").unwrap();
+        assert_eq!(r, Value::Boolean(true), "should return non-empty alist");
+    }
+
+    #[test]
+    fn test_tein_process_command_line() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(list? (command-line))").unwrap();
+        assert_eq!(r, Value::Boolean(true), "should return a list");
+    }
+
+    #[test]
+    fn test_tein_process_exit_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit) (+ 1 2))").unwrap();
+        assert_eq!(r, Value::Integer(0), "(exit) should return 0");
+    }
+
+    #[test]
+    fn test_tein_process_exit_with_value() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit 42) (+ 1 2))").unwrap();
+        assert_eq!(r, Value::Integer(42), "(exit 42) should return 42");
+    }
+
+    #[test]
+    fn test_tein_process_exit_true() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit #t) 999)").unwrap();
+        assert_eq!(r, Value::Integer(0), "(exit #t) should return 0");
+    }
+
+    #[test]
+    fn test_tein_process_exit_false() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit #f) 999)").unwrap();
+        assert_eq!(r, Value::Integer(1), "(exit #f) should return 1");
+    }
+
+    #[test]
+    fn test_tein_process_exit_string() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit \"done\") 999)").unwrap();
+        assert_eq!(r, Value::String("done".to_string()));
     }
 
     // --- phase 3: timeout context ---

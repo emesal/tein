@@ -10,6 +10,21 @@
 
 **Design doc:** `docs/plans/2026-02-28-safe-module-wrappers-design.md`
 
+## progress (branch: feature/safe-module-wrappers-2602)
+
+- ✅ task 1 — SAFE_MODULES blanket replaced (commit fa6cbee)
+- ✅ task 2 — `tein_vfs_lookup` + `sexp_voidp`/`sexp_truep` added to ffi.rs (commit 9aa29f6)
+- ✅ task 3 — exit thread-locals + eval intercepts in evaluate/evaluate_port/call (commit 5203d14)
+- ✅ task 4 — VFS files pushed to emesal/chibi-scheme emesal-tein (commits 943ab8f + chibi fork eaff5d3a/3419bda8)
+- ✅ task 5 — build.rs VFS_FILES updated (commit 3948c82)
+- ✅ task 6 — (tein file) trampolines implemented (commit 127a96c)
+- ✅ task 7 — (tein load) trampoline fixed (chibi fork commit f6032248): use `(export (rename tein-load-vfs-internal load))` in load.sld — library body `(include ...)` cannot see globals registered via define_fn_variadic, but export resolution can. 655/655 tests pass.
+- ✅ task 8 — (tein process) trampolines implemented (commit 127a96c)
+- ✅ task 9 — scheme integration tests added (commit 8893cf4)
+- ✅ task 10 — AGENTS.md + sandbox.rs doc updated (commit ff0b91d)
+- ✅ task 11 — resolved (tein load) import blocker + final lint + full test run (655/655 pass)
+- ⏳ task 12 — commit + PR
+
 ---
 
 ### Task 1: replace `"tein/"` blanket with explicit SAFE_MODULES entries

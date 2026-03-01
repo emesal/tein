@@ -85,6 +85,15 @@ const VFS_FILES: &[&str] = &[
     // tein documentation accessors
     "lib/tein/docs.sld",
     "lib/tein/docs.scm",
+    // tein file operations (safe wrappers via FsPolicy)
+    "lib/tein/file.sld",
+    "lib/tein/file.scm",
+    // tein VFS-restricted load
+    "lib/tein/load.sld",
+    "lib/tein/load.scm",
+    // tein process context access (NOT in SAFE_MODULES)
+    "lib/tein/process.sld",
+    "lib/tein/process.scm",
 ];
 
 /// VFS files gated behind the "json" cargo feature.
