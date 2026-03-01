@@ -1111,6 +1111,62 @@ fn wrapper_fn_for(
     }
 }
 
+// --- trampoline helpers ---
+
+/// Extract the first argument as a `&str`, returning an error sexp on type mismatch.
+///
+/// # Safety
+/// `args` must be a valid scheme list with at least one element.
+unsafe fn extract_string_arg<'a>(
+    ctx: ffi::sexp,
+    args: ffi::sexp,
+    fn_name: &str,
+) -> std::result::Result<&'a str, ffi::sexp> {
+    unsafe {
+        let first = ffi::sexp_car(args);
+        if ffi::sexp_stringp(first) == 0 {
+            let msg = format!("{}: expected string argument", fn_name);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return Err(ffi::make_error(
+                ctx,
+                c_msg.as_ptr(),
+                msg.len() as ffi::sexp_sint_t,
+            ));
+        }
+        let ptr = ffi::sexp_string_data(first);
+        let len = ffi::sexp_string_size(first) as usize;
+        Ok(std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len)).unwrap_or(""))
+    }
+}
+
+/// FsPolicy access direction for [`check_fs_access`].
+enum FsAccess {
+    Read,
+    Write,
+}
+
+/// Check FsPolicy access for `path`.
+///
+/// - unsandboxed (IS_SANDBOXED=false): allows unconditionally
+/// - sandboxed with matching FsPolicy: delegates to `check_read`/`check_write`
+/// - sandboxed without FsPolicy configured: denies
+fn check_fs_access(path: &str, access: FsAccess) -> bool {
+    let sandboxed = IS_SANDBOXED.with(|c| c.get());
+    if !sandboxed {
+        return true;
+    }
+    FS_POLICY.with(|cell| {
+        let policy = cell.borrow();
+        match &*policy {
+            Some(p) => match access {
+                FsAccess::Read => p.check_read(path),
+                FsAccess::Write => p.check_write(path),
+            },
+            None => false, // sandboxed + no policy = deny
+        }
+    })
+}
+
 // --- (tein file) trampolines ---
 
 /// `file-exists?` trampoline: checks FsPolicy read access, returns boolean.
@@ -1125,35 +1181,12 @@ unsafe extern "C" fn file_exists_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "file-exists?: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let path =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
-
-        // policy check:
-        // - unsandboxed (IS_SANDBOXED=false): allow all, no FsPolicy needed
-        // - sandboxed with file_read configured: check read prefixes
-        // - sandboxed without file_read: deny (no prefixes → check_read returns false)
-        let sandboxed = IS_SANDBOXED.with(|c| c.get());
-        let allowed = if sandboxed {
-            FS_POLICY.with(|cell| {
-                let policy = cell.borrow();
-                match &*policy {
-                    Some(p) => p.check_read(path),
-                    None => false, // sandboxed + no file_read policy = deny
-                }
-            })
-        } else {
-            true // unsandboxed: allow all
+        let path = match extract_string_arg(ctx, args, "file-exists?") {
+            Ok(s) => s,
+            Err(e) => return e,
         };
 
-        if !allowed {
+        if !check_fs_access(path, FsAccess::Read) {
             let msg = format!("[sandbox:file] {} (read not permitted)", path);
             let c_msg = CString::new(msg.as_str()).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
@@ -1178,33 +1211,12 @@ unsafe extern "C" fn delete_file_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "delete-file: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let path =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
-
-        // policy check: same logic as file-exists? — unsandboxed allows all,
-        // sandboxed requires file_write policy, sandboxed without policy = deny.
-        let sandboxed = IS_SANDBOXED.with(|c| c.get());
-        let allowed = if sandboxed {
-            FS_POLICY.with(|cell| {
-                let policy = cell.borrow();
-                match &*policy {
-                    Some(p) => p.check_write(path),
-                    None => false, // sandboxed + no file_write policy = deny
-                }
-            })
-        } else {
-            true // unsandboxed: allow all
+        let path = match extract_string_arg(ctx, args, "delete-file") {
+            Ok(s) => s,
+            Err(e) => return e,
         };
 
-        if !allowed {
+        if !check_fs_access(path, FsAccess::Write) {
             let msg = format!("[sandbox:file] {} (write not permitted)", path);
             let c_msg = CString::new(msg.as_str()).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
@@ -1225,9 +1237,8 @@ unsafe extern "C" fn delete_file_trampoline(
 
 /// VFS-only load trampoline, registered as `tein-load-vfs-internal`.
 ///
-/// exported as `load` by `(tein load)` — `load.scm` contains `(define load
-/// tein-load-vfs-internal)` which is `(include ...)`d by `load.sld`.
-/// registered under an internal name to avoid overriding chibi's built-in `load`,
+/// exported as `load` by `(tein load)` via `(export (rename tein-load-vfs-internal load))`
+/// in `load.sld`. registered under an internal name to avoid overriding chibi's built-in `load`,
 /// which the module loader uses for `(include ...)` in `.sld` files.
 ///
 /// resolves the path through `tein_vfs_lookup`, opens a string input port
@@ -1240,16 +1251,10 @@ unsafe extern "C" fn load_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "load: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let path =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
+        let path = match extract_string_arg(ctx, args, "load") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         // VFS-only gate
         if !path.starts_with("/vfs/") {
@@ -1325,16 +1330,10 @@ unsafe extern "C" fn get_env_var_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "get-environment-variable: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let name =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
+        let name = match extract_string_arg(ctx, args, "get-environment-variable") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
 
         match std::env::var(name) {
             Ok(val) => {
@@ -1355,8 +1354,9 @@ unsafe extern "C" fn get_env_vars_trampoline(
 ) -> ffi::sexp {
     unsafe {
         let mut result = ffi::get_null();
-        let _result_root = ffi::GcRoot::new(ctx, result);
         for (key, val) in std::env::vars() {
+            // root accumulator so GC doesn't sweep the partial list
+            let _tail_root = ffi::GcRoot::new(ctx, result);
             let c_key = CString::new(key.as_str()).unwrap_or_default();
             let c_val = CString::new(val.as_str()).unwrap_or_default();
             let s_key = ffi::sexp_c_str(ctx, c_key.as_ptr(), key.len() as ffi::sexp_sint_t);
@@ -3020,8 +3020,8 @@ impl Context {
     ///
     /// Registers as `tein-load-vfs-internal` to avoid overriding chibi's
     /// built-in `load`, which the module loader uses for `(include ...)` in
-    /// `.sld` files. `(tein load)` exports it as `load` via `(define load
-    /// tein-load-vfs-internal)` in `load.scm` (included by `load.sld`).
+    /// `.sld` files. `(tein load)` exports it as `load` via
+    /// `(export (rename tein-load-vfs-internal load))` in `load.sld`.
     fn register_load_module(&self) -> Result<()> {
         self.define_fn_variadic("tein-load-vfs-internal", load_trampoline)?;
         Ok(())

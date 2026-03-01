@@ -477,16 +477,15 @@ pub unsafe fn get_void() -> sexp {
     unsafe { tein_get_void() }
 }
 
-/// check if `x` is the void object.
+/// check if `x` is the void object (rust-side, no C shim — compares tagged constants directly).
 #[inline]
 pub unsafe fn sexp_voidp(x: sexp) -> c_int {
-    // chibi defines SEXP_VOID as a tagged constant; compare directly.
     unsafe { if tein_get_void() == x { 1 } else { 0 } }
 }
 
-/// check if `x` is truthy (anything except `#f`).
+/// check if `x` is truthy (rust-side, no C shim — anything except `#f`).
 ///
-/// chibi's `sexp_truep(x)` = `(x != SEXP_FALSE)`.
+/// equivalent to chibi's `sexp_truep(x)` = `(x != SEXP_FALSE)`.
 #[inline]
 pub unsafe fn sexp_truep(x: sexp) -> c_int {
     unsafe { if tein_get_false() != x { 1 } else { 0 } }
