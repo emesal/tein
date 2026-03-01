@@ -21,6 +21,9 @@ struct ClibEntry {
     init_suffix: &'static str,
     /// VFS key for static lib lookup
     vfs_key: &'static str,
+    /// requires POSIX headers (`<sys/time.h>`, `<poll.h>`, `<unistd.h>`);
+    /// excluded from compilation and the static library table on windows targets
+    posix_only: bool,
 }
 
 /// a single module in the VFS registry
@@ -70,6 +73,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             source: "lib/tein/reader.c",
             init_suffix: "tein_reader",
             vfs_key: "/vfs/lib/tein/reader",
+            posix_only: false,
         }),
         default_safe: true,
         source: VfsSource::Embedded,
@@ -83,6 +87,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             source: "lib/tein/macro.c",
             init_suffix: "tein_macro",
             vfs_key: "/vfs/lib/tein/macro",
+            posix_only: false,
         }),
         default_safe: true,
         source: VfsSource::Embedded,
@@ -671,6 +676,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             source: "lib/srfi/18/threads.c",
             init_suffix: "srfi_18_threads",
             vfs_key: "/vfs/lib/srfi/18/threads",
+            // threads.c uses <sys/time.h>, <poll.h>, <unistd.h> — posix-only
+            posix_only: true,
         }),
         default_safe: false,
         source: VfsSource::Embedded,
@@ -706,6 +713,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             source: "lib/srfi/39/param.c",
             init_suffix: "srfi_39_param",
             vfs_key: "/vfs/lib/srfi/39/param",
+            posix_only: false,
         }),
         default_safe: true,
         source: VfsSource::Embedded,
@@ -732,6 +740,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             source: "lib/srfi/69/hash.c",
             init_suffix: "srfi_69_hash",
             vfs_key: "/vfs/lib/srfi/69/hash",
+            posix_only: false,
         }),
         default_safe: true,
         source: VfsSource::Embedded,
@@ -1060,6 +1069,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         clib: Some(ClibEntry {
             source: "lib/srfi/151/bit.c",
             init_suffix: "srfi_151_bit",
+            posix_only: false,
             vfs_key: "/vfs/lib/srfi/151/bit",
         }),
         default_safe: true,
@@ -1197,6 +1207,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         clib: Some(ClibEntry {
             source: "lib/chibi/ast.c",
             init_suffix: "chibi_ast",
+            posix_only: false,
             vfs_key: "/vfs/lib/chibi/ast",
         }),
         default_safe: true,
@@ -1228,6 +1239,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         clib: Some(ClibEntry {
             source: "lib/chibi/io/io.c",
             init_suffix: "chibi_io",
+            posix_only: false,
             vfs_key: "/vfs/lib/chibi/io/io",
         }),
         default_safe: true,
