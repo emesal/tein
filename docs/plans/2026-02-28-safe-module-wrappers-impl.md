@@ -15,27 +15,56 @@
 - ✅ task 1 — SAFE_MODULES blanket replaced (commit fa6cbee)
 - ✅ task 2 — `tein_vfs_lookup` + `sexp_voidp`/`sexp_truep` added to ffi.rs (commit 9aa29f6)
 - ✅ task 3 — exit thread-locals + eval intercepts in evaluate/evaluate_port/call (commit 5203d14)
-- ✅ task 4 — VFS files created + pushed to emesal/chibi-scheme emesal-tein (commit 943ab8f)
+- ✅ task 4 — VFS files pushed to emesal/chibi-scheme emesal-tein (commits 943ab8f + chibi fork eaff5d3a/3419bda8)
 - ✅ task 5 — build.rs VFS_FILES updated (commit 3948c82)
-- ⏳ task 6 — (tein file) trampolines: file_exists_trampoline, delete_file_trampoline, register_file_module
-- ⏳ task 7 — (tein load) trampoline: load_trampoline, register_load_module
-- ⏳ task 8 — (tein process) trampolines: get_env_var, get_env_vars, command_line, exit, register_process_module
-- ⏳ task 9 — scheme integration tests: tein_file.scm, tein_process.scm
-- ⏳ task 10 — AGENTS.md + sandbox.rs doc update
-- ⏳ task 11 — (already done in task 4)
-- ⏳ task 12 — final lint + full test run
+- ✅ task 6 — (tein file) trampolines implemented (commit 127a96c)
+- 🔴 task 7 — (tein load) trampoline BLOCKED: `(import (tein load))` fails, see blocker notes below
+- ✅ task 8 — (tein process) trampolines implemented (commit 127a96c)
+- ✅ task 9 — scheme integration tests added (commit 8893cf4)
+- ✅ task 10 — AGENTS.md + sandbox.rs doc updated (commit ff0b91d)
+- ⏳ task 11 — resolve (tein load) import blocker, then final lint + full test run
+- ⏳ task 12 — final lint + full test run (blocked by task 11)
 
 ## notes for next session
 
-**test_tein_process_allowed_with_allow_module**: currently expected-failing — will pass once task 8 registers the process trampolines (the VFS file now exists, so the module loads, but the exports are undefined until trampolines are registered).
+**BLOCKER: (tein load) import fails**
 
-**ffi.rs additions**: `sexp_voidp`, `sexp_truep` added as inline rust (compare against `tein_get_void()`/`tein_get_false()` — chibi macros not in shim). `vfs_lookup` safe wrapper added.
+`(import (tein load))` returns `EvalError("")` (chibi's silent error). root cause not yet identified.
 
-**exit mechanism**: EXIT_REQUESTED + EXIT_VALUE thread-locals in context.rs. check_exit() on Context. intercepts in evaluate() (after check_fuel), evaluate_port() eval loop, and call(). Drop clears stale state.
+Findings:
+- `tein-load-vfs-internal` IS accessible in the global env (confirmed via test: `Ok(Procedure(...))`)
+- `load.scm` in VFS contains `(define load tein-load-vfs-internal)` and the VFS data is correct
+- `load.sld` uses `(include "load.scm")` — same pattern as `json.sld` and `test.sld`
+- json import works fine; load doesn't — something specific to `load.scm`
+- When DEBUG tested with manual `(define load tein-load-vfs-internal)` before import, got `"undefined variable: (include)"` and `WARNING: exception inside undefined operator: define-library`
 
-**task 6 placement**: `file_exists_trampoline` and `delete_file_trampoline` go near existing IoOp wrappers (~line 1078 in current context.rs). `register_file_module()` goes near `register_json_module()`. call registration in `build()` after toml registration.
+Hypothesis: the `(define load tein-load-vfs-internal)` inside `load.scm` is being evaluated **without** the library environment context, possibly because chibi's `include` mechanism for library bodies doesn't give access to `tein-load-vfs-internal` which is in the top-level env (not the library's import chain). The library only imports `(scheme base)` so `tein-load-vfs-internal` may be invisible.
 
-**task 8 note on n parameter**: the `exit_trampoline` uses `n: ffi::sexp_sint_t` to detect zero args. the variadic convention passes args as a list; check `ffi::sexp_nullp(args)` rather than `n == 0` to be safe.
+**Option A**: Move `tein-load-vfs-internal` registration into a chibi static library (like `reader.c` / `macro.c`) that gets loaded at library import time. Complex.
+
+**Option B**: Export `tein-load-vfs-internal` from `load.sld` directly (same pattern as json/toml exports) and have scheme code alias it: but scheme callers would need to do `(define load tein-load-vfs-internal)` themselves.
+
+**Option C**: Register `tein-load-vfs-internal` at the scheme level in `load.scm` via eval — but that requires interaction-environment access.
+
+**Option D (simplest to try)**: Remove `load.scm` content. Instead, have `load.sld` export `tein-load-vfs-internal` as `load` directly using chibi's `rename` in export:
+```scheme
+(define-library (tein load)
+  (import (scheme base))
+  (export (rename tein-load-vfs-internal load)))
+```
+This would work if chibi can find `tein-load-vfs-internal` in the global env during export resolution.
+
+**Option E**: Don't export `load` at all from `(tein load)`. Instead, let users do `(define load tein-load-vfs-internal)` manually. Ugly.
+
+**Current state of tests**: all tests pass EXCEPT the 3 `test_tein_load_*` tests. `just test` fails. Need to resolve before PR.
+
+**chibi fork location**: `~/forks/chibi-scheme` (NOT `target/chibi-scheme` which gets cargo-reset). changes must be committed + pushed from `~/forks/chibi-scheme`.
+
+**IS_SANDBOXED thread-local**: added to context.rs to distinguish unsandboxed (allow all) from sandboxed (deny without FsPolicy). set when presets are applied in build(). prev_is_sandboxed stored in Context struct, restored on drop.
+
+**file module simplified**: `(tein file)` exports only `file-exists?` and `delete-file`. open-* wrappers dropped from exports — available from standard env already. `file.scm` is just doc comments.
+
+**load module trampoline name**: registered as `tein-load-vfs-internal` (not `load`) to avoid breaking chibi's module loader. the intention is for `load.scm` to alias it as `load` in the library body — but this is currently failing.
 
 ---
 

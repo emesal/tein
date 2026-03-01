@@ -93,8 +93,8 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   lib/tein/toml.scm  — module documentation (trampolines registered by rust runtime)
   lib/tein/file.sld  — (tein file) library definition + exports file-exists?, delete-file
   lib/tein/file.scm  — module documentation (trampolines registered by rust runtime)
-  lib/tein/load.sld  — (tein load) library definition; aliases tein-load-vfs-internal as load
-  lib/tein/load.scm  — module documentation (trampoline registered as tein-load-vfs-internal)
+  lib/tein/load.sld  — (tein load) library definition + includes load.scm
+  lib/tein/load.scm  — (define load tein-load-vfs-internal); trampoline registered as tein-load-vfs-internal
   lib/tein/process.sld — (tein process) library definition + exports get-environment-variable,
                         get-environment-variables, command-line, exit (NOT in SAFE_MODULES)
   lib/tein/process.scm — module documentation (trampolines registered by rust runtime)
@@ -164,9 +164,11 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **json alist round-trip via chibi**: `Value::from_raw` collapses dotted pairs `(key . val)` into proper lists when `val` is itself a proper list — e.g. `("x" . (("y" . 1)))` becomes `Value::List(["x", Value::Pair("y",1)])`. this loses alist structure needed for json object detection. `json_stringify_raw` (used by the scheme trampoline) works directly at the raw sexp level to detect alist entries via `sexp_pairp + sexp_stringp(car)`, bypassing `from_raw`. the rust-only `json_stringify` path (test-only) via sexp_bridge remains correct since it operates on hand-built `Value`s that haven't been through chibi.
 
-**load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(begin (define load tein-load-vfs-internal))` in `load.sld`, so it's only active in scopes that explicitly import the module.
+**load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(define load tein-load-vfs-internal)` in `load.scm` (included by `load.sld`). NOTE: `(begin (define ...))` in a library body doesn't resolve globals — use `(include ...)` instead.
 
 **SAFE_MODULES excludes (tein process)**: the module allowlist for `Preset::Safe` does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_all()` to enable it explicitly.
+
+**chibi-scheme C code changes**: cargo hard resets chibi-scheme from remote on build; changes to upstream chibi-scheme must be pushed to the remote repo
 
 ## adding a new scheme type
 

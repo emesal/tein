@@ -1225,7 +1225,8 @@ unsafe extern "C" fn delete_file_trampoline(
 
 /// VFS-only load trampoline, registered as `tein-load-vfs-internal`.
 ///
-/// exported as `load` by `(tein load)` via `(begin (define load tein-load-vfs-internal))`.
+/// exported as `load` by `(tein load)` — `load.scm` contains `(define load
+/// tein-load-vfs-internal)` which is `(include ...)`d by `load.sld`.
 /// registered under an internal name to avoid overriding chibi's built-in `load`,
 /// which the module loader uses for `(include ...)` in `.sld` files.
 ///
@@ -3019,8 +3020,8 @@ impl Context {
     ///
     /// Registers as `tein-load-vfs-internal` to avoid overriding chibi's
     /// built-in `load`, which the module loader uses for `(include ...)` in
-    /// `.sld` files. `(tein load)` exports this as `load` via a `(begin
-    /// (define load tein-load-vfs-internal))` in `load.sld`.
+    /// `.sld` files. `(tein load)` exports it as `load` via `(define load
+    /// tein-load-vfs-internal)` in `load.scm` (included by `load.sld`).
     fn register_load_module(&self) -> Result<()> {
         self.define_fn_variadic("tein-load-vfs-internal", load_trampoline)?;
         Ok(())
