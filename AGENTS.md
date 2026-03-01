@@ -201,5 +201,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 6. add Display impl
 7. add test in `src/context.rs`
 
+**`JIFFY_EPOCH` is process-global**: `time.rs` uses a `static OnceLock<Instant>` shared across all `Context` instances. `current-jiffy` values are process-relative, not context-relative — epoch is set on first call anywhere in the process. this is correct per r7rs ("constant within a single run of the program") but means two separate contexts share the same jiffy epoch.
+
 ## license
 - ISC
