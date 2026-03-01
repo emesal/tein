@@ -321,14 +321,19 @@ mod registry_tests {
             "scheme/write missing"
         );
         assert!(safe.iter().any(|m| m == "srfi/1"), "srfi/1 missing");
+        // shadow modules — present in safe set (shadow replaces native)
+        assert!(
+            safe.iter().any(|m| m == "scheme/file"),
+            "scheme/file missing from safe (shadow)"
+        );
+        assert!(
+            safe.iter().any(|m| m == "scheme/repl"),
+            "scheme/repl missing from safe (shadow)"
+        );
         // excluded modules must not appear
         assert!(
             !safe.iter().any(|m| m == "scheme/eval"),
             "scheme/eval should not be in safe set"
-        );
-        assert!(
-            !safe.iter().any(|m| m == "scheme/repl"),
-            "scheme/repl should not be in safe set"
         );
         assert!(
             !safe.iter().any(|m| m == "tein/process"),

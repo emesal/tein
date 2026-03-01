@@ -9,6 +9,9 @@ enum VfsSource {
     Embedded,
     /// registered at runtime via #[tein_module] — no files to embed
     Dynamic,
+    /// shadow module — .sld injected into dynamic VFS at sandbox build time only.
+    /// unsandboxed contexts use chibi's native version.
+    Shadow,
 }
 
 /// C static library backing for a module
@@ -44,6 +47,9 @@ struct VfsEntry {
     source: VfsSource,
     /// required cargo feature (None = always)
     feature: Option<&'static str>,
+    /// shadow .sld content — only used when source is `Shadow`.
+    /// injected into dynamic VFS by `register_vfs_shadows()` in sandboxed contexts.
+    shadow_sld: Option<&'static str>,
 }
 
 /// full VFS module registry — single source of truth for all VFS modules.
@@ -64,6 +70,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/reader",
@@ -78,6 +85,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/macro",
@@ -92,6 +100,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/test",
@@ -101,6 +110,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/docs",
@@ -110,6 +120,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/json",
@@ -119,6 +130,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: Some("json"),
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/toml",
@@ -128,6 +140,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: Some("toml"),
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/uuid",
@@ -137,6 +150,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Dynamic,
         feature: Some("uuid"),
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/time",
@@ -146,6 +160,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Dynamic,
         feature: Some("time"),
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/file",
@@ -155,6 +170,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "tein/load",
@@ -164,6 +180,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // tein/process: NOT in default safe set — leaks host argv via command-line
     VfsEntry {
@@ -174,6 +191,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // -------------------------------------------------------------------------
     // r7rs standard libraries (safe subset)
@@ -199,6 +217,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/bitwise",
@@ -208,6 +227,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/box",
@@ -217,6 +237,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/bytevector",
@@ -226,6 +247,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/case-lambda",
@@ -235,6 +257,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/char",
@@ -256,6 +279,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/charset",
@@ -265,6 +289,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/comparator",
@@ -274,6 +299,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/complex",
@@ -283,6 +309,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/cxr",
@@ -292,6 +319,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/division",
@@ -301,6 +329,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/ephemeron",
@@ -310,6 +339,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // scheme/eval: default_safe: false — exports eval + environment
     VfsEntry {
@@ -320,6 +350,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/fixnum",
@@ -329,6 +360,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/flonum",
@@ -338,6 +370,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/generator",
@@ -347,6 +380,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/hash-table",
@@ -356,6 +390,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/ideque",
@@ -365,6 +400,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/ilist",
@@ -374,6 +410,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/inexact",
@@ -383,6 +420,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/lazy",
@@ -392,6 +430,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/list",
@@ -401,6 +440,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/list-queue",
@@ -410,6 +450,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/lseq",
@@ -419,6 +460,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/mapping",
@@ -428,6 +470,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/read",
@@ -437,6 +480,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/regex",
@@ -446,6 +490,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // scheme/repl: default_safe: false — exports interaction-environment
     VfsEntry {
@@ -456,6 +501,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/rlist",
@@ -465,6 +511,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/set",
@@ -474,6 +521,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/sort",
@@ -483,6 +531,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/stream",
@@ -492,6 +541,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/text",
@@ -501,6 +551,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/vector",
@@ -510,6 +561,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/write",
@@ -519,6 +571,46 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
+    },
+    // scheme/file: VFS shadow — sandboxed contexts resolve to (tein file) trampolines.
+    // unsandboxed contexts use chibi's native scheme/file directly.
+    VfsEntry {
+        path: "scheme/file",
+        deps: &["tein/file"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some("\
+(define-library (scheme file)
+  (import (tein file))
+  (export open-input-file open-output-file
+          open-binary-input-file open-binary-output-file
+          call-with-input-file call-with-output-file
+          with-input-from-file with-output-to-file
+          file-exists? delete-file))
+"),
+    },
+    // scheme/repl: VFS shadow — sandboxed contexts get neutered interaction-environment.
+    // returns (current-environment) = the sandbox's restricted env.
+    // full sandboxed eval/repl tracked in GH issue #97.
+    VfsEntry {
+        path: "scheme/repl",
+        deps: &[],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some("\
+(define-library (scheme repl)
+  (import (chibi))
+  (export interaction-environment)
+  (begin
+    (define (interaction-environment) (current-environment))))
+"),
     },
     // scheme/time: default_safe: false — depends on scheme/process-context + scheme/file
     VfsEntry {
@@ -529,6 +621,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/time/tai",
@@ -538,6 +631,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/time/tai-to-utc-offset",
@@ -547,6 +641,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // scheme/show: default_safe: false — depends on scheme/file via srfi/166/columnar
     VfsEntry {
@@ -557,6 +652,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/mapping/hash",
@@ -566,6 +662,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // -------------------------------------------------------------------------
     // srfi modules
@@ -589,6 +686,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/1/immutable",
@@ -609,6 +707,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/2",
@@ -618,6 +717,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/8",
@@ -627,6 +727,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/9",
@@ -636,6 +737,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/11",
@@ -645,6 +747,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/14",
@@ -654,6 +757,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/16",
@@ -663,6 +767,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/18",
@@ -682,6 +787,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/27",
@@ -691,6 +797,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/38",
@@ -700,6 +807,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/39",
@@ -718,6 +826,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/41",
@@ -727,6 +836,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/69",
@@ -745,6 +855,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/95",
@@ -754,6 +865,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/98",
@@ -763,6 +875,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/101",
@@ -772,6 +885,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/111",
@@ -781,6 +895,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/113",
@@ -794,6 +909,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/115",
@@ -803,6 +919,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/116",
@@ -812,6 +929,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/117",
@@ -821,6 +939,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/121",
@@ -830,6 +949,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/124",
@@ -839,6 +959,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/125",
@@ -848,6 +969,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/127",
@@ -857,6 +979,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/128",
@@ -879,6 +1002,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/130",
@@ -888,6 +1012,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/132",
@@ -897,6 +1022,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/133",
@@ -906,6 +1032,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/134",
@@ -915,6 +1042,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/135",
@@ -924,6 +1052,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/135/kernel8",
@@ -933,6 +1062,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/141",
@@ -942,6 +1072,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/143",
@@ -951,6 +1082,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/144",
@@ -960,6 +1092,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/145",
@@ -969,6 +1102,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/146",
@@ -991,6 +1125,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/146/hamt",
@@ -1007,6 +1142,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/146/hamt-map",
@@ -1022,6 +1158,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/146/hamt-misc",
@@ -1031,6 +1168,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/146/vector-edit",
@@ -1043,6 +1181,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/146/hash",
@@ -1061,6 +1200,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/151",
@@ -1075,6 +1215,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/165",
@@ -1091,6 +1232,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/166",
@@ -1106,6 +1248,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/166/base",
@@ -1132,6 +1275,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/166/pretty",
@@ -1151,12 +1295,14 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/166/columnar",
         deps: &[
             "scheme/base",
             "scheme/char",
+            "scheme/file",   // shadow — resolves via (tein file) in sandbox
             "srfi/1",
             "srfi/117",
             "srfi/130",
@@ -1168,6 +1314,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/166/unicode",
@@ -1187,6 +1334,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "srfi/166/color",
@@ -1196,6 +1344,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     // -------------------------------------------------------------------------
     // chibi internal modules (transitive deps)
@@ -1213,6 +1362,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/assert",
@@ -1222,6 +1372,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/equiv",
@@ -1231,6 +1382,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/io",
@@ -1245,6 +1397,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/optional",
@@ -1254,6 +1407,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/string",
@@ -1263,6 +1417,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/weak",
@@ -1272,6 +1427,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/time",
@@ -1281,6 +1437,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/char-set",
@@ -1290,6 +1447,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/char-set/base",
@@ -1299,6 +1457,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/char-set/full",
@@ -1308,6 +1467,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/char-set/ascii",
@@ -1320,6 +1480,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/char-set/extras",
@@ -1332,6 +1493,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/char-set/boundary",
@@ -1344,6 +1506,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/iset",
@@ -1358,6 +1521,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/iset/base",
@@ -1367,6 +1531,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/iset/iterators",
@@ -1379,6 +1544,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/iset/constructors",
@@ -1391,6 +1557,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/regexp",
@@ -1409,6 +1576,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/show/shared",
@@ -1418,5 +1586,6 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
     },
 ];
