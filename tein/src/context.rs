@@ -1867,8 +1867,13 @@ impl ContextBuilder {
             }
 
             if self.standard_env {
-                // capture open-*-file originals from full standard env (unsandboxed)
-                capture_file_originals(context.ctx, ffi::sexp_context_env(context.ctx));
+                // capture open-*-file originals from the current env.
+                // sandboxed contexts already captured from source_env above (before
+                // env restriction); re-capturing from null_env would overwrite with
+                // null pointers (null_env has no open-*-file). skip for sandboxed.
+                if !IS_SANDBOXED.with(|c| c.get()) {
+                    capture_file_originals(context.ctx, ffi::sexp_context_env(context.ctx));
+                }
                 context.register_file_module()?;
                 context.register_load_module()?;
                 context.register_process_module()?;
@@ -2905,8 +2910,19 @@ impl Context {
 
     /// Register all `(tein file)` trampolines.
     ///
-    /// Called during `build()` after context creation. The 4 `open-*-file` originals are
-    /// captured separately via `capture_file_originals()` before env restriction.
+    /// The 4 `open-*-file` trampolines are registered under their canonical
+    /// R7RS names (`open-input-file` etc.) to enforce policy for all code
+    /// regardless of whether `(tein file)` is explicitly imported. Sandboxed
+    /// contexts have these in the null_env; code that doesn't import `(tein
+    /// file)` still gets policy enforcement when calling `open-input-file`.
+    ///
+    /// `(tein file)` exports 6 symbols: `file-exists?`, `delete-file`, and
+    /// the 4 higher-order wrappers (`call-with-*`, `with-*-from/to-file`)
+    /// defined in `file.scm`. The 4 primitive trampolines are NOT exported
+    /// from the library — they live in the env directly.
+    ///
+    /// Called during `build()` after context creation. Originals are captured
+    /// separately via `capture_file_originals()` before env restriction.
     fn register_file_module(&self) -> Result<()> {
         self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
         self.define_fn_variadic("delete-file", delete_file_trampoline)?;
@@ -4929,8 +4945,9 @@ mod tests {
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
+        // open-input-file is in env directly (no import needed); import scheme base for let/close-*
         let code = format!(
-            "(import (tein file)) (let ((p (open-input-file \"{path}\"))) (close-input-port p) #t)"
+            "(import (scheme base)) (let ((p (open-input-file \"{path}\"))) (close-input-port p) #t)"
         );
         let r = ctx.evaluate(&code).expect("open-input-file allowed");
         assert_eq!(r, Value::Boolean(true));
@@ -4949,7 +4966,8 @@ mod tests {
             .file_read(&["/tmp/__nonexistent_prefix__/"])
             .build()
             .expect("builder");
-        let code = format!("(import (tein file)) (open-input-file \"{path}\")");
+        // open-input-file is in env directly (no import needed)
+        let code = format!("(open-input-file \"{path}\")");
         assert!(ctx.evaluate(&code).is_err(), "should be denied");
     }
 
@@ -4966,8 +4984,9 @@ mod tests {
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
+        // open-output-file is in env directly (no import needed); import scheme base for let/close-*
         let code = format!(
-            "(import (tein file)) (let ((p (open-output-file \"{path}\"))) (close-output-port p) #t)"
+            "(import (scheme base)) (let ((p (open-output-file \"{path}\"))) (close-output-port p) #t)"
         );
         let r = ctx.evaluate(&code).expect("open-output-file allowed");
         assert_eq!(r, Value::Boolean(true));
@@ -4984,7 +5003,8 @@ mod tests {
             .file_write(&["/tmp/__nonexistent_prefix__/"])
             .build()
             .expect("builder");
-        let code = format!("(import (tein file)) (open-output-file \"{path}\")");
+        // open-output-file trampoline is in env directly — no import needed
+        let code = format!("(open-output-file \"{path}\")");
         assert!(ctx.evaluate(&code).is_err(), "should be denied");
     }
 
@@ -4994,8 +5014,9 @@ mod tests {
         let tmp = "/tmp/tein_open_unsandboxed_test.txt";
         std::fs::write(tmp, "test").expect("write");
         let ctx = Context::builder().standard_env().build().expect("builder");
+        // open-input-file is in env directly; unsandboxed — delegates to chibi original unconditionally
         let r = ctx.evaluate(&format!(
-            "(import (tein file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+            "(let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
         ));
         assert_eq!(r.expect("unsandboxed passthrough"), Value::Boolean(true));
     }

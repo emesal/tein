@@ -196,6 +196,11 @@ fn test_scheme_tein_file() {
 }
 
 #[test]
+fn test_scheme_tein_file_open() {
+    run_scheme_test(include_str!("scheme/tein_file_open.scm"));
+}
+
+#[test]
 fn test_scheme_tein_process() {
     run_scheme_test(include_str!("scheme/tein_process.scm"));
 }
