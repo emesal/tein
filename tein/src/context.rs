@@ -7742,4 +7742,33 @@ mod tests {
         );
         assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
     }
+
+    // --- (scheme show) / (srfi 166) sandbox tests ---
+
+    #[test]
+    fn test_scheme_show_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (scheme show)) (show #f \"hello\")");
+        assert!(r.is_ok(), "scheme show importable in sandbox: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_base_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (srfi 166 base)) (show #f (displayed \"test\"))");
+        assert!(r.is_ok(), "srfi/166/base importable in sandbox: {r:?}");
+    }
+
 }

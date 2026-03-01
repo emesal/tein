@@ -217,9 +217,7 @@ pub(crate) fn register_vfs_shadows() {
         if entry.source != VfsSource::Shadow {
             continue;
         }
-        let sld = entry
-            .shadow_sld
-            .expect("Shadow entry must have shadow_sld");
+        let sld = entry.shadow_sld.expect("Shadow entry must have shadow_sld");
         let vfs_path = format!("/vfs/lib/{}.sld", entry.path);
         let c_path = CString::new(vfs_path).expect("valid VFS path");
         unsafe {

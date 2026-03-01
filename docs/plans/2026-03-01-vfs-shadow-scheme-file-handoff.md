@@ -8,7 +8,7 @@
 
 ## progress
 
-tasks 1–6 complete. tasks 7–12 remain.
+tasks 1–7 complete. task 8 partially done (flags flipped, tests written, but blocked — see below). tasks 9–12 remain.
 
 ### completed
 - **task 1:** branch created, GH issue #97 opened for deferred `(scheme eval)` + full REPL
@@ -17,10 +17,10 @@ tasks 1–6 complete. tasks 7–12 remain.
 - **task 4:** `capture_file_originals()` unsafe fn + `open_file_trampoline()` shared impl + 4 `open_*_file_trampoline` extern "C" fns added; `register_file_module` updated to register all 6 trampolines; originals captured in both sandbox path (from `source_env`) and unsandboxed path (from `context.ctx` env)
 - **task 5:** `check_and_delegate`, 4 `wrapper_open_*` fns, `wrapper_fn_for` removed; `has_io` block removed; `FsPolicy` setup relocated outside sandbox block (works for both paths)
 - **task 6:** chibi fork updated (`~/forks/chibi-scheme` branch `emesal-tein`); `file.sld` exports 6 symbols; `file.scm` defines 4 higher-order wrappers; `(scheme file)` shadow updated; `capture_file_originals` skip-guard added; all 706 tests green
+- **task 7:** VFS shadow integration tests written and passing (710/710). also fixed `(scheme file)` shadow — original `(define open-input-file open-input-file)` approach didn't work (chibi compiles free-var refs as UNDEF slots at library compile time). fix: register open-*-file trampolines under both R7RS names AND internal `tein-open-*-file` names; export internal names from `(tein file)` sld; shadow sld uses `(rename (tein file) ...)` to import them as R7RS names. fork updated and pushed (`d35f167e`).
 
-### remaining (tasks 7–12)
-- **task 7:** VFS shadow integration tests for `(scheme file)` + `(scheme repl)` in `context.rs`
-- **task 8:** flip `default_safe` flags for `scheme/show` + `srfi/166` tree; update sandbox.rs test to add `scheme/show` + `srfi/166` assertions
+### remaining (tasks 8–12)
+- **task 8:** BLOCKED — `(scheme show)` / `(srfi 166)` still fail to import in sandbox despite all deps being `default_safe: true` and VFS gate allowing all paths (see blocker analysis below)
 - **task 9:** `srfi/166/columnar` from-file integration tests with/without FsPolicy
 - **task 10:** docs update — sandbox.rs comment block, AGENTS.md sandboxing flow, design doc status
 - **task 11:** final verification + lint + plan update commit
@@ -28,103 +28,131 @@ tasks 1–6 complete. tasks 7–12 remain.
 
 ---
 
-## critical corrections to the plan
+## critical corrections (updated)
 
 **`Value::Bool` doesn't exist — use `Value::Boolean`**
 
-the plan's test code throughout uses `Value::Bool(true)` / `Value::Bool(false)`. the actual variant is `Value::Boolean(bool)`. every test that asserts a boolean return value must use `Value::Boolean(true)` instead. affects tasks 7, 8, 9.
+the plan's test code throughout uses `Value::Bool(true)` / `Value::Bool(false)`. the actual variant is `Value::Boolean(bool)`.
 
 **`(procedure? ...)` needs `(scheme base)` imported**
 
-sandboxed null_env has no builtins — `(import (scheme base))` is required before any `let`, `close-input-port`, `procedure?`, etc. the plan's test snippets often omit this. confirmed pattern:
-```rust
-"(import (scheme base) (scheme repl)) (procedure? interaction-environment)"
-```
+sandboxed null_env has no builtins — `(import (scheme base))` is required before any `let`, `close-input-port`, `procedure?`, etc.
 
-**sandbox.rs negative assertion for `scheme/repl` was removed in task 2**
+**`(scheme file)` shadow must use import+rename, not `(define x x)`**
 
-the plan deferred updating the sandbox test to task 8 step 5, but we already did it in task 2. task 8 step 5 only needs to add the `scheme/show` and `srfi/166` positive assertions — the `scheme/file` and `scheme/repl` ones are already there.
+the original plan's shadow approach using `(begin (define open-input-file open-input-file) ...)` does NOT work. chibi compiles library bodies and free-var refs become UNDEF slots at compile time. fix: register trampolines under internal names AND R7RS names, export internal names from `(tein file)`, shadow uses `(rename (tein file) ...)`.
 
-**task 7 tests — `(import (scheme file))` with FsPolicy**
+**`test_scheme_file_not_shadowed_unsandboxed` → renamed to `test_tein_file_not_shadowed_unsandboxed`**
 
-the `test_scheme_file_shadow_importable_in_sandbox` test uses `(import (scheme file)) (let ((p (open-input-file ...)))...)`. needs `(import (scheme base))` for `let` and `close-input-port`. use:
-```rust
-"(import (scheme base) (scheme file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
-```
+`(scheme file)` is NOT available in unsandboxed contexts (tein's module path is VFS-only, shadow only registers in sandboxed mode). use `(tein file)` instead.
+
+**task 8 tests are written but failing — see blocker below**
 
 ---
 
-## architecture notes (what's been built)
+## BLOCKER: (scheme show) / (srfi 166) fail in sandbox despite gate allowing all paths
 
-- `register_vfs_shadows()` lives in `sandbox.rs` (not `context.rs`) because `VFS_REGISTRY` and `VfsSource` are in scope there via `include!("vfs_registry.rs")`
-- `FsPolicy` is set unconditionally outside the sandbox block (previously inside `has_io`)
-- the 4 new `open_*_file_trampoline` fns and `capture_file_originals` + `open_file_trampoline` live between `delete_file_trampoline` and `// --- (tein load) trampoline ---`
+### symptom
 
-### (tein file) export architecture — CRITICAL
+`test_scheme_show_importable_in_sandbox` and `test_srfi_166_base_importable_in_sandbox` fail with `EvalError("")` (empty error) or `SandboxViolation("module import blocked: ((chibi/show/shared)) ...")`.
 
-**`(tein file)` exports 6 symbols**: `file-exists?`, `delete-file`, `call-with-input-file`, `call-with-output-file`, `with-input-from-file`, `with-output-to-file`.
+### investigation findings
 
-**the 4 `open-*-file` trampolines are NOT exported from `(tein file)`**. they live directly in the context env (null_env for sandbox, top-level for unsandboxed). no import is required to use them — they're always in scope.
+1. all srfi/166 and chibi/show/shared are `default_safe: true`
+2. all of them appear in `registry_safe_allowlist()` output
+3. the VFS gate (`tein_vfs_gate_check`) is called for each module and returns **1 (allowed)**:
+   - `srfi/165.sld` → 1
+   - `chibi/equiv.sld` → 1
+   - `chibi/ast.sld` → 1
+   - `chibi/show/shared.sld` → 1
+   - etc.
+4. the modules work fine in **unsandboxed** context
+5. `(srfi 69)` imports successfully in sandbox
+6. `(srfi 165)` fails with `EvalError("")` despite being allowed by gate
+7. `(chibi/show/shared)` fails with `SandboxViolation` (generated by our code detecting "couldn't find import" from chibi when gate IS armed) — but gate allows it!
 
-**why not export them**: chibi compiles library body free-variable references as static slots, not dynamic env lookups. if `open-input-file` were exported from `(tein file)` AND referenced in `file.scm` body, the library compiler would create an UNDEF slot at compile time. at runtime the slot stays UNDEF — the top-level trampoline is never found. similarly, if `file.scm` defines scheme wrappers that call `tein-file-open-*-file` (internal names), those names are also compiled as UNDEF slots since they're not in the module env chain. any name referenced in a library body must be available in the library's compile-time env chain.
+### key observation
 
-**`(scheme file)` shadow** re-exports from `(tein file)` for the 6 library items, and uses `(begin (define open-input-file open-input-file) ...)` to alias the 4 primitives from the context env at shadow-load time. this works because shadow library body runs in the null_env context where the trampolines are registered.
+the gate allows all paths, but the modules still fail to load. chibi emits "couldn't find import" AFTER the VFS finds the file and the gate allows it. this means the module is FOUND by `sexp_find_module_file_raw`, then LOADED from VFS (patch B), but during the `define-library` body evaluation, something fails with an empty error string.
 
-**the `capture_file_originals` skip-guard**: the sandboxed path calls `capture_file_originals(ctx, source_env)` BEFORE env restriction. the later call in `if self.standard_env { ... }` must NOT re-run for sandboxed contexts (null_env has no originals — would overwrite with null pointers). fixed with `if !IS_SANDBOXED.with(|c| c.get()) { capture_file_originals(...) }`.
+### hypothesis
 
-### trampoline test pattern (sandboxed)
+the empty `EvalError("")` for `(srfi 165)` and the subsequent failure of `(chibi/show/shared)` (which transitively loads via `srfi/125` → `chibi/ast`) might be caused by a scheme-level error during module body evaluation, NOT a gate block. the error has an empty message string — this could be from chibi's error machinery returning an exception without a message (e.g., `(error "")` or an uncaught condition).
 
-```rust
-// open-*-file is in env directly — import scheme base for let/close-*
-let code = format!(
-    "(import (scheme base)) (let ((p (open-input-file \"{path}\"))) (close-input-port p) #t)"
-);
-```
+### possible causes to investigate
 
----
+1. **`(chibi/ast)` clib in sandbox** — `chibi/ast` has a C extension (clib). its `vfs_key` is `/vfs/lib/chibi/ast` (no extension). the gate checks paths ending in `.sld` or `.so` — but clib paths have no extension. maybe the clib registration fails in sandbox. check `tein_clibs.c` to see how `/vfs/lib/chibi/ast` is loaded and if the gate interferes.
 
-## chibi fork workflow (IMPORTANT — learned this session)
+2. **module body evaluation fails silently** — maybe an import inside srfi/165.scm (or chibi/ast.scm) fails with empty error and propagates up. the outer "couldn't find import" error masks the real cause.
 
-changes must be made and pushed from **`~/forks/chibi-scheme`** (branch `emesal-tein`), NOT from `target/chibi-scheme`. build.rs hard-resets `target/chibi-scheme` from remote on every build.
+3. **`*modules*` state in sandbox** — when sandbox context is built, the `source_env` is sandboxed. does the meta-7.scm `*modules*` table get reset or corrupted? since `*modules*` is a global in the source context, and the sandbox null_env only copies `import`, the `*modules*` lookup happens in the source context's env chain.
 
-```bash
-# correct workflow:
-cd ~/forks/chibi-scheme
-# edit files...
-git add lib/tein/file.sld lib/tein/file.scm
-git commit -m "..."
-git push
-cd /home/fey/projects/tein
-just clean && cargo build
-```
+4. **srfi/27 dep** — `srfi/27` appears in the gate debug output (`srfi/27.sld` result=1). check if srfi/165 or any dep has srfi/27 as a transitive dep that isn't fully embedded.
 
-### current chibi fork state
+### next debugging steps
 
-`~/forks/chibi-scheme` is at `2b95710b` (pushed this session). `target/chibi-scheme` will pull from there on next `just clean && cargo build`.
-
-current `file.sld` (6 exports, no primitives):
+1. add a scheme-level try/catch around the failing import to get the actual inner error:
 ```scheme
-(define-library (tein file)
-  (import (scheme base))
-  (export file-exists? delete-file
-          call-with-input-file call-with-output-file
-          with-input-from-file with-output-to-file)
-  (include "file.scm"))
+(guard (e (#t (display (condition/report-string e)) #f))
+  (import (srfi 165)))
+```
+but this requires `(scheme base)` to have `guard` and a way to print exceptions in sandbox.
+
+2. alternatively: try importing chibi/ast directly in sandbox to see if THAT's the root cause:
+```rust
+let r = ctx.evaluate("(import (chibi ast))");
 ```
 
-current `file.scm`: defines 4 higher-order wrappers calling `open-input-file` / `open-output-file` (free var refs that resolve from context env at call time).
+3. check if `tein_clibs.c` gate check path differs — look at how `/vfs/lib/chibi/ast` (no extension) is looked up vs what gate expects.
+
+4. look at what `srfi/27` is and whether it's fully embedded.
 
 ---
 
-## tests green after task 6
+## architecture notes (batch 2 additions)
 
-all 706 tests pass. last commit: `414d834`.
+### (tein file) export architecture — UPDATED (batch 3)
 
-trampoline tests now in context.rs (search `test_open_input_file_trampoline_allowed`):
-- `test_open_input_file_trampoline_allowed` — allowed path, sandboxed ✓
-- `test_open_input_file_trampoline_denied` — denied path, sandboxed ✓
-- `test_open_output_file_trampoline_allowed` — allowed path, sandboxed ✓
-- `test_open_output_file_trampoline_denied` — denied path, sandboxed ✓
-- `test_open_input_file_unsandboxed_passthrough` — unsandboxed, delegates to chibi original ✓
+**`(tein file)` exports 10 symbols**: `file-exists?`, `delete-file`, `call-with-input-file`, `call-with-output-file`, `with-input-from-file`, `with-output-to-file`, **plus** `tein-open-input-file`, `tein-open-binary-input-file`, `tein-open-output-file`, `tein-open-binary-output-file`.
 
-scheme test: `tein/tests/scheme/tein_file_open.scm` + `test_scheme_tein_file_open` ✓
+the 4 `open-*-file` trampolines are registered under BOTH the R7RS names (for direct env use) AND internal `tein-open-*-file` names (for library-level export). the internal names are exported by `(tein file)` so the `(scheme file)` shadow can import and re-export them as R7RS names via `(rename (tein file) ...)`.
+
+### (scheme file) shadow — import+rename approach
+
+the shadow `.sld` uses:
+```scheme
+(define-library (scheme file)
+  (import (tein file)
+          (rename (tein file)
+                  (tein-open-input-file        open-input-file)
+                  ...))
+  (export ...))
+```
+this works because chibi resolves the renamed imports from `(tein file)`'s export list, which finds them in the top-level env via the env chain at import time (not compile time). the compile-time UNDEF warnings for the `(define x x)` approach are NOT benign — they actually fail at runtime in library context.
+
+### (scheme file) unsandboxed — NOT available
+
+`(scheme file)` is ONLY available in sandboxed contexts (via shadow). in unsandboxed contexts, tein's module path is VFS-only and no shadow is registered. use `(tein file)` instead in unsandboxed contexts.
+
+### chibi fork state
+
+`~/forks/chibi-scheme` at `d35f167e` (batch 3):
+- `file.sld` now exports 10 symbols (added `tein-open-*-file` internal names)
+
+---
+
+## tests added (batch 3)
+
+in `context.rs`:
+- `test_scheme_file_shadow_importable_in_sandbox` — sandbox + FsPolicy, (scheme file) works ✓
+- `test_scheme_file_shadow_denies_without_policy` — sandbox no policy, denied ✓
+- `test_tein_file_not_shadowed_unsandboxed` — unsandboxed uses (tein file) directly ✓
+- `test_scheme_repl_shadow_returns_environment` — (scheme repl) returns env ✓
+- `test_scheme_show_importable_in_sandbox` — FAILING (see blocker)
+- `test_srfi_166_base_importable_in_sandbox` — FAILING (see blocker)
+
+---
+
+## tests green after task 7
+
+710/710 pass (excluding the 2 new failing task 8 tests). last commit: `8383585`.
