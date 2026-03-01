@@ -10,6 +10,12 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 - missing or incorrect documentation including code comments are critical bugs.
 - comprehensive tests including edge cases.
 
+## important
+- every public item has a docstring
+- **base branch is dev** not main
+- chibi-scheme C code changes: cargo hard resets chibi-scheme from remote on build; changes to upstream chibi-scheme must be pushed to the remote repo
+- remember to GC root C vars where appropriate
+
 ## commands
 
 ```bash
@@ -168,7 +174,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **SAFE_MODULES excludes (tein process)**: the module allowlist for `Preset::Safe` does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_all()` to enable it explicitly.
 
-**chibi-scheme C code changes**: cargo hard resets chibi-scheme from remote on build; changes to upstream chibi-scheme must be pushed to the remote repo
+**edition 2024:** `unsafe fn` bodies need inner `unsafe { }` blocks
 
 ## adding a new scheme type
 
@@ -179,16 +185,6 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 5. add `to_raw()` conversion
 6. add Display impl
 7. add test in `src/context.rs`
-
-## conventions
-
-- edition 2024: `unsafe fn` bodies need inner `unsafe { }` blocks
-- every public item has a docstring
-- comments explain *why*, code shows *what*
-- lowercase style, casual but precise
-- norse mythology naming theme
-- see ARCHITECTURE.md for full architecture docs, TODO.md for roadmap
-- base branch is dev
 
 ## license
 - ISC
