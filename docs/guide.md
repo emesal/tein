@@ -158,9 +158,9 @@ let ctx = Context::builder()
 (import (scheme file))         ; blocked — sandbox preset doesn't include file ops
 ```
 
-The module policy is automatic: any context with `.standard_env()` + a preset
-restricts `import` to VFS-only. Filesystem modules are always blocked in sandboxed
-contexts, even if you enable `import`.
+The VFS gate is automatic: any context with `.standard_env()` + a preset
+restricts `import` to vetted VFS modules only. Filesystem modules are always
+blocked in sandboxed contexts, even if you enable `import`.
 
 ---
 

@@ -417,7 +417,7 @@ impl Value {
     /// Extract a structured error from a Chibi exception.
     ///
     /// Detects sandbox sentinel prefixes (`[sandbox:file]`, `[sandbox:binding]`)
-    /// and module policy violations, returning `SandboxViolation` for those cases
+    /// and VFS gate violations, returning `SandboxViolation` for those cases
     /// and `EvalError` for everything else.
     unsafe fn extract_exception_error(ctx: ffi::sexp, exn: ffi::sexp) -> Error {
         unsafe {

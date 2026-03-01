@@ -55,7 +55,8 @@ src/
                  ExtMethodEntry, ExtTypeEntry for dynamic ext-type registration,
                  MethodLookup (Static | Ext), find_method_any
   managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
-  sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions for env restriction
+  sandbox.rs   — Preset type, FsPolicy, VfsGate, VfsModule, VFS_MODULES_SAFE/ALL,
+                 16 const preset definitions for env restriction
   thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
   port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
   timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
@@ -78,10 +79,10 @@ tein-test-ext/ — in-tree test cdylib extension (publish = false):
 target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
                  env_copy_named (rename-aware binding copy), error construction,
-                 module import policy (tein_module_allowed, tein_module_policy_set),
+                 VFS module gate (tein_module_allowed, tein_vfs_gate_set),
                  custom port creation, reader dispatch table (set/unset/get/chars/clear/reserved),
                  macro expansion hook (set/get/clear/active guard)
-  eval.c       — 5 patches: VFS module lookup (A + module policy gate), VFS load (B), VFS open-input-file (C),
+  eval.c       — 5 patches: VFS module lookup (A + VFS gate), VFS load (B), VFS open-input-file (C),
                  macro expansion hook call in analyze_macro_once (D),
                  suppress false "importing undefined variable" for rust-registered bindings (E)
   sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
@@ -107,7 +108,7 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   lib/tein/load.sld  — (tein load) library definition + `(export (rename tein-load-vfs-internal load))`
   lib/tein/load.scm  — module documentation (trampoline registered as tein-load-vfs-internal by rust runtime)
   lib/tein/process.sld — (tein process) library definition + exports get-environment-variable,
-                        get-environment-variables, command-line, exit (NOT in SAFE_MODULES)
+                        get-environment-variables, command-line, exit (NOT in VFS_MODULES_SAFE)
   lib/tein/process.scm — module documentation (trampolines registered by rust runtime)
 build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
 examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
@@ -124,7 +125,7 @@ tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-le
 
 **exit escape hatch flow**: `(import (tein process))` → `(exit)` / `(exit obj)` sets EXIT_REQUESTED + EXIT_VALUE thread-locals + returns exception to stop VM immediately → eval loop (`evaluate`/`evaluate_port`/`call`) intercepts via `check_exit()` → clears flags → converts EXIT_VALUE to `Value` → returns `Ok(value)` to rust caller. `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj. does not invoke dynamic-wind cleanup (emergency-exit semantics). EXIT_REQUESTED/EXIT_VALUE cleared on Context::drop().
 
-**module policy flow**: ContextBuilder with standard_env + presets → resolve policy (explicit builder policy, or default Allowlist(SAFE_MODULES + IMPLICIT_DEPS) for sandboxed, Unrestricted otherwise) → set MODULE_POLICY level (u8) + MODULE_ALLOWLIST (Vec<String>) thread-locals + C-level tein_module_policy → sexp_find_module_file_raw calls tein_module_allowed() → policy 0: allow all, policy 1: VFS prefix check only, policy 2: .sld files checked via rust callback (tein_module_allowlist_check) strips /vfs/lib/ prefix and checks against MODULE_ALLOWLIST; .scm includes pass unconditionally (reachable only after .sld allowed) → policy + allowlist cleared on Context::drop() via RAII
+**VFS gate flow**: ContextBuilder with standard_env + presets → resolve gate (explicit builder gate, or default `Allow(vfs_safe_allowlist())` for sandboxed, `Off` otherwise) → set `VFS_GATE` level (u8) + `VFS_ALLOWLIST` (Vec<String>) thread-locals + C-level `tein_vfs_gate` → `sexp_find_module_file_raw` calls `tein_module_allowed()` → gate 0: allow all, gate 1: rust callback `tein_vfs_gate_check` handles VFS `/vfs/lib/` prefix check, `..` traversal guard, `.scm` passthrough, allowlist prefix matching → gate + allowlist restored on `Context::drop()` via RAII. `allow_module()` resolves transitive deps from `VfsModule` registry at builder time.
 
 **foreign type protocol flow**: `ctx.register_foreign_type::<T>()` → registers `ForeignType::methods()` in `ForeignStore` → injects `foreign-call`/`foreign-types`/`foreign-methods`/`foreign-type-methods` as native fns + pure-scheme `foreign?`/`foreign-type`/`foreign-handle-id` → auto-generates `type-name?` and `type-name-method` convenience procs. `ctx.foreign_value(v)` → inserts into store → returns `Value::Foreign { handle_id, type_name }`. scheme calls `(type-name-method obj)` → convenience proc → `(apply foreign-call obj 'method args)` → `foreign_call_wrapper` (extern "C") → reads `FOREIGN_STORE_PTR` thread-local → `dispatch_foreign_call` → looks up method by type name + method name → calls `MethodFn` with `&mut dyn Any` → returns `Value`. `FOREIGN_STORE_PTR` is set by `evaluate()`/`call()` via `ForeignStoreGuard` RAII.
 
@@ -157,7 +158,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 - **`SEXP_G_STRICT_P` never set** — `sexp_warn` calls `exit(1)` in strict mode, bypassing all rust error handling. never enable strict mode.
 - **module path list never user-modifiable** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). safe because compiled-in defaults + VFS are never empty. never expose raw module path manipulation.
 - **`SEXP_USE_STRICT_TOPLEVEL_BINDINGS=1`** (default) — must stay enabled; without it, `analyze_bind_syntax` has a potential NULL deref.
-- **`CHIBI_MODULE_PATH` env var** — read by chibi's module resolver. our module policy gate blocks non-VFS paths at the C level so it can't escape the sandbox, but document that this env var exists.
+- **`CHIBI_MODULE_PATH` env var** — read by chibi's module resolver. our VFS gate blocks non-VFS paths at the C level so it can't escape the sandbox, but document that this env var exists.
 
 ## critical gotchas
 
@@ -181,7 +182,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(export (rename tein-load-vfs-internal load))` in `load.sld`.
 
-**SAFE_MODULES excludes (tein process)**: the module allowlist for `Preset::Safe` does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_all()` to enable it explicitly.
+**VFS_MODULES_SAFE excludes (tein process)**: the safe module registry does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_gate_all()` to enable it explicitly.
 
 **edition 2024:** `unsafe fn` bodies need inner `unsafe { }` blocks
 

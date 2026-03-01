@@ -91,7 +91,7 @@ const VFS_FILES: &[&str] = &[
     // tein VFS-restricted load
     "lib/tein/load.sld",
     "lib/tein/load.scm",
-    // tein process context access (NOT in SAFE_MODULES)
+    // tein process context access (NOT in VFS_MODULES_SAFE)
     "lib/tein/process.sld",
     "lib/tein/process.scm",
 ];

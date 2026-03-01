@@ -5,7 +5,7 @@
 //! 1. **Environment restriction** — expose only selected primitives via presets
 //! 2. **Step limits** — cap VM instructions per evaluation
 //! 3. **File IO policy** — allowlist filesystem paths for reading/writing
-//! 4. **Module policy** — restrict `(import ...)` to safe modules (three-tier: Allowlist / VfsAll / Unrestricted)
+//! 4. **VFS gate** — restrict `(import ...)` to vetted VFS modules via [`VfsGate`]
 //!
 //! # Presets
 //!
@@ -72,15 +72,16 @@
 //! Paths are canonicalised before prefix-checking, so symlink and `..`
 //! traversals are resolved.
 //!
-//! # Module policy
+//! # VFS gate
 //!
-//! Module imports in sandboxed standard-env contexts are restricted by a
-//! three-tier policy:
+//! Module imports in sandboxed standard-env contexts are restricted by [`VfsGate`]:
 //!
-//! - **Allowlist** (default) — only [`SAFE_MODULES`] + transitive deps.
-//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module).
-//! - **VfsAll** — all curated VFS modules. set with [`.vfs_all()`](crate::ContextBuilder::vfs_all).
-//! - **Unrestricted** — VFS + filesystem (unsandboxed contexts).
+//! - **`Off`** — no restriction (unsandboxed contexts).
+//! - **`Allow(vec)`** (default for sandboxed) — only listed module prefixes pass.
+//!   defaults to [`VFS_MODULES_SAFE`] + transitive deps.
+//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module),
+//!   widen with [`.vfs_gate_all()`](crate::ContextBuilder::vfs_gate_all),
+//!   or start empty with [`.vfs_gate_none()`](crate::ContextBuilder::vfs_gate_none).
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
