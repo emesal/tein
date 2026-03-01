@@ -86,6 +86,8 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 
+include!("vfs_registry.rs");
+
 /// Filesystem access policy for sandboxed IO.
 ///
 /// Controls which paths Scheme code can read from and write to.
@@ -915,6 +917,98 @@ pub(crate) fn vfs_all_allowlist() -> Vec<String> {
     resolve_module_deps(&paths)
 }
 
+// ---------------------------------------------------------------------------
+// registry-based helpers (coexist with old VFS_MODULES_* until task 10)
+// ---------------------------------------------------------------------------
+
+/// resolve transitive deps from `VFS_REGISTRY`.
+///
+/// follows `deps` recursively for each entry, returns a deduplicated flat list
+/// of all module path strings (including the inputs). unknown paths are included
+/// as-is (not expanded). same semantics as [`resolve_module_deps`].
+pub fn registry_resolve_deps(paths: &[&str]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stack: Vec<&str> = paths.to_vec();
+
+    while let Some(path) = stack.pop() {
+        if !seen.insert(path) {
+            continue;
+        }
+        result.push(path.to_string());
+
+        if let Some(entry) = VFS_REGISTRY.iter().find(|e| e.path == path) {
+            for dep in entry.deps {
+                if !seen.contains(dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// build the default safe allowlist from `VFS_REGISTRY` (`default_safe: true` entries
+/// with their transitive deps resolved, filtered by active cargo features).
+pub(crate) fn registry_safe_allowlist() -> Vec<String> {
+    let paths: Vec<&str> = VFS_REGISTRY
+        .iter()
+        .filter(|e| e.default_safe && feature_enabled(e.feature))
+        .map(|e| e.path)
+        .collect();
+    registry_resolve_deps(&paths)
+}
+
+/// build the full allowlist from `VFS_REGISTRY` (all entries with deps resolved,
+/// filtered by active cargo features).
+pub(crate) fn registry_all_allowlist() -> Vec<String> {
+    let paths: Vec<&str> = VFS_REGISTRY
+        .iter()
+        .filter(|e| feature_enabled(e.feature))
+        .map(|e| e.path)
+        .collect();
+    registry_resolve_deps(&paths)
+}
+
+/// get all VFS files to embed from `VFS_REGISTRY` (embedded + feature-gated).
+#[allow(dead_code)] // used in build.rs via include!
+fn registry_vfs_files() -> Vec<&'static str> {
+    VFS_REGISTRY
+        .iter()
+        .filter(|e| e.source == VfsSource::Embedded && feature_enabled(e.feature))
+        .flat_map(|e| e.files.iter().copied())
+        .collect()
+}
+
+/// get all clib entries from `VFS_REGISTRY`.
+#[allow(dead_code)] // used in build.rs via include!
+fn registry_clib_entries() -> Vec<&'static ClibEntry> {
+    VFS_REGISTRY
+        .iter()
+        .filter_map(|e| e.clib.as_ref())
+        .collect()
+}
+
+/// check whether a cargo feature gate is satisfied at runtime.
+///
+/// in sandbox.rs this is a compile-time check. build.rs uses the same check.
+#[inline]
+fn feature_enabled(feature: Option<&str>) -> bool {
+    match feature {
+        None => true,
+        Some("json") => cfg!(feature = "json"),
+        Some("toml") => cfg!(feature = "toml"),
+        Some("uuid") => cfg!(feature = "uuid"),
+        Some("time") => cfg!(feature = "time"),
+        Some(f) => {
+            // unknown feature name — conservatively include (build.rs handles gating)
+            eprintln!("warning: unknown feature gate in VFS_REGISTRY: {f}");
+            true
+        }
+    }
+}
+
 /// A named set of Scheme primitives for environment restriction.
 ///
 /// Used with [`ContextBuilder::preset()`](crate::ContextBuilder::preset)
@@ -1210,3 +1304,77 @@ pub(crate) const ALWAYS_STUB: &[&str] = &[
     "print-vm-profile",
     "reset-vm-profile",
 ];
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn registry_safe_allowlist_contains_expected_modules() {
+        let safe = registry_safe_allowlist();
+        // core r7rs modules expected in safe set
+        assert!(safe.iter().any(|m| m == "scheme/base"), "scheme/base missing");
+        assert!(safe.iter().any(|m| m == "scheme/write"), "scheme/write missing");
+        assert!(safe.iter().any(|m| m == "srfi/1"), "srfi/1 missing");
+        // excluded modules must not appear
+        assert!(
+            !safe.iter().any(|m| m == "scheme/eval"),
+            "scheme/eval should not be in safe set"
+        );
+        assert!(
+            !safe.iter().any(|m| m == "scheme/repl"),
+            "scheme/repl should not be in safe set"
+        );
+        assert!(
+            !safe.iter().any(|m| m == "tein/process"),
+            "tein/process should not be in safe set"
+        );
+    }
+
+    #[test]
+    fn registry_all_allowlist_is_superset_of_safe() {
+        let safe = registry_safe_allowlist();
+        let all = registry_all_allowlist();
+        // all must contain everything safe contains
+        for module in &safe {
+            assert!(
+                all.iter().any(|m| m == module),
+                "all_allowlist missing module from safe: {module}"
+            );
+        }
+        // all must be strictly larger (unsafe modules like scheme/eval are included)
+        assert!(
+            all.len() > safe.len(),
+            "registry_all_allowlist should be larger than safe"
+        );
+        // scheme/eval + scheme/repl must be present in all
+        assert!(all.iter().any(|m| m == "scheme/eval"), "scheme/eval missing from all");
+        assert!(all.iter().any(|m| m == "tein/process"), "tein/process missing from all");
+    }
+
+    #[test]
+    fn registry_resolve_deps_resolves_transitive() {
+        // scheme/char transitively pulls in chibi/char-set/full, chibi/iset/base, etc.
+        let resolved = registry_resolve_deps(&["scheme/char"]);
+        assert!(resolved.iter().any(|m| m == "scheme/char"));
+        assert!(
+            resolved.iter().any(|m| m == "chibi/char-set/full"),
+            "scheme/char should transitively pull chibi/char-set/full"
+        );
+        assert!(
+            resolved.iter().any(|m| m == "chibi/iset/base"),
+            "scheme/char should transitively pull chibi/iset/base"
+        );
+        // srfi/39 comes from scheme/base (via chibi chain) — verify no duplicates
+        let resolved_base = registry_resolve_deps(&["scheme/base"]);
+        let count_srfi9 = resolved_base.iter().filter(|m| m.as_str() == "srfi/9").count();
+        assert_eq!(count_srfi9, 1, "srfi/9 should appear exactly once (no duplicates)");
+    }
+
+    #[test]
+    fn registry_resolve_deps_unknown_path_passthrough() {
+        // unknown paths should be included as-is, not panic
+        let resolved = registry_resolve_deps(&["some/unknown/module"]);
+        assert!(resolved.iter().any(|m| m == "some/unknown/module"));
+    }
+}
