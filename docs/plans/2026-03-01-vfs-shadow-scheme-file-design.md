@@ -1,5 +1,7 @@
 # VFS shadow: (scheme file) + (scheme show) — design
 
+**status: BLOCKED** — depends on VFS module registry refactor (see below).
+
 issue: #91
 
 ## problem
@@ -10,6 +12,19 @@ this blocks the entire `(scheme show)` / `(srfi 166)` tree from `VFS_MODULES_SAF
 additionally, `(tein file)` was supposed to provide the full `(scheme file)` surface but
 currently only exports `file-exists?` and `delete-file` — missing the 4 `open-*` variants
 and 4 higher-order wrappers.
+
+## blocking issue: VFS module registry is broken
+
+during design work we discovered that most modules in `VFS_MODULES_SAFE` are **phantom
+entries** — they're in the allowlist but their `.sld`/`.scm` files aren't embedded in the
+VFS. since chibi's module resolver only searches `/vfs/lib`, these modules can't actually
+be imported in a sandboxed context. only the handful of modules explicitly listed in
+`build.rs`'s `VFS_FILES` work.
+
+this must be fixed first: the VFS module registry needs a full refactor so that "on the
+list" = "in the VFS" = "importable". see the separate VFS registry refactor design doc.
+
+once the refactor is complete, the design below can be implemented as-is.
 
 ## approach: dynamic VFS shadowing
 
