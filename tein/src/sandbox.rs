@@ -224,9 +224,10 @@ thread_local! {
 /// because `(tein process)` is intentionally excluded — `command-line` leaks
 /// host argv. use `.allow_module("tein/process")` or `.vfs_gate_all()` to opt in.
 ///
-/// `scheme/time` and `scheme/show` are excluded because they transitively
-/// depend on unvetted modules (`scheme/process-context`, `scheme/file`).
-/// see github issues #90 and #91 for safe alternatives.
+/// `scheme/time` is excluded because it transitively depends on unvetted modules
+/// (`scheme/process-context`, `scheme/file`). use `(tein time)` instead (see #90).
+/// `scheme/show` is excluded because it transitively depends on unvetted modules;
+/// see #91 for a safe alternative.
 pub const VFS_MODULES_SAFE: &[VfsModule] = &[
     // --- tein modules (tein/process excluded: leaks host argv) ---
     VfsModule {
@@ -259,6 +260,10 @@ pub const VFS_MODULES_SAFE: &[VfsModule] = &[
     },
     VfsModule {
         path: "tein/uuid",
+        deps: &[],
+    },
+    VfsModule {
+        path: "tein/time",
         deps: &[],
     },
     VfsModule {
@@ -763,7 +768,7 @@ pub const VFS_MODULES_ALL: &[VfsModule] = &[
     },
     // scheme/time: depends on scheme/process-context + scheme/file transitively.
     // allowed in ALL because the deps are also available when the user opts in.
-    // see #90 for a future safe (tein time) alternative.
+    // for sandboxed contexts prefer (tein time) which has no unsafe deps (see #90).
     VfsModule {
         path: "scheme/time",
         deps: &["scheme/time/tai", "scheme/time/tai-to-utc-offset"],
