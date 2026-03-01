@@ -161,6 +161,10 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 ## critical gotchas
 
+**`#[tein_module]` inside tein itself**: requires `extern crate self as tein;` in `lib.rs` because the macro generates `tein::*` paths. the mod also needs `pub(crate)` visibility so `context.rs` can call the generated `register_module_*` fn via `crate::mod_name::inner::register_module_name(&ctx)`.
+
+**`Value` arg in `#[tein_fn]` free fns**: use `value: Value` in the fn signature to accept any scheme value. extraction uses `Value::from_raw`; `Value` is brought into scope automatically by the macro. useful for predicates that accept heterogeneous input (e.g. `uuid?`).
+
 **tein_const scheme naming**: constants get no module prefix — `#[tein_const] pub const GREETING` in module `"foo"` → scheme name `greeting`, not `foo-greeting`. free fns do get the prefix (`foo-greet`).
 
 **Result::Err returns a scheme string**: `fn foo() -> Result<i64, String>` — the `Err` path returns `sexp_c_str(msg)` which becomes `Value::String(msg)` in rust. it's not an exception; `(test-error ...)` won't catch it. match on `Value::String` instead. same in internal and ext mode.

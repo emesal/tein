@@ -2,6 +2,34 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+## progress
+
+**branch:** `feature/tein-uuid-2503`
+
+- [x] Task 1 — `Value` arg support in `#[tein_fn]` ✅ committed `f0c5d86`
+- [x] Task 2 — `extern crate self as tein` + uuid dependency ✅ committed `63061b5`
+- [x] Task 3 — `src/uuid.rs` ✅ committed `e20a971`
+- [x] Task 4 — register module + add to SAFE_MODULES ✅ committed `39d81bc`
+- [x] Task 5 — rust integration tests ✅ committed `9550765`
+- [x] Task 6 — scheme integration tests ✅ committed `51ab561`
+- [x] Task 7 — update docs and AGENTS.md ✅ committed `9b1714b`
+- [x] Task 8 — final verification + cleanup ✅
+
+**complete.**
+
+### implementation notes
+
+**`Value` arg support (Task 1):**
+- `gen_arg_extraction` in `tein-macros/src/lib.rs` now has a `"Value"` arm using `Value::from_raw`
+- bare `Value` in fn signatures is rewritten to `tein::Value` in the emitted code (so cross-crate use works)
+- `use tein::Value;` injected at top of generated module so match patterns like `Value::String(_)` resolve
+- `Value::from_raw` promoted from `pub(crate)` to `pub #[doc(hidden)]` (required for cross-crate macro expansion)
+- test: `tein/tests/tein_fn_value_arg.rs` (3 tests)
+
+**registration call (Task 4):**
+- generated fn is `crate::uuid::uuid_impl::register_module_uuid(&context)?`
+- pattern mirrors toml: `#[cfg(feature = "uuid")] if self.standard_env { ... }`
+
 **Goal:** expose UUID v4 generation as `(tein uuid)` with `make-uuid`, `uuid?`, `uuid-nil` — the first internal use of `#[tein_module]`.
 
 **Architecture:** single `src/uuid.rs` using `#[tein_module("uuid")]` macro. the macro generates VFS `.sld`/`.scm`, docs sub-library, trampolines, and `register_module_uuid()`. registration is feature-gated and called from `ContextBuilder::build()`. requires `extern crate self as tein;` in `lib.rs` since the macro generates `tein::*` paths.
