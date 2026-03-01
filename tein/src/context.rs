@@ -1801,15 +1801,32 @@ impl ContextBuilder {
     /// # }
     /// ```
     pub fn allow_module(mut self, prefix: &str) -> Self {
-        // ensure we have an Allow list to extend
-        if !matches!(self.vfs_gate, Some(VfsGate::Allow(_))) {
-            self.vfs_gate = Some(VfsGate::Allow(vfs_safe_allowlist()));
-        }
-        if let Some(VfsGate::Allow(ref mut list)) = self.vfs_gate {
-            // resolve transitive deps from the VFS module registry
-            for dep in crate::sandbox::resolve_module_deps(&[prefix]) {
-                if !list.contains(&dep) {
-                    list.push(dep);
+        if self.sandbox_modules.is_some() {
+            // new path: expand the Modules variant to include the additional module.
+            // Safe/All → Only(existing_list + new_module), None → Only(new_module),
+            // Only(list) → append to list. build() resolves transitive deps.
+            use crate::sandbox::{Modules, registry_all_allowlist, registry_safe_allowlist};
+            let mut base = match self.sandbox_modules.take() {
+                Some(Modules::Safe) => registry_safe_allowlist(),
+                Some(Modules::All) => registry_all_allowlist(),
+                Some(Modules::None) => Vec::new(),
+                Some(Modules::Only(list)) => list,
+                None => unreachable!(),
+            };
+            if !base.contains(&prefix.to_string()) {
+                base.push(prefix.to_string());
+            }
+            self.sandbox_modules = Some(Modules::Only(base));
+        } else {
+            // legacy path: extend the VFS gate allowlist
+            if !matches!(self.vfs_gate, Some(VfsGate::Allow(_))) {
+                self.vfs_gate = Some(VfsGate::Allow(vfs_safe_allowlist()));
+            }
+            if let Some(VfsGate::Allow(ref mut list)) = self.vfs_gate {
+                for dep in crate::sandbox::resolve_module_deps(&[prefix]) {
+                    if !list.contains(&dep) {
+                        list.push(dep);
+                    }
                 }
             }
         }
@@ -7798,6 +7815,38 @@ mod tests {
         let _builder3 = Context::builder().standard_env().sandboxed(Modules::None);
         let _builder4 =
             Context::builder().standard_env().sandboxed(Modules::only(&["scheme/base"]));
+    }
+
+    // --- task 9: allow_module() with new sandbox path ---
+
+    #[test]
+    fn test_sandboxed_allow_module_tein_process() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("tein/process")
+            .build()
+            .expect("build");
+        // (exit 0) should succeed and return 0
+        let result = ctx
+            .evaluate("(import (tein process)) (exit 0)")
+            .expect("tein/process exit");
+        assert_eq!(result, Value::Integer(0));
+    }
+
+    #[test]
+    fn test_sandboxed_allow_module_scheme_eval_importable() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("scheme/eval")
+            .build()
+            .expect("build");
+        // scheme/eval should now be importable without VFS gate error
+        ctx.evaluate("(import (scheme eval))")
+            .expect("scheme/eval should be importable after allow_module");
     }
 
     // --- task 8: file_read/file_write with new sandbox path ---
