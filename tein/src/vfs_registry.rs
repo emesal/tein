@@ -576,11 +576,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     // scheme/file: VFS shadow — sandboxed contexts resolve to (tein file) trampolines.
     // unsandboxed contexts use chibi's native scheme/file directly.
     //
-    // the 4 open-*-file trampolines are registered in the null_env directly
-    // by register_file_module(); they are NOT exported from (tein file). this
-    // shadow captures them via (define x x) aliases — evaluated at library-load
-    // time when the trampolines are already in the null_env.
-    // (tein file) provides the higher-order wrappers + file-exists? + delete-file.
+    // (tein file) exports the 4 open-*-file trampolines under internal names
+    // (tein-open-input-file etc.) so chibi can resolve them at library compile time.
+    // this shadow imports and re-exports them under the standard r7rs names.
     VfsEntry {
         path: "scheme/file",
         deps: &["tein/file"],
@@ -591,20 +589,17 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (scheme file)
-  (import (tein file))
+  (import (tein file)
+          (rename (tein file)
+                  (tein-open-input-file        open-input-file)
+                  (tein-open-binary-input-file  open-binary-input-file)
+                  (tein-open-output-file        open-output-file)
+                  (tein-open-binary-output-file open-binary-output-file)))
   (export file-exists? delete-file
           open-input-file open-binary-input-file
           open-output-file open-binary-output-file
           call-with-input-file call-with-output-file
-          with-input-from-file with-output-to-file)
-  (begin
-    ;; capture the open-*-file trampolines from the context env at import time.
-    ;; they are registered in the null_env by register_file_module() before any
-    ;; (import ...) runs. compile-time \"undefined variable\" warnings are benign.
-    (define open-input-file open-input-file)
-    (define open-binary-input-file open-binary-input-file)
-    (define open-output-file open-output-file)
-    (define open-binary-output-file open-binary-output-file)))
+          with-input-from-file with-output-to-file))
 "),
     },
     // scheme/repl: VFS shadow — sandboxed contexts get neutered interaction-environment.

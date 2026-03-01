@@ -2918,19 +2918,34 @@ impl Context {
     ///
     /// `(tein file)` exports 6 symbols: `file-exists?`, `delete-file`, and
     /// the 4 higher-order wrappers (`call-with-*`, `with-*-from/to-file`)
-    /// defined in `file.scm`. The 4 primitive trampolines are NOT exported
-    /// from the library — they live in the env directly.
+    /// defined in `file.scm`. The 4 primitive trampolines are registered
+    /// under both the R7RS names (for direct env use) and internal
+    /// `tein-open-*-file` names (so `(tein file)` can export them for
+    /// the `(scheme file)` shadow to import and re-export).
     ///
     /// Called during `build()` after context creation. Originals are captured
     /// separately via `capture_file_originals()` before env restriction.
     fn register_file_module(&self) -> Result<()> {
         self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
         self.define_fn_variadic("delete-file", delete_file_trampoline)?;
+        // register each open-*-file trampoline under both the R7RS name (for
+        // direct env use) and an internal tein-open-* name (so (tein file)
+        // can export them as library symbols for (scheme file) shadow import)
         self.define_fn_variadic("open-input-file", open_input_file_trampoline)?;
+        self.define_fn_variadic("tein-open-input-file", open_input_file_trampoline)?;
         self.define_fn_variadic("open-binary-input-file", open_binary_input_file_trampoline)?;
+        self.define_fn_variadic(
+            "tein-open-binary-input-file",
+            open_binary_input_file_trampoline,
+        )?;
         self.define_fn_variadic("open-output-file", open_output_file_trampoline)?;
+        self.define_fn_variadic("tein-open-output-file", open_output_file_trampoline)?;
         self.define_fn_variadic(
             "open-binary-output-file",
+            open_binary_output_file_trampoline,
+        )?;
+        self.define_fn_variadic(
+            "tein-open-binary-output-file",
             open_binary_output_file_trampoline,
         )?;
         Ok(())
@@ -7660,6 +7675,71 @@ mod tests {
         // (scheme repl) in sandbox should resolve to our shadow
         let r = ctx
             .evaluate("(import (scheme base) (scheme repl)) (procedure? interaction-environment)");
+        assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_file_shadow_importable_in_sandbox() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        let tmp = "/tmp/tein_shadow_file_test.txt";
+        std::fs::write(tmp, "shadowed").expect("write");
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("builder");
+        // (scheme file) in sandbox should resolve to our shadow
+        let r = ctx.evaluate(&format!(
+            "(import (scheme base) (scheme file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(r.expect("scheme file shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_file_shadow_denies_without_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            // no file_read configured
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (scheme file)) (open-input-file \"/etc/passwd\")");
+        assert!(r.is_err(), "scheme/file open-input-file denied without policy");
+    }
+
+    #[test]
+    fn test_tein_file_not_shadowed_unsandboxed() {
+        // unsandboxed: (tein file) trampolines allow all file access (no policy check)
+        // note: (scheme file) is not available in unsandboxed mode — tein's module path
+        // is VFS-only and the shadow is only registered in sandboxed contexts.
+        // (tein file) is the correct import for file ops in unsandboxed contexts.
+        let tmp = "/tmp/tein_unsandboxed_scheme_file.txt";
+        std::fs::write(tmp, "native").expect("write");
+        let ctx = Context::builder()
+            .standard_env()
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(import (scheme base) (tein file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(r.expect("unsandboxed tein file works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_repl_shadow_returns_environment() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // interaction-environment should return an env (not #f, not error)
+        let r = ctx.evaluate(
+            "(import (scheme base) (scheme repl)) (let ((e (interaction-environment))) #t)",
+        );
         assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
     }
 }
