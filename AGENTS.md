@@ -36,88 +36,37 @@ cargo test -p tein -- ext          # run extension integration tests
 
 ```
 src/
-  lib.rs       — public api re-exports (Context, ContextBuilder, TimeoutContext,
-                 ThreadLocalContext, Mode, Value, Error,
-                 ForeignType, MethodFn, MethodContext)
-  context.rs   — Context, ContextBuilder: evaluation, fuel mgmt, env restriction, all tests;
-                 load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII
-  value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
-                 variants: Integer, Float, Bignum(String), Rational(Box<Value>, Box<Value>),
-                 Complex(Box<Value>, Box<Value>), String, Symbol, Boolean, List, Pair,
-                 Vector, Char, Bytevector, Port (opaque), HashTable (opaque,
-                 falls to Other until runtime type detection added), Nil,
-                 Unspecified, Procedure, Other, Foreign { handle_id, type_name }
-  error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error, IoError,
-                 StepLimitExceeded, Timeout, SandboxViolation)
-  ffi.rs       — unsafe c bindings + safe wrappers, `raw` module for advanced users
-  foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore handle-map,
-                 dispatch_foreign_call — the foreign type protocol engine;
-                 ExtMethodEntry, ExtTypeEntry for dynamic ext-type registration,
-                 MethodLookup (Static | Ext), find_method_any
-  managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
-  sandbox.rs   — Preset type, FsPolicy, VfsGate, VfsModule, VFS_MODULES_SAFE/ALL,
-                 16 const preset definitions for env restriction
-  thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
-  port.rs     — PortStore: Read/Write bridge via thread-local trampoline (custom ports)
-  timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
-  json.rs      — json_parse (JSON string → Value) + json_stringify_raw (raw sexp → JSON string);
-                 registered as json-parse/json-stringify via trampolines in context.rs.
-                 stringify works at raw sexp level to preserve alist structure through chibi round-trips
-  toml.rs      — toml_parse (TOML string → Value) + toml_stringify_raw (raw sexp → TOML string);
-                 datetimes as tagged lists (toml-datetime "iso-string"). registered via trampolines in context.rs.
-                 feature-gated behind `toml` cargo feature
-  uuid.rs      — uuid_impl #[tein_module]: make-uuid (v4 generation via uuid crate), uuid? (predicate via
-                 Uuid::parse_str), uuid-nil (constant). first internal use of #[tein_module].
-                 feature-gated behind `uuid` cargo feature
-  time.rs      — time_impl #[tein_module]: current-second (wall-clock via SystemTime),
-                 current-jiffy (monotonic via Instant + OnceLock), jiffies-per-second (constant 10⁹).
-                 feature-gated behind `time` cargo feature
-  sexp_bridge.rs — Value ↔ Sexp bidirectional conversion; shared layer for format modules (json, toml, yaml)
-tein-ext/      — stable C ABI types for cdylib extensions (no chibi dependency):
-  src/lib.rs   — TeinExtApi vtable, OpaqueCtx/OpaqueVal, TeinTypeDesc/TeinMethodDesc,
-                 SexpFn/TeinMethodFn/TeinExtInitFn type aliases, error codes, API version
-tein-test-ext/ — in-tree test cdylib extension (publish = false):
-  src/lib.rs   — #[tein_module("testext", ext = true)] with free fns, consts, Counter type;
-                 used by tein/tests/ext_loading.rs integration tests
+  lib.rs         — public api re-exports
+  context.rs     — Context, ContextBuilder: eval, fuel, env restriction, all tests;
+                   load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII
+  value.rs       — Value enum: scheme↔rust conversion, cycle detection, Display
+  error.rs       — Error enum
+  ffi.rs         — unsafe c bindings + safe wrappers, GcRoot, `raw` module
+  foreign.rs     — ForeignType trait, ForeignStore, dispatch_foreign_call;
+                   ExtMethodEntry/ExtTypeEntry, MethodLookup (Static | Ext), find_method_any
+  sandbox.rs     — Preset, FsPolicy, VfsGate, VfsModule, VFS_MODULES_SAFE/ALL
+  managed.rs     — ThreadLocalContext (persistent/fresh) on dedicated thread
+  port.rs        — PortStore: Read/Write bridge via thread-local trampoline
+  timeout.rs     — TimeoutContext: wall-clock timeout via dedicated thread
+  json.rs        — json_parse + json_stringify_raw (raw sexp level, preserves alist)
+  toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso"). feature=toml
+  uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
+  time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second. feature=time
+  sexp_bridge.rs — Value ↔ Sexp; shared layer for format modules
+tein-ext/        — stable C ABI vtable for cdylib extensions (no chibi dependency)
+tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_loading.rs
 target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
-  tein_shim.c  — exports chibi c macros as real functions, fuel control, env manipulation,
-                 env_copy_named (rename-aware binding copy), error construction,
-                 VFS module gate (tein_module_allowed, tein_vfs_gate_set),
-                 custom port creation, reader dispatch table (set/unset/get/chars/clear/reserved),
-                 macro expansion hook (set/get/clear/active guard)
-  eval.c       — 5 patches: VFS module lookup (A + VFS gate), VFS load (B), VFS open-input-file (C),
-                 macro expansion hook call in analyze_macro_once (D),
-                 suppress false "importing undefined variable" for rust-registered bindings (E)
-  sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
-  vm.c         — 2-line patch for fuel budget consumption at timeslice boundary
-  lib/tein/foreign.sld — (tein foreign) library definition
-  lib/tein/foreign.scm — pure-scheme predicates: foreign?, foreign-type, foreign-handle-id
-  lib/tein/reader.sld — (tein reader) library definition + include-shared for C init
-  lib/tein/reader.scm — module documentation
-  lib/tein/reader.c   — C static library init: set-reader!, unset-reader!, reader-dispatch-chars
-  lib/tein/macro.sld — (tein macro) library definition + include-shared for C init
-  lib/tein/macro.scm — module documentation
-  lib/tein/macro.c   — C static library init: set-macro-expand-hook!, unset-macro-expand-hook!, macro-expand-hook
-  lib/tein/test.sld  — (tein test) library definition
-  lib/tein/test.scm  — pure-scheme assertion framework: test-equal, test-true, test-false, test-error
-  lib/tein/json.sld  — (tein json) library definition + exports json-parse, json-stringify
-  lib/tein/json.scm  — module documentation (trampolines registered by rust runtime)
-  lib/tein/toml.sld  — (tein toml) library definition + exports toml-parse, toml-stringify
-  lib/tein/toml.scm  — module documentation (trampolines registered by rust runtime)
-  lib/tein/uuid.sld  — (tein uuid) library definition (generated by #[tein_module])
-  lib/tein/uuid.scm  — module documentation + uuid-nil constant (generated by #[tein_module])
-  lib/tein/time.sld  — (tein time) library definition (generated by #[tein_module])
-  lib/tein/time.scm  — module documentation (generated by #[tein_module])
-  lib/tein/file.sld  — (tein file) library definition + exports file-exists?, delete-file
-  lib/tein/file.scm  — module documentation (trampolines registered by rust runtime)
-  lib/tein/load.sld  — (tein load) library definition + `(export (rename tein-load-vfs-internal load))`
-  lib/tein/load.scm  — module documentation (trampoline registered as tein-load-vfs-internal by rust runtime)
-  lib/tein/process.sld — (tein process) library definition + exports get-environment-variable,
-                        get-environment-variables, command-line, exit (NOT in VFS_MODULES_SAFE)
-  lib/tein/process.scm — module documentation (trampolines registered by rust runtime)
-build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c into OUT_DIR
-examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs, foreign_types.rs
-tests/         — scheme_tests.rs (integration runner), scheme/*.scm (scheme-level tests)
+  tein_shim.c    — chibi macro shims, fuel control, env_copy_named, VFS gate,
+                   custom ports, reader dispatch table, macro expansion hook
+  eval.c         — 5 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
+                   macro hook in analyze_macro_once (D), suppress false import warning (E)
+  sexp.c         — 1 patch: reader dispatch before hardcoded # switch
+  vm.c           — 2-line patch: fuel consumption at timeslice boundary
+  lib/tein/      — tein scheme modules: foreign, reader, macro, test, json, toml,
+                   uuid, time, file, load, process (see each .sld/.scm for exports)
+build.rs         — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c
+examples/        — basic, floats, ffi, debug, sandbox, foreign_types, managed
+tests/           — scheme_tests.rs (integration runner), scheme/*.scm
 ```
 
 **data flow**: rust code → `Context::evaluate()` → arm_fuel() → ffi.rs safe wrappers → tein_shim.c → chibi-scheme vm → tein_fuel_consume_slice() at timeslice boundary → sexp result → `Value::from_raw()` → check_fuel() → rust `Value` enum
@@ -179,15 +128,13 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **type checking order**: `from_raw` checks in broadest-first order: `complex → ratio → bignum → flonum → integer`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0 (garbage integer values) — flonum must come before integer. similarly, ratio and bignum are heap-allocated numbers chibi checks before fixnums/flonums; complex is the broadest and must be outermost.
 
-**numeric tower shim functions**: `sexp_bignum_to_string(ctx, x)` — opens a string port, writes bignum in decimal, returns string sexp (allocates). `sexp_string_to_number(ctx, str, base)` — parses a scheme string as a number (used for `Bignum::to_raw`). `sexp_make_ratio(ctx, num, den)` / `sexp_make_complex(ctx, real, imag)` — constructors for to_raw; the first argument must be GC-rooted before calling (both may allocate).
-
-**chibi feature flags**: on linux, `SEXP_USE_GREEN_THREADS` defaults to 1, so the `threads` cond-expand feature is active (affects which VFS files are loaded, e.g. `srfi/39/syntax.scm` vs `syntax-no-threads.scm`). `full-unicode` is always enabled (affects `scheme/char.sld` path selection).
-
 **json alist round-trip via chibi**: `Value::from_raw` collapses dotted pairs `(key . val)` into proper lists when `val` is itself a proper list — e.g. `("x" . (("y" . 1)))` becomes `Value::List(["x", Value::Pair("y",1)])`. this loses alist structure needed for json object detection. `json_stringify_raw` (used by the scheme trampoline) works directly at the raw sexp level to detect alist entries via `sexp_pairp + sexp_stringp(car)`, bypassing `from_raw`. the rust-only `json_stringify` path (test-only) via sexp_bridge remains correct since it operates on hand-built `Value`s that haven't been through chibi.
 
 **load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(export (rename tein-load-vfs-internal load))` in `load.sld`.
 
 **VFS_MODULES_SAFE excludes (tein process)**: the safe module registry does not include `tein/process` because `command-line` leaks the host's argv. use `.allow_module("tein/process")` or `.vfs_gate_all()` to enable it explicitly.
+
+**GC rooting in rust FFI**: chibi's conservative stack scanning is disabled — the GC does NOT see rust locals. any `sexp` held across an allocating FFI call can be freed. use `ffi::GcRoot::new(ctx, sexp)` (RAII, calls `sexp_preserve_object`/`sexp_release_object`). root across: list/pair/vector building loops, `evaluate()`'s read/eval loop, `call()`'s arg accumulator, `build()`'s source_env + null_env. allocating calls: `sexp_make_flonum`, `sexp_c_str`, `sexp_intern`, `sexp_cons`, `sexp_make_vector`, `sexp_open_input_string`, `sexp_read`, `sexp_evaluate`, `sexp_load_standard_env`, `sexp_make_null_env`, `sexp_env_define`, `env_copy_named`, `sexp_define_foreign_proc`, `sexp_preserve_object`. in C code use `sexp_gc_var`/`sexp_gc_preserve`/`sexp_gc_release`.
 
 **edition 2024:** `unsafe fn` bodies need inner `unsafe { }` blocks
 
