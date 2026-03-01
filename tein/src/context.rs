@@ -1971,6 +1971,11 @@ impl ContextBuilder {
                 context.register_toml_module()?;
             }
 
+            #[cfg(feature = "uuid")]
+            if self.standard_env {
+                crate::uuid::uuid_impl::register_module_uuid(&context)?;
+            }
+
             if self.standard_env {
                 context.register_file_module()?;
                 context.register_load_module()?;

@@ -8,7 +8,7 @@
 use tein_macros::tein_module;
 
 #[tein_module("uuid")]
-mod uuid_impl {
+pub(crate) mod uuid_impl {
     /// the nil UUID (all zeros)
     #[tein_const]
     pub const UUID_NIL: &str = "00000000-0000-0000-0000-000000000000";

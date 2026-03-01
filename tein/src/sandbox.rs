@@ -231,6 +231,7 @@ pub const SAFE_MODULES: &[&str] = &[
     "tein/docs",
     "tein/json",
     "tein/toml",
+    "tein/uuid",
     "tein/file",
     "tein/load",
     // r7rs standard libraries (safe subset — excludes file, process-context, load, r5rs)
