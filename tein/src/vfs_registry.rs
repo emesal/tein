@@ -182,13 +182,13 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // tein/process: NOT in default safe set — leaks host argv via command-line
+    // tein/process: safe — trampolines neuter env vars, command-line, in sandbox
     VfsEntry {
         path: "tein/process",
         deps: &["scheme/base"],
         files: &["lib/tein/process.sld", "lib/tein/process.scm"],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -621,6 +621,26 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     (define (interaction-environment) (current-environment))))
 "),
     },
+    // scheme/process-context: VFS shadow — re-exports from (tein process).
+    // trampolines neuter env vars, command-line in sandboxed contexts.
+    // exit uses (tein process) eval escape hatch; emergency-exit aliases exit.
+    VfsEntry {
+        path: "scheme/process-context",
+        deps: &["tein/process"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some("\
+(define-library (scheme process-context)
+  (import (tein process))
+  (export get-environment-variable get-environment-variables
+          command-line exit emergency-exit)
+  (begin
+    (define emergency-exit exit)))
+"),
+    },
     // scheme/time: default_safe: false — depends on scheme/process-context + scheme/file
     VfsEntry {
         path: "scheme/time",
@@ -803,7 +823,12 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         path: "srfi/27",
         deps: &[],
         files: &["lib/srfi/27.sld", "lib/srfi/27/constructors.scm"],
-        clib: None,
+        clib: Some(ClibEntry {
+            source: "lib/srfi/27/rand.c",
+            init_suffix: "srfi_27_rand",
+            vfs_key: "/vfs/lib/srfi/27/rand",
+            posix_only: false,
+        }),
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
@@ -871,21 +896,40 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         path: "srfi/95",
         deps: &[],
         files: &["lib/srfi/95.sld", "lib/srfi/95/sort.scm"],
-        clib: None,
+        clib: Some(ClibEntry {
+            source: "lib/srfi/95/qsort.c",
+            init_suffix: "srfi_95_qsort",
+            vfs_key: "/vfs/lib/srfi/95/qsort",
+            posix_only: false,
+        }),
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
     },
+    // srfi/98: env var access. clib for unsandboxed; shadow neuters in sandbox.
+    // needed by srfi/128 (hash salt) in the (scheme show) dep chain.
     VfsEntry {
         path: "srfi/98",
         deps: &[],
         files: &["lib/srfi/98.sld"],
-        clib: None,
+        clib: Some(ClibEntry {
+            source: "lib/srfi/98/env.c",
+            init_suffix: "srfi_98_env",
+            vfs_key: "/vfs/lib/srfi/98/env",
+            posix_only: false,
+        }),
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
-        shadow_sld: None,
+        shadow_sld: Some("\
+(define-library (srfi 98)
+  (import (scheme base))
+  (export get-environment-variable get-environment-variables)
+  (begin
+    (define (get-environment-variable name) #f)
+    (define (get-environment-variables) '())))
+"),
     },
     VfsEntry {
         path: "srfi/101",

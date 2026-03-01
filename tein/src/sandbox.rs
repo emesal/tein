@@ -108,16 +108,23 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
-// modules NOT in the VFS registry:
+// VFS shadow modules:
 //
-// the following chibi modules exist in the VFS filesystem but are **not vetted**
-// and will be blocked by the gate in any sandboxed context:
+// the following modules have `VfsSource::Shadow` entries in the registry.
+// in sandboxed contexts, `register_vfs_shadows()` injects replacement `.sld`
+// files that re-export from safe tein counterparts or provide neutered stubs.
+// unsandboxed contexts use chibi's native versions (no shadow registered).
 //
-// - `scheme/file` — raw filesystem IO, no policy checks. use `(tein file)` instead.
-// - `scheme/process-context` — `exit`/`emergency-exit` from `(chibi process)` kills the
-//   host process, bypassing all rust error handling. use `(tein process)` instead.
-// - `scheme/load` — loads arbitrary files from filesystem. use `(tein load)` instead.
-// - `scheme/r5rs` — re-exports `scheme/file`, `scheme/load`, `scheme/process-context`.
+// - `scheme/file` — re-exports (tein file), providing FsPolicy enforcement
+// - `scheme/repl` — neutered interaction-environment via (current-environment)
+// - `scheme/process-context` — re-exports (tein process) with neutered env/argv
+// - `srfi/98` — neutered get-environment-variable (always #f)
+//
+// modules NOT shadowed and intentionally blocked:
+//
+// - `scheme/load` — loads arbitrary files from filesystem. use (tein load) instead.
+// - `scheme/eval` — eval + environment. tracked for future shadow (GH issue #97).
+// - `scheme/r5rs` — re-exports scheme/file, scheme/load, scheme/process-context.
 
 /// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
 pub(crate) const GATE_OFF: u8 = 0;
@@ -358,14 +365,29 @@ mod registry_tests {
             safe.iter().any(|m| m == "scheme/repl"),
             "scheme/repl missing from safe (shadow)"
         );
+        // tein/process — safe (trampolines neuter env/argv in sandbox)
+        assert!(
+            safe.iter().any(|m| m == "tein/process"),
+            "tein/process missing from safe"
+        );
+        // scheme/process-context shadow
+        assert!(
+            safe.iter().any(|m| m == "scheme/process-context"),
+            "scheme/process-context missing from safe (shadow)"
+        );
+        // scheme/show + srfi/166
+        assert!(
+            safe.iter().any(|m| m == "scheme/show"),
+            "scheme/show missing from safe"
+        );
+        assert!(
+            safe.iter().any(|m| m == "srfi/166"),
+            "srfi/166 missing from safe"
+        );
         // excluded modules must not appear
         assert!(
             !safe.iter().any(|m| m == "scheme/eval"),
             "scheme/eval should not be in safe set"
-        );
-        assert!(
-            !safe.iter().any(|m| m == "tein/process"),
-            "tein/process should not be in safe set"
         );
     }
 

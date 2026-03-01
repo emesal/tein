@@ -1350,6 +1350,11 @@ unsafe extern "C" fn get_env_var_trampoline(
             Err(e) => return e,
         };
 
+        // sandboxed contexts get neutered env var access
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return ffi::get_false();
+        }
+
         match std::env::var(name) {
             Ok(val) => {
                 let c_val = CString::new(val.as_str()).unwrap_or_default();
@@ -1361,6 +1366,7 @@ unsafe extern "C" fn get_env_var_trampoline(
 }
 
 /// `get-environment-variables` trampoline: returns alist of all env vars as `((name . value) ...)`.
+/// sandboxed contexts return `'()`.
 unsafe extern "C" fn get_env_vars_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1368,6 +1374,11 @@ unsafe extern "C" fn get_env_vars_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        // sandboxed contexts get neutered env var access
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return ffi::get_null();
+        }
+
         let mut result = ffi::get_null();
         for (key, val) in std::env::vars() {
             // root accumulator so GC doesn't sweep the partial list
@@ -1399,6 +1410,8 @@ unsafe extern "C" fn get_env_vars_trampoline(
 }
 
 /// `command-line` trampoline: returns list of command-line args.
+/// `command-line` trampoline: returns the host argv as a list of strings.
+/// sandboxed contexts return `'("tein")`.
 unsafe extern "C" fn command_line_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1406,6 +1419,13 @@ unsafe extern "C" fn command_line_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        // sandboxed contexts get a fake command line
+        if IS_SANDBOXED.with(|c| c.get()) {
+            let name = CString::new("tein").unwrap();
+            let s = ffi::sexp_c_str(ctx, name.as_ptr(), 4);
+            return ffi::sexp_cons(ctx, s, ffi::get_null());
+        }
+
         let mut result = ffi::get_null();
         let args: Vec<String> = std::env::args().collect();
         // build list in reverse order so head = argv[0]
@@ -4359,7 +4379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tein_process_blocked_by_default_sandbox() {
+    fn test_tein_process_safe_in_sandbox() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
@@ -4367,12 +4387,21 @@ mod tests {
             .step_limit(5_000_000)
             .build()
             .expect("sandboxed context");
+        // (tein process) is in the safe set — trampolines neuter env/argv in sandbox
         let r = ctx.evaluate("(import (tein process))");
         assert!(
-            r.is_err() || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
-            "expected (tein process) to be blocked in Modules::Safe, got: {:?}",
-            r
+            r.is_ok(),
+            "(tein process) should be importable in sandbox: {r:?}"
         );
+        // env vars neutered
+        let r = ctx.evaluate("(get-environment-variable \"HOME\")");
+        assert_eq!(r.unwrap(), Value::Boolean(false));
+        // env var list neutered
+        let r = ctx.evaluate("(get-environment-variables)");
+        assert_eq!(r.unwrap(), Value::Nil);
+        // command-line returns fake
+        let r = ctx.evaluate("(command-line)");
+        assert_eq!(r.unwrap(), Value::List(vec![Value::String("tein".into())]));
     }
 
     #[test]
@@ -7707,7 +7736,10 @@ mod tests {
             .build()
             .expect("builder");
         let r = ctx.evaluate("(import (scheme file)) (open-input-file \"/etc/passwd\")");
-        assert!(r.is_err(), "scheme/file open-input-file denied without policy");
+        assert!(
+            r.is_err(),
+            "scheme/file open-input-file denied without policy"
+        );
     }
 
     #[test]
@@ -7718,14 +7750,14 @@ mod tests {
         // (tein file) is the correct import for file ops in unsandboxed contexts.
         let tmp = "/tmp/tein_unsandboxed_scheme_file.txt";
         std::fs::write(tmp, "native").expect("write");
-        let ctx = Context::builder()
-            .standard_env()
-            .build()
-            .expect("builder");
+        let ctx = Context::builder().standard_env().build().expect("builder");
         let r = ctx.evaluate(&format!(
             "(import (scheme base) (tein file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
         ));
-        assert_eq!(r.expect("unsandboxed tein file works"), Value::Boolean(true));
+        assert_eq!(
+            r.expect("unsandboxed tein file works"),
+            Value::Boolean(true)
+        );
     }
 
     #[test]
@@ -7770,5 +7802,4 @@ mod tests {
         let r = ctx.evaluate("(import (srfi 166 base)) (show #f (displayed \"test\"))");
         assert!(r.is_ok(), "srfi/166/base importable in sandbox: {r:?}");
     }
-
 }

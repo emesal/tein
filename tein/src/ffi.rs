@@ -763,7 +763,7 @@ extern "C" fn tein_vfs_gate_check(path: *const c_char) -> c_int {
     }
 
     // check against the allowlist
-    let result = VFS_ALLOWLIST.with(|cell| {
+    VFS_ALLOWLIST.with(|cell| {
         let list = cell.borrow();
         if list
             .iter()
@@ -773,8 +773,7 @@ extern "C" fn tein_vfs_gate_check(path: *const c_char) -> c_int {
         } else {
             0
         }
-    });
-    result
+    })
 }
 
 /// RAII guard that roots a `sexp` on chibi's global preservatives list.
