@@ -575,6 +575,80 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    VfsEntry {
+        // r7rs "small" standard — the 14-library bundle. pulls in scheme/eval +
+        // scheme/load so it is NOT safe by default (eval/load bypass the sandbox).
+        path: "scheme/small",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/complex",
+            "scheme/cxr",
+            "scheme/eval",
+            "scheme/file",
+            "scheme/inexact",
+            "scheme/lazy",
+            "scheme/load",
+            "scheme/process-context",
+            "scheme/read",
+            "scheme/repl",
+            "scheme/time",
+            "scheme/write",
+        ],
+        files: &["lib/scheme/small.sld"],
+        clib: None,
+        default_safe: false,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        // r7rs "red" edition — comprehensive re-export bundle. marked default_safe:
+        // false because it pulls scheme/eval + scheme/load as transitive deps, which
+        // would drag them into the safe allowlist and break sandbox isolation.
+        // use .allow_module("scheme/red") to enable explicitly in sandboxed contexts.
+        path: "scheme/red",
+        deps: &[
+            "scheme/base",
+            "scheme/box",
+            "scheme/case-lambda",
+            "scheme/char",
+            "scheme/charset",
+            "scheme/comparator",
+            "scheme/complex",
+            "scheme/cxr",
+            "scheme/ephemeron",
+            "scheme/eval",
+            "scheme/file",
+            "scheme/generator",
+            "scheme/hash-table",
+            "scheme/ideque",
+            "scheme/ilist",
+            "scheme/inexact",
+            "scheme/lazy",
+            "scheme/list-queue",
+            "scheme/list",
+            "scheme/load",
+            "scheme/lseq",
+            "scheme/process-context",
+            "scheme/read",
+            "scheme/repl",
+            "scheme/rlist",
+            "scheme/set",
+            "scheme/sort",
+            "scheme/stream",
+            "scheme/text",
+            "scheme/time",
+            "scheme/vector",
+            "scheme/write",
+        ],
+        files: &["lib/scheme/red.sld"],
+        clib: None,
+        default_safe: false,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
     // scheme/file: VFS shadow — sandboxed contexts re-export from (tein file).
     // policy enforcement for open-*-file is at the C opcode level (eval.c patches F, G).
     // unsandboxed contexts use chibi's native scheme/file directly.
@@ -1687,12 +1761,6 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // NOTE: scheme/small and scheme/red are mega re-export bundles exporting
-    // hundreds of bindings duplicated from other modules. adding them causes
-    // unexported_stubs to generate stubs for e.g. '+' from scheme/red which
-    // overrides legitimate bindings from allowed modules.
-    // fix needed: unexported_stubs should dedup by binding name — skip bindings
-    // already covered by an allowed module. tracked as TODO in module-inventory.md.
     // -------------------------------------------------------------------------
     // srfi pure-scheme additions
     // -------------------------------------------------------------------------

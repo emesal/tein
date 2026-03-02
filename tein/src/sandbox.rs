@@ -276,11 +276,23 @@ pub(crate) fn module_exports(path: &str) -> Option<&'static [&'static str]> {
 /// bindings from modules with empty export lists (alias modules like `scheme/bitwise`)
 /// are silently skipped since they have no top-level names to stub.
 pub(crate) fn unexported_stubs(allowed_modules: &[String]) -> Vec<(&'static str, &'static str)> {
+    // collect every binding name already provided by an allowed module.
+    // stubs must never be generated for these — doing so clobbers real bindings.
+    // this is especially important for mega re-export bundles like scheme/red and
+    // scheme/small that duplicate hundreds of names from other modules.
+    let covered: std::collections::HashSet<&str> = MODULE_EXPORTS
+        .iter()
+        .filter(|(p, _)| allowed_modules.iter().any(|a| a == p))
+        .flat_map(|(_, exports)| exports.iter().copied())
+        .collect();
+
     let mut stubs = Vec::new();
     for (path, exports) in MODULE_EXPORTS.iter() {
         if !allowed_modules.iter().any(|a| a == path) {
             for name in exports.iter() {
-                stubs.push((*name, *path));
+                if !covered.contains(name) {
+                    stubs.push((*name, *path));
+                }
             }
         }
     }
@@ -556,5 +568,29 @@ mod exports_tests {
                 "make-uuid should be attributed to tein/uuid"
             );
         }
+    }
+
+    #[test]
+    fn unexported_stubs_dedup_skips_names_covered_by_allowed_modules() {
+        // scheme/red re-exports '+' (and hundreds of other names) from scheme/base.
+        // when scheme/base is allowed, scheme/red must NOT generate a stub for '+' —
+        // that would clobber the real binding.
+        let allowed = vec!["scheme/base".to_string()];
+        let stubs = unexported_stubs(&allowed);
+        // '+' is covered by allowed scheme/base — no stub from any module
+        assert!(
+            !stubs.iter().any(|(name, _)| *name == "+"),
+            "'+' covered by allowed scheme/base must not appear in stubs from any module \
+             (e.g. scheme/red)"
+        );
+        // a binding unique to scheme/red (not in scheme/base) should still produce a stub
+        let red_unique = stubs
+            .iter()
+            .any(|(_, module)| *module == "scheme/red" || *module == "scheme/small");
+        assert!(
+            red_unique,
+            "scheme/red or scheme/small should still contribute stubs for names \
+             not covered by the allowlist"
+        );
     }
 }
