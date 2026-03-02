@@ -27,7 +27,7 @@ assert_eq!(result, Value::Integer(6));
 - **[Rust↔Scheme bridge](docs/rust-scheme-bridge.md)** — `#[tein_fn]` and `#[tein_module]` proc macros for zero-boilerplate Rust functions and modules; `ForeignType` protocol for first-class Rust objects in Scheme with method dispatch and introspection
 - **[Built-in modules](docs/modules.md)** — `(tein json)`, `(tein toml)`, `(tein uuid)`, `(tein time)`, `(tein process)`, `(tein docs)` ship with the crate
 - **[cdylib extensions](docs/extensions.md)** — load Rust extensions at runtime via a stable C ABI vtable; no chibi dependency in the extension crate
-- **[Managed contexts](docs/embedding.md)** — `ThreadLocalContext` gives you Send+Sync Scheme evaluation with persistent state or fresh-per-evaluation semantics
+- **[Managed contexts](docs/embedding.md)** — `ThreadLocalContext` (Send+Sync, persistent or fresh-per-evaluation) and `TimeoutContext` (wall-clock deadline) for multi-threaded and time-bounded evaluation
 - **[Custom ports](docs/embedding.md)** — bridge any Rust `Read`/`Write` into Scheme's port system for streaming IO
 - **[Reader extensions](docs/rust-scheme-bridge.md)** — register custom `#` dispatch characters to extend the Scheme reader at the syntax level
 - **[Macro expansion hooks](docs/rust-scheme-bridge.md)** — intercept and transform macro expansions at analysis time with replace-and-reanalyse semantics
