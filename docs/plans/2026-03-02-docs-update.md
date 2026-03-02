@@ -15,6 +15,42 @@ is a first-class narrative in `tein-for-agents.md`.
 **Source of truth for content:** `tein/src/` (types, APIs), `AGENTS.md` (flows, quirks),
 `target/chibi-scheme/lib/tein/` (scheme module exports), `tein/src/vfs_registry.rs` (module list).
 
+**Branch:** `docs/restructure-2603` (rebased onto `origin/dev` after PR #100 merged)
+
+---
+
+## progress
+
+- [x] Task 1: branch created (`docs/restructure-2603`)
+- [x] Task 2: README.md rewritten (commits 7fcdd31, d8bddff)
+- [x] Task 3: docs/quickstart.md (commits ff8c812, 4e759bd — fixed Context::new() description + extraction helper lifetimes)
+- [x] Task 4: docs/embedding.md (commits 9c23282, a4488d2 — fixed stale variable name in port example)
+- [x] Task 5: docs/sandboxing.md (commit 6f69989 — also fixed Modules::Safe docstring in sandbox.rs, commit 068c514)
+- [ ] Task 6: docs/rust-scheme-bridge.md
+- [ ] Task 7: docs/modules.md
+- [ ] Task 8: docs/extensions.md
+- [ ] Task 9: docs/tein-for-agents.md
+- [ ] Task 10: docs/reference.md
+- [ ] Task 11: docs/guide.md rewrite as index
+- [ ] Task 12: ARCHITECTURE.md update
+- [ ] Task 13: ROADMAP.md update
+- [ ] Task 14: final pass + PR
+
+## corrections discovered during implementation
+
+- `Value::Void` → `Value::Unspecified` (actual variant name in value.rs)
+- `is_void()` → `is_unspecified()` (actual method name)
+- heap builder method is `heap_max`/`heap_size`, not `heap_limit`
+- `tein/process` IS in `Modules::Safe` (trampolines neuter env/argv) — AGENTS.md note was stale
+- `as_string()` and `as_list()` borrow from Value — must bind Value before calling
+- `Context::new()` provides primitive env (all opcodes), not just core syntax forms
+
+## notes for AGENTS.md (collect at end)
+
+- AGENTS.md stale: "Modules::Safe excludes (tein process)" — trampolines now neuter it; it's in Safe
+- docs/ structure: guide.md (index), quickstart, embedding, sandboxing, rust-scheme-bridge, modules, extensions, tein-for-agents, reference
+- when adding features: update relevant docs/ file + reference.md VFS module list
+
 ---
 
 ### Task 1: Create the docs branch
