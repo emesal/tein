@@ -26,9 +26,9 @@ is a first-class narrative in `tein-for-agents.md`.
 - [x] Task 3: docs/quickstart.md (commits ff8c812, 4e759bd — fixed Context::new() description + extraction helper lifetimes)
 - [x] Task 4: docs/embedding.md (commits 9c23282, a4488d2 — fixed stale variable name in port example)
 - [x] Task 5: docs/sandboxing.md (commit 6f69989 — also fixed Modules::Safe docstring in sandbox.rs, commit 068c514)
-- [ ] Task 6: docs/rust-scheme-bridge.md
-- [ ] Task 7: docs/modules.md
-- [ ] Task 8: docs/extensions.md
+- [x] Task 6: docs/rust-scheme-bridge.md (commit 378018a — register_reader takes b'j' u8, not char)
+- [x] Task 7: docs/modules.md (commit 1268f66 — tein/process IS in Modules::Safe; added tein/file and tein/load sections)
+- [x] Task 8: docs/extensions.md (commit 236f792)
 - [ ] Task 9: docs/tein-for-agents.md
 - [ ] Task 10: docs/reference.md
 - [ ] Task 11: docs/guide.md rewrite as index
