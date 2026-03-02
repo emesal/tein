@@ -1264,7 +1264,6 @@ unsafe extern "C" fn get_env_vars_trampoline(
     }
 }
 
-/// `command-line` trampoline: returns list of command-line args.
 /// `command-line` trampoline: returns the host argv as a list of strings.
 /// sandboxed contexts return `'("tein")`.
 unsafe extern "C" fn command_line_trampoline(
@@ -1278,6 +1277,10 @@ unsafe extern "C" fn command_line_trampoline(
         if IS_SANDBOXED.with(|c| c.get()) {
             let name = CString::new("tein").unwrap();
             let s = ffi::sexp_c_str(ctx, name.as_ptr(), 4);
+            if ffi::sexp_exceptionp(s) != 0 {
+                return s;
+            }
+            let _s_root = ffi::GcRoot::new(ctx, s);
             return ffi::sexp_cons(ctx, s, ffi::get_null());
         }
 
