@@ -1,6 +1,6 @@
 # handoff: module inventory work
 
-## what has been done (across two sessions)
+## what has been done (across three sessions)
 
 ### session 1
 1. created `docs/module-inventory.md` — comprehensive checklist of every chibi-scheme
@@ -31,6 +31,18 @@
     - 14 type-specific sub-modules: u8, s8, u16, s16, u32, s32, u64, s64,
       f8, f16, f32, f64, c64, c128
     - 2 integration tests added in `context.rs`
+
+### session 3
+11. added `scheme/vector/*` sub-modules (commit `1942c81`):
+    - `scheme/vector/base` + 12 type aliases (u8, s8, u16, s16, u32, s32,
+      u64, s64, f32, f64, c64, c128) — r7rs aliases to srfi/160/*
+12. added `srfi/179/base` + `srfi/179` (commit `1942c81`)
+    - nonempty intervals and generalised arrays (pure scheme)
+13. added `srfi/231/base` + `srfi/231` (commit `1942c81`)
+    - revised intervals and generalised arrays (successor to srfi/179)
+    - cond-expand chibi branch uses srfi/160/mini for f8/f16 storage classes
+14. added `chibi/highlight` (commit `1942c81`)
+    - syntax highlighting, pure scheme, safe
 
 ## current state
 
@@ -63,27 +75,13 @@ each one needs:
 2. a `VfsSource::Shadow` entry in `vfs_registry.rs` with inline `shadow_sld`
    that imports from `tein/foo` and re-exports the safe subset
 
-### 2. ➕ srfi/179 and srfi/231
+**status: design work starting in session 3.**
 
-both depend on `srfi/160` (now done). check if they have additional C deps:
-```
-grep 'import\|include-shared' /home/fey/forks/chibi-scheme/lib/srfi/179.sld
-grep 'import\|include-shared' /home/fey/forks/chibi-scheme/lib/srfi/231.sld
-```
-
-### 3. ➕ `scheme/vector/*` sub-modules
-
-all alias to `srfi/160` sub-modules. now that srfi/160 is done, check if they
-just work as pure VfsSource::Embedded entries pointing at their `.sld` files:
-```
-ls /home/fey/forks/chibi-scheme/lib/scheme/vector/
-grep 'import' /home/fey/forks/chibi-scheme/lib/scheme/vector/*.sld
-```
-
-### 4. ➕ remaining srfi pure-scheme modules
+### 2. ➕ remaining pure-scheme modules
 
 `docs/module-inventory.md` has the full checklist. look for entries marked `➕`
 (ready to add) or re-evaluate any `❌` that might now have deps satisfied.
+this is lower priority — most useful modules are already in.
 
 ## key files
 
@@ -111,5 +109,5 @@ chibi-native ones. if a branch includes a file tein will never load (e.g.
 **chibi fork .gitignore**: `lib/**/*.c` is gitignored. `git add -f` is needed
 to commit hand-written C files like `uvprims.c`.
 
-**schema/red and scheme/small are in VFS** but not in the safe default set.
+**scheme/red and scheme/small are in VFS** but not in the safe default set.
 users must explicitly `.allow_module("scheme/red")` to use them in sandboxed contexts.
