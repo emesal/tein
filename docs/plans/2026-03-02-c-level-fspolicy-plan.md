@@ -14,6 +14,39 @@
 
 ---
 
+## progress
+
+- [x] Task 1: Add FS policy gate + callback to tein_shim.c
+- [x] Task 2: Patch eval.c opcodes with FS policy check (pushed to chibi fork)
+- [x] Task 3: Add rust callback + FFI wrappers
+- [x] Task 4: Add FS_GATE thread-local + arm in build() + clear on drop()
+- [x] Task 5: Remove open-*-file trampolines + ORIGINAL_PROCS + IoOp
+- [x] Task 6: Update (tein file) scheme files in chibi fork (pushed to fork)
+- [x] Task 7: Simplify (scheme file) shadow + update vfs_registry
+- [ ] Task 8: Integration tests — srfi/166/columnar from-file
+- [ ] Task 9: Docs — AGENTS.md + sandbox.rs comment + design doc
+- [ ] Task 10: Final verification + plan update + handoff
+- [ ] Task 11: PR creation
+
+**status:** 356 lib tests pass, 0 failures. lint not yet run.
+
+### notes for continued execution
+
+- tasks 5+6+7 were committed together since they're tightly coupled (trampoline removal + scheme file update + shadow simplification + test updates must land atomically)
+- added C-level policy denial → `SandboxViolation` error classification in `value.rs` (detects `"access denied by sandbox policy"` in exception messages from eval.c patches F/G)
+- all 20 IO tests updated: sandboxed tests now `(import (tein file))` to get `open-input-file` / `open-output-file` in scope (no longer injected as top-level env trampolines)
+- `test_file_read_without_policy` / `test_file_write_without_policy` semantics changed: previously tested "undefined variable", now tests "C gate denies" (same user-facing result: error)
+- trampoline tests renamed: `test_open_input_file_trampoline_*` → `test_open_input_file_*` (no longer trampolines)
+- `FS_GATE_OFF` is not imported in context.rs (only used in sandbox.rs const Cell default) — don't add it
+
+### AGENTS.md notes to collect (task 9)
+
+- **IO policy flow** needs update: remove "capture originals" / "wrapper foreign fns" / "delegates to original proc" language → describe C-level gate + callback
+- **sandboxing flow** needs update: remove "capture_file_originals" step, add "arm FS policy gate"
+- document eval.c patches F, G in the architecture section (alongside existing A-E)
+
+---
+
 ## architecture notes (read before implementing)
 
 ### callback pattern (follow exactly)
