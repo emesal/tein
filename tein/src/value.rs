@@ -451,8 +451,14 @@ impl Value {
                 }
             };
 
-            // sentinel: file IO policy denial
+            // sentinel: file IO policy denial (rust trampolines for file-exists?/delete-file)
             if let Some(path) = message.strip_prefix("[sandbox:file] ") {
+                return Error::SandboxViolation(format!("file access denied: {}", path));
+            }
+
+            // C-level FS policy gate denial (eval.c patches F, G)
+            if message.contains("access denied by sandbox policy") {
+                let path = irritant_str.as_deref().unwrap_or("unknown");
                 return Error::SandboxViolation(format!("file access denied: {}", path));
             }
 

@@ -38,6 +38,13 @@
 //! Paths are canonicalised before prefix-checking, so symlink and `..`
 //! traversals are resolved.
 //!
+//! Enforcement is at the C opcode level: `eval.c` patches F and G call
+//! `tein_fs_check_access()` before `fopen()` in `sexp_open_input_file_op`
+//! and `sexp_open_output_file_op`. The C dispatcher checks `tein_fs_policy_gate`
+//! (thread-local, 0=off, 1=check) and calls the rust callback
+//! `tein_fs_policy_check` which delegates to [`FsPolicy`] prefix matching.
+//! `file-exists?` and `delete-file` remain rust trampolines (no opcode equivalents).
+//!
 //! # VFS gate
 //!
 //! Module imports in sandboxed contexts are restricted automatically:
@@ -108,21 +115,33 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
-// modules NOT in the VFS registry:
+// VFS shadow modules:
 //
-// the following chibi modules exist in the VFS filesystem but are **not vetted**
-// and will be blocked by the gate in any sandboxed context:
+// the following modules have `VfsSource::Shadow` entries in the registry.
+// in sandboxed contexts, `register_vfs_shadows()` injects replacement `.sld`
+// files that re-export from safe tein counterparts or provide neutered stubs.
+// unsandboxed contexts use chibi's native versions (no shadow registered).
 //
-// - `scheme/file` — raw filesystem IO, no policy checks. use `(tein file)` instead.
-// - `scheme/process-context` — `exit`/`emergency-exit` from `(chibi process)` kills the
-//   host process, bypassing all rust error handling. use `(tein process)` instead.
-// - `scheme/load` — loads arbitrary files from filesystem. use `(tein load)` instead.
-// - `scheme/r5rs` — re-exports `scheme/file`, `scheme/load`, `scheme/process-context`.
+// - `scheme/file` — re-exports (tein file), providing FsPolicy enforcement
+// - `scheme/repl` — neutered interaction-environment via (current-environment)
+// - `scheme/process-context` — re-exports (tein process) with neutered env/argv
+// - `srfi/98` — neutered get-environment-variable (always #f)
+//
+// modules NOT shadowed and intentionally blocked:
+//
+// - `scheme/load` — loads arbitrary files from filesystem. use (tein load) instead.
+// - `scheme/eval` — eval + environment. tracked for future shadow (GH issue #97).
+// - `scheme/r5rs` — re-exports scheme/file, scheme/load, scheme/process-context.
 
 /// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
 pub(crate) const GATE_OFF: u8 = 0;
 /// numeric gate level for C interop — rust callback checks the allowlist.
 pub(crate) const GATE_CHECK: u8 = 1;
+
+/// numeric FS policy gate level for C interop. mirrors `tein_fs_policy_gate` in `tein_shim.c`.
+pub(crate) const FS_GATE_OFF: u8 = 0;
+/// numeric FS policy gate level — rust callback checks IS_SANDBOXED + FsPolicy.
+pub(crate) const FS_GATE_CHECK: u8 = 1;
 
 thread_local! {
     /// numeric gate level (0=off, 1=check). set during Context::build(), cleared on drop.
@@ -131,6 +150,10 @@ thread_local! {
     /// the resolved allowlist, populated when gate is `Allow`.
     /// read by the C→rust callback (`tein_vfs_gate_check`) during module resolution.
     pub(crate) static VFS_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
+    /// FS policy gate level (0=off, 1=check). set during Context::build(), cleared on drop.
+    /// when armed, C-level `open-*-file` opcodes call `tein_fs_policy_check` (rust callback).
+    pub(crate) static FS_GATE: Cell<u8> = const { Cell::new(FS_GATE_OFF) };
 }
 
 /// resolve transitive deps from `VFS_REGISTRY`.
@@ -149,7 +172,8 @@ pub fn registry_resolve_deps(paths: &[&str]) -> Vec<String> {
         }
         result.push(path.to_string());
 
-        if let Some(entry) = VFS_REGISTRY.iter().find(|e| e.path == path) {
+        // union deps from all entries with this path (handles Embedded + Shadow pairs)
+        for entry in VFS_REGISTRY.iter().filter(|e| e.path == path) {
             for dep in entry.deps {
                 if !seen.contains(dep) {
                     stack.push(dep);
@@ -200,6 +224,34 @@ fn registry_clib_entries() -> Vec<&'static ClibEntry> {
         .iter()
         .filter_map(|e| e.clib.as_ref())
         .collect()
+}
+
+/// Inject VFS shadow modules for sandboxed contexts.
+///
+/// Iterates `VFS_REGISTRY` for `VfsSource::Shadow` entries and registers
+/// their `.sld` content into the dynamic VFS under canonical `/vfs/lib/`
+/// paths. Chibi's module resolver then finds our replacements instead of
+/// native implementations.
+///
+/// Must be called before the VFS gate is armed (before `VFS_GATE` is set
+/// to `GATE_CHECK`).
+pub(crate) fn register_vfs_shadows() {
+    use std::ffi::CString;
+    for entry in VFS_REGISTRY.iter() {
+        if entry.source != VfsSource::Shadow {
+            continue;
+        }
+        let sld = entry.shadow_sld.expect("Shadow entry must have shadow_sld");
+        let vfs_path = format!("/vfs/lib/{}.sld", entry.path);
+        let c_path = CString::new(vfs_path).expect("valid VFS path");
+        unsafe {
+            crate::ffi::tein_vfs_register(
+                c_path.as_ptr(),
+                sld.as_ptr() as *const std::ffi::c_char,
+                sld.len() as std::ffi::c_uint,
+            );
+        }
+    }
 }
 
 // generated by build.rs — module path → exported binding names
@@ -321,18 +373,38 @@ mod registry_tests {
             "scheme/write missing"
         );
         assert!(safe.iter().any(|m| m == "srfi/1"), "srfi/1 missing");
+        // shadow modules — present in safe set (shadow replaces native)
+        assert!(
+            safe.iter().any(|m| m == "scheme/file"),
+            "scheme/file missing from safe (shadow)"
+        );
+        assert!(
+            safe.iter().any(|m| m == "scheme/repl"),
+            "scheme/repl missing from safe (shadow)"
+        );
+        // tein/process — safe (trampolines neuter env/argv in sandbox)
+        assert!(
+            safe.iter().any(|m| m == "tein/process"),
+            "tein/process missing from safe"
+        );
+        // scheme/process-context shadow
+        assert!(
+            safe.iter().any(|m| m == "scheme/process-context"),
+            "scheme/process-context missing from safe (shadow)"
+        );
+        // scheme/show + srfi/166
+        assert!(
+            safe.iter().any(|m| m == "scheme/show"),
+            "scheme/show missing from safe"
+        );
+        assert!(
+            safe.iter().any(|m| m == "srfi/166"),
+            "srfi/166 missing from safe"
+        );
         // excluded modules must not appear
         assert!(
             !safe.iter().any(|m| m == "scheme/eval"),
             "scheme/eval should not be in safe set"
-        );
-        assert!(
-            !safe.iter().any(|m| m == "scheme/repl"),
-            "scheme/repl should not be in safe set"
-        );
-        assert!(
-            !safe.iter().any(|m| m == "tein/process"),
-            "tein/process should not be in safe set"
         );
     }
 

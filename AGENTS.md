@@ -20,7 +20,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (342 lib + 12 tein_fn + 3 tein_fn_value_arg + 32 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 25 tein-macros + 14 ext_loading + 9 tein_uuid + 8 tein_time + doc-tests)
+just test                         # all tests (356 lib + 12 tein_fn + 3 tein_fn_value_arg + 32 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 25 tein-macros + 14 ext_loading + 9 tein_uuid + 8 tein_time + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 just lint                          # lint (cargo fmt + cargo clippy)
@@ -57,9 +57,10 @@ tein-ext/        — stable C ABI vtable for cdylib extensions (no chibi depende
 tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_loading.rs
 target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c    — chibi macro shims, fuel control, env_copy_named, VFS gate,
-                   custom ports, reader dispatch table, macro expansion hook
-  eval.c         — 5 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
-                   macro hook in analyze_macro_once (D), suppress false import warning (E)
+                   FS policy gate, custom ports, reader dispatch table, macro expansion hook
+  eval.c         — 7 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
+                   macro hook in analyze_macro_once (D), suppress false import warning (E),
+                   FS policy gate in open-input-file (F), FS policy gate in open-output-file (G)
   sexp.c         — 1 patch: reader dispatch before hardcoded # switch
   vm.c           — 2-line patch: fuel consumption at timeslice boundary
   lib/tein/      — tein scheme modules: foreign, reader, macro, test, json, toml,
@@ -73,11 +74,11 @@ tests/           — scheme_tests.rs (integration runner), scheme/*.scm
 
 **standard env flow**: ContextBuilder with `.standard_env()` → load_standard_env (init-7 + meta-7 via VFS) → load_standard_ports → ~200 bindings (map, for-each, values, dynamic-wind, etc.)
 
-**sandboxing flow**: ContextBuilder with presets → set IS_SANDBOXED thread-local → build full standard env → resolve module allowlist from `Modules` variant via `VFS_REGISTRY` → set VFS gate + allowlist → GC-root source env + null env → create null env (syntax-only) → copy `import` via env_copy_named → register UX stubs for bindings not in the allowlist (each stub looks up providing module in `STUB_MODULE_MAP`) → set null env as active. IS_SANDBOXED is used by (tein file) trampolines to distinguish unsandboxed (allow all) from sandboxed (require FsPolicy); restored to previous value on drop.
+**sandboxing flow**: ContextBuilder with presets → set IS_SANDBOXED thread-local → build full standard env → arm FS policy gate (C-level `tein_fs_policy_gate` + rust thread-local `FS_GATE`) → inject VFS shadow modules (`register_vfs_shadows()`: dynamic VFS overrides for scheme/file, scheme/repl, scheme/process-context, srfi/98) → resolve module allowlist from `Modules` variant via `VFS_REGISTRY` → set VFS gate + allowlist → GC-root source env + null env → create null env (syntax-only) → copy `import` via env_copy_named → register UX stubs for bindings not in the allowlist (each stub looks up providing module in `STUB_MODULE_MAP`) → set null env as active. IS_SANDBOXED + FS_GATE restored to previous value on drop.
 
-**IO policy flow**: ContextBuilder with file_read/file_write → capture original file-open procs from full env → register wrapper foreign fns in restricted env → set FsPolicy thread-local → wrapper checks path prefix via canonicalisation → delegates to original proc or returns policy violation
+**IO policy flow**: ContextBuilder with file_read/file_write → set FsPolicy thread-local → arm FS policy gate (sandboxed contexts only). `open-input-file` / `open-output-file` are chibi opcodes; eval.c patches F and G call `tein_fs_check_access()` before `fopen()` → C dispatcher checks gate level → if gate=1, calls rust callback `tein_fs_policy_check` → checks IS_SANDBOXED + FsPolicy prefix matching via canonicalisation → allows or denies. `file-exists?` and `delete-file` remain rust trampolines (no opcode equivalents).
 
-**exit escape hatch flow**: `(import (tein process))` → `(exit)` / `(exit obj)` sets EXIT_REQUESTED + EXIT_VALUE thread-locals + returns exception to stop VM immediately → eval loop (`evaluate`/`evaluate_port`/`call`) intercepts via `check_exit()` → clears flags → converts EXIT_VALUE to `Value` → returns `Ok(value)` to rust caller. `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj. does not invoke dynamic-wind cleanup (emergency-exit semantics). EXIT_REQUESTED/EXIT_VALUE cleared on Context::drop().
+**exit escape hatch flow**: `(import (tein process))` → `(exit)` / `(exit obj)` sets EXIT_REQUESTED + EXIT_VALUE thread-locals + returns exception to stop VM immediately → eval loop (`evaluate`/`evaluate_port`/`call`) intercepts via `check_exit()` → clears flags → converts EXIT_VALUE to `Value` → returns `Ok(value)` to rust caller. `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj. EXIT_REQUESTED/EXIT_VALUE cleared on Context::drop(). **r7rs deviation**: both `exit` and `emergency-exit` have emergency-exit semantics — neither runs `dynamic-wind` "after" thunks. r7rs `exit` should run them; doing so requires an unwind continuation around `evaluate()` which tein does not currently establish (GH #101). a future standalone interpreter host is expected to handle this.
 
 **VFS gate flow**: ContextBuilder with standard_env + sandboxed() → resolve gate (explicit builder gate, or default `Allow(registry_safe/all_allowlist())` for sandboxed, `Off` otherwise) → set `VFS_GATE` level (u8) + `VFS_ALLOWLIST` (Vec<String>) thread-locals + C-level `tein_vfs_gate` → `sexp_find_module_file_raw` calls `tein_module_allowed()` → gate 0: allow all, gate 1: rust callback `tein_vfs_gate_check` handles VFS `/vfs/lib/` prefix check, `..` traversal guard, `.scm` passthrough, allowlist prefix matching → gate + allowlist restored on `Context::drop()` via RAII. `allow_module()` resolves transitive deps from `VFS_REGISTRY` at builder time.
 

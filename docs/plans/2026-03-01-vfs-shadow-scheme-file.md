@@ -1,17 +1,22 @@
-# VFS Shadow: (scheme file) + (scheme show) Implementation Plan
+# VFS Shadow: (scheme file) + (scheme repl) + (scheme show) Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Expand `(tein file)` to the full `(scheme file)` surface, inject a dynamic VFS shadow so sandboxed contexts resolve `(scheme file)` through our policy-checked trampolines, and enable `(scheme show)` / `(srfi 166)` in `Modules::Safe`.
+**Goal:** Expand `(tein file)` to the full `(scheme file)` surface, introduce a data-driven VFS shadow system so sandboxed contexts resolve shadowed modules through policy-checked or neutered replacements, and enable `(scheme show)` / `(srfi 166)` in `Modules::Safe`.
 
-**Architecture:** New rust trampolines for `open-input-file`, `open-binary-input-file`, `open-output-file`, `open-binary-output-file` follow the `file_exists_trampoline` pattern (check `IS_SANDBOXED` + `FsPolicy`, delegate to captured originals via `ORIGINAL_PROCS`). Original capture moves into `register_file_module(source_env)` (called in the sandbox build path where `source_env` is available) and also for the unsandboxed path. A new `register_vfs_shadows()` injects `scheme/file.sld` into the dynamic VFS (keyed as `/vfs/lib/scheme/file.sld`) before the VFS gate is armed. The old IO wrapper system (`check_and_delegate`, `wrapper_open_*`, `wrapper_fn_for`, `has_io` block) is removed. Four higher-order scheme wrappers live in `file.scm` in the chibi fork.
+**Architecture:** `VfsSource::Shadow { sld }` — a new registry variant declaring inline `.sld` content injected into the dynamic VFS at sandbox build time. shadows are declared in `VFS_REGISTRY` alongside all other modules (single source of truth). `register_vfs_shadows()` loops over `Shadow` entries and calls `tein_vfs_register()`. two shadows ship in this PR:
 
-**Tech Stack:** Rust (unsafe FFI, thread-locals), chibi-scheme C FFI, Scheme (`.sld`/`.scm` in `emesal/chibi-scheme` branch `emesal-tein`), `just` for commands.
+- `scheme/file` → re-exports all 10 names from `(tein file)` (policy-checked trampolines)
+- `scheme/repl` → provides neutered `interaction-environment` via `(current-environment)` from `(chibi)`
 
-**Design doc:** `docs/plans/2026-03-01-vfs-shadow-scheme-file-design.md`
+The old IO wrapper system (`check_and_delegate`, `wrapper_open_*`, `wrapper_fn_for`, `has_io` block) is removed — policy enforcement unified in `(tein file)` trampolines.
+
+**Design doc:** `docs/plans/2026-03-01-vfs-shadow-scheme-file-design.md` (partially outdated — this plan supersedes it)
 
 **Base branch:** `dev`
 **Branch to create:** `just feature vfs-shadow-scheme-file-2603`
+
+**Closes:** #91, #92 (partially — this PR vets and enables the srfi/166 tree)
 
 ---
 
@@ -26,48 +31,322 @@ The sandboxed context build path in `build()` is inside `if let Some(ref modules
 ### IO wrapper system — current vs target
 
 **Current (to remove):**
-- `check_and_delegate` — shared impl for 4 wrappers
+- `check_and_delegate` — shared impl for 4 wrappers, checks `FS_POLICY` directly (denies when `None`)
 - `wrapper_open_input_file` + 3 others — registered directly into `null_env` in `has_io` block
 - `wrapper_fn_for` — dispatch table
 - `has_io` block — captures originals from `source_env`, registers wrappers into `null_env`, sets `FS_POLICY`
 
 **Target (new):**
-- `open_file_trampoline(ctx, args, op)` — shared impl (reads `ORIGINAL_PROCS`)
+- `open_file_trampoline(ctx, args, op)` — shared impl using `check_fs_access` (checks `IS_SANDBOXED` first — unsandboxed = allow all, sandboxed = check policy)
 - `open_input_file_trampoline` + 3 others — registered via `register_file_module`
-- Original capture: done in `build()` sandbox block (via a helper fn or inline), and also for unsandboxed path
-- `FS_POLICY` set in `build()` after context creation (moved out of `has_io` block, set unconditionally when prefixes are configured)
+- Original capture: `capture_file_originals()` called in `build()` sandbox block (from `source_env`) AND unsandboxed path (from context env)
+- `FS_POLICY` set outside the sandbox block (works for both paths)
 
-### VFS shadow registration timing
+**Key semantic change:** The old wrappers hardcode `FS_POLICY.is_none() → deny`. The new trampolines use `check_fs_access` which checks `IS_SANDBOXED` first — unsandboxed contexts pass through unconditionally. This is correct: the trampolines are always registered (via `register_file_module`), and the `IS_SANDBOXED` guard makes them transparent when not sandboxed.
 
-`register_vfs_shadows()` must be called **before** `VFS_GATE` is armed. The shadow `.sld` goes in as `/vfs/lib/scheme/file.sld` — the same key the chibi resolver would look up. The call site is in the sandbox block, after `IS_SANDBOXED` is set but before `VFS_GATE.with(|cell| cell.set(GATE_CHECK))`.
+### VFS shadow system — data-driven via registry
+
+Shadows are declared as `VfsSource::Shadow { sld }` entries in `VFS_REGISTRY`. The `.sld` content is a `&'static str` inline in the registry entry. `register_vfs_shadows()` iterates the registry, finds all `Shadow` entries, and calls `tein_vfs_register()` for each.
+
+**Timing:** Must be called before `VFS_GATE` is armed (before `GATE_CHECK`). Call site is in the sandbox block, after `IS_SANDBOXED` is set.
+
+**Unsandboxed:** No shadows registered — modules resolve to chibi's native versions.
 
 ### ORIGINAL_PROCS capture — both paths
 
-Unsandboxed contexts also need originals captured (for `open-input-file` etc. when called from `(tein file)` in non-sandboxed mode where we still delegate but without policy). The capture should happen in both the sandboxed and unsandboxed paths when `standard_env` is true.
+Unsandboxed contexts also need originals captured for the `open-*-file` trampolines (which delegate to chibi's original procs unconditionally when `IS_SANDBOXED` is false).
 
-Best approach: add a helper `capture_file_originals(ctx, env)` that captures from the given env into `ORIGINAL_PROCS`. Call it:
+Helper `capture_file_originals(ctx, env)` captures from the given env into `ORIGINAL_PROCS`. Called:
 1. In the sandbox block before env restriction (captures from `source_env`)
 2. In the unsandboxed path (captures from the default context env)
 
+### No `tein/file` → `scheme/file` reverse dep
+
+`scheme/file` shadow declares `deps: &["tein/file"]` — transitive resolution pulls `tein/file` when `scheme/file` is allowed. No reverse dep needed. Both are `default_safe: true` so both appear in `Modules::Safe` independently.
+
 ---
 
-## Task 1: Create feature branch
+## Task 1: Create feature branch + GH issue for scheme/eval
 
+**Step 1: Create branch**
 ```bash
 cd /home/fey/projects/tein
 just feature vfs-shadow-scheme-file-2603
 ```
 
+**Step 2: Create GH issue for deferred scheme/eval + full sandboxed REPL**
+
+```bash
+gh issue create \
+  --title "feat: sandboxed (scheme eval) + (scheme repl) — full r7rs eval in sandbox" \
+  --body "$(cat <<'EOF'
+## context
+
+the VFS shadow PR (#91 follow-up) introduces a neutered `(scheme repl)` shadow that provides `interaction-environment` via `(current-environment)` — enough for `srfi/166` but not a full REPL.
+
+this issue tracks expanding the sandbox to support full `(scheme eval)` and `(scheme repl)`:
+
+### scheme/eval
+
+exports: `eval`, `environment`
+
+- `eval` — evaluate an expression in a given environment. in sandbox, the default env (via `(current-environment)`) is already the restricted sandbox env, so basic `eval` is safe. can likely be implemented as pure scheme delegating to chibi's native `eval` from `(chibi)`.
+- `environment` — `(environment '(scheme base) '(scheme write))` creates a fresh env from library names. in sandbox, this should only create envs from allowlisted modules. this is the hard part — needs runtime access to the VFS allowlist.
+
+### scheme/repl
+
+exports: `interaction-environment`
+
+currently returns `(current-environment)`. for a full REPL, `interaction-environment` should return a mutable env that accumulates definitions — this may require a dedicated trampoline or env management.
+
+### design insight
+
+`(current-environment)` from `(chibi)` is always available (primitive core, never gated) and returns the caller's env. in sandbox, this is the restricted env — making basic `eval` surprisingly simple. the complexity is in `environment` (needs allowlist enforcement) and a proper mutable interaction env.
+EOF
+)"
+```
+
 ---
 
-## Task 2: Add 4 open-* trampolines to context.rs + add tests
+## Task 2: Add `VfsSource::Shadow` variant to the registry
+
+**Files:**
+- Modify: `tein/src/vfs_registry.rs`
+
+**Step 1: Update `VfsSource` enum**
+
+Add `Shadow` variant:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+enum VfsSource {
+    /// .sld/.scm files embedded at build time
+    Embedded,
+    /// registered at runtime via #[tein_module] — no files to embed
+    Dynamic,
+    /// shadow module — .sld injected into dynamic VFS at sandbox build time only.
+    /// unsandboxed contexts use chibi's native version.
+    Shadow,
+}
+```
+
+Note: the `.sld` content lives in a new field on `VfsEntry` (see step 2), not on the enum variant, because `VfsSource` derives `Copy` and `&'static str` is `Copy` but putting it on the enum makes the non-Shadow variants carry dead weight. Instead:
+
+**Step 2: Add `shadow_sld` field to `VfsEntry`**
+
+```rust
+struct VfsEntry {
+    path: &'static str,
+    deps: &'static [&'static str],
+    files: &'static [&'static str],
+    clib: Option<ClibEntry>,
+    default_safe: bool,
+    source: VfsSource,
+    feature: Option<&'static str>,
+    /// shadow .sld content — only used when source is `Shadow`.
+    /// injected into dynamic VFS by `register_vfs_shadows()` in sandboxed contexts.
+    shadow_sld: Option<&'static str>,
+}
+```
+
+**Step 3: Add `shadow_sld: None` to all existing entries**
+
+Every existing `VfsEntry` gets `shadow_sld: None`. (use `replace_all` or add to each entry.)
+
+**Step 4: Add `scheme/file` and `scheme/repl` shadow entries to the registry**
+
+Place after the existing `scheme/write` entry (in the r7rs section), before `scheme/time`:
+
+```rust
+// scheme/file: VFS shadow — sandboxed contexts resolve to (tein file) trampolines.
+// unsandboxed contexts use chibi's native scheme/file directly.
+VfsEntry {
+    path: "scheme/file",
+    deps: &["tein/file"],
+    files: &[],
+    clib: None,
+    default_safe: true,
+    source: VfsSource::Shadow,
+    feature: None,
+    shadow_sld: Some("\
+(define-library (scheme file)
+  (import (tein file))
+  (export open-input-file open-output-file
+          open-binary-input-file open-binary-output-file
+          call-with-input-file call-with-output-file
+          with-input-from-file with-output-to-file
+          file-exists? delete-file))
+"),
+},
+// scheme/repl: VFS shadow — sandboxed contexts get neutered interaction-environment.
+// returns (current-environment) = the sandbox's restricted env.
+// full sandboxed eval/repl tracked in GH issue.
+VfsEntry {
+    path: "scheme/repl",
+    deps: &[],
+    files: &[],
+    clib: None,
+    default_safe: true,
+    source: VfsSource::Shadow,
+    feature: None,
+    shadow_sld: Some("\
+(define-library (scheme repl)
+  (import (chibi))
+  (export interaction-environment)
+  (begin
+    (define (interaction-environment) (current-environment))))
+"),
+},
+```
+
+**Step 5: Add `scheme/file` to `srfi/166/columnar` deps**
+
+Find the `srfi/166/columnar` entry. Add `"scheme/file"` to its deps (so transitive resolution pulls the shadow when columnar is allowed):
+
+```rust
+deps: &[
+    "scheme/base",
+    "scheme/char",
+    "scheme/file",   // shadow — resolves via (tein file) in sandbox
+    "srfi/1",
+    "srfi/117",
+    "srfi/130",
+    "srfi/166/base",
+    "chibi/optional",
+],
+```
+
+**Step 6: Add `scheme/repl` to `srfi/166/base` deps (already there — verify)**
+
+Check that `srfi/166/base` already has `"scheme/repl"` in its deps. It should (line ~1117). If not, add it.
+
+**Step 7: Compile check**
+```bash
+cargo build 2>&1 | tail -20
+```
+
+**Step 8: Run existing tests**
+```bash
+just test 2>&1 | tail -30
+```
+
+All existing tests should pass — we only added data, no behaviour change yet.
+
+**Step 9: Commit**
+```bash
+git add tein/src/vfs_registry.rs
+git commit -m "feat: add VfsSource::Shadow variant + scheme/file and scheme/repl shadow entries"
+```
+
+---
+
+## Task 3: Add `register_vfs_shadows()` + call it in build()
+
+**Files:**
+- Modify: `tein/src/context.rs`
+
+**Step 1: Write failing test**
+
+Add to the sandboxed tests section in context.rs:
+
+```rust
+#[test]
+fn test_scheme_repl_shadow_importable_in_sandbox() {
+    use crate::sandbox::Modules;
+    let ctx = Context::builder()
+        .standard_env()
+        .sandboxed(Modules::Safe)
+        .build()
+        .expect("builder");
+    // (scheme repl) in sandbox should resolve to our shadow
+    let r = ctx.evaluate(
+        "(import (scheme repl)) (procedure? interaction-environment)"
+    );
+    assert_eq!(r.expect("scheme repl shadow works"), Value::Bool(true));
+}
+```
+
+**Step 2: Run to confirm failure**
+```bash
+cargo test test_scheme_repl_shadow_importable_in_sandbox 2>&1 | tail -20
+```
+Expected: FAIL — `(scheme repl)` blocked by VFS gate.
+
+**Step 3: Add `register_vfs_shadows()` to context.rs**
+
+Add as a free fn near `register_file_module`:
+
+```rust
+/// Inject VFS shadow modules for sandboxed contexts.
+///
+/// Iterates `VFS_REGISTRY` for `VfsSource::Shadow` entries and registers
+/// their `.sld` content into the dynamic VFS under canonical `/vfs/lib/`
+/// paths. Chibi's module resolver then finds our replacements instead of
+/// native implementations.
+///
+/// Must be called before the VFS gate is armed (before `VFS_GATE` is set
+/// to `GATE_CHECK`).
+fn register_vfs_shadows() {
+    for entry in VFS_REGISTRY.iter() {
+        if entry.source != VfsSource::Shadow {
+            continue;
+        }
+        let sld = entry
+            .shadow_sld
+            .expect("Shadow entry must have shadow_sld");
+        let vfs_path = format!("/vfs/lib/{}.sld", entry.path);
+        let c_path = CString::new(vfs_path).expect("valid VFS path");
+        unsafe {
+            ffi::tein_vfs_register(
+                c_path.as_ptr(),
+                sld.as_ptr() as *const std::ffi::c_char,
+                sld.len() as std::ffi::c_uint,
+            );
+        }
+    }
+}
+```
+
+**Step 4: Call `register_vfs_shadows()` in `build()` sandbox path**
+
+Inside the `if let Some(ref modules) = self.sandbox_modules.take()` block, find where `IS_SANDBOXED` is set to `true`:
+
+```rust
+IS_SANDBOXED.with(|c| c.set(true));
+register_vfs_shadows(); // inject shadow modules before gate is armed
+```
+
+Add immediately after `IS_SANDBOXED.with(...)`, before `VFS_GATE.with(...)`.
+
+**Step 5: Run test**
+```bash
+cargo test test_scheme_repl_shadow_importable_in_sandbox 2>&1 | tail -20
+```
+Expected: PASS.
+
+**Step 6: Compile check + full test suite**
+```bash
+cargo build 2>&1 | tail -20
+just test 2>&1 | tail -30
+```
+
+**Step 7: Commit**
+```bash
+git add tein/src/context.rs
+git commit -m "feat: register_vfs_shadows() — data-driven shadow injection from VFS_REGISTRY"
+```
+
+---
+
+## Task 4: Add 4 open-* trampolines + capture_file_originals
 
 **Files:**
 - Modify: `tein/src/context.rs`
 
 **Step 1: Write failing tests**
 
-Add inside the `#[cfg(test)]` IO policy test section (find `IO_TEST_LOCK` — after `fn test_file_io_with_sandboxed_modules`). These test the trampolines via `(tein file)` import:
+Add inside the `#[cfg(test)]` IO policy test section (find `IO_TEST_LOCK`):
 
 ```rust
 #[test]
@@ -163,19 +442,19 @@ fn test_open_input_file_unsandboxed_passthrough() {
 ```bash
 cargo test test_open_input_file_trampoline_allowed test_open_input_file_trampoline_denied test_open_output_file_trampoline_allowed test_open_output_file_trampoline_denied test_open_input_file_unsandboxed_passthrough 2>&1 | tail -20
 ```
-Expected: FAIL — `(tein file)` doesn't export `open-input-file` yet (import error or unbound).
+Expected: FAIL — `(tein file)` doesn't export `open-input-file` yet.
 
-**Step 3: Add `capture_file_originals` helper + 4 trampolines + shared impl**
+**Step 3: Add `capture_file_originals` + 4 trampolines + shared impl**
 
-Find the `// --- (tein file) trampolines ---` comment block (around line 1187). Add below `delete_file_trampoline` (~line 1251):
+Find the `// --- (tein file) trampolines ---` comment block (around line 1187). Add below `delete_file_trampoline`:
 
 ```rust
 // --- open-*-file trampolines ---
 
 /// Capture chibi's native `open-*-file` primitives from `env` into `ORIGINAL_PROCS`.
 ///
-/// must be called before env restriction (sandbox) or on the full env (unsandboxed).
-/// safe to call multiple times — later calls overwrite earlier ones.
+/// Must be called before env restriction (sandbox) or on the full env (unsandboxed).
+/// Safe to call multiple times — later calls overwrite earlier ones.
 ///
 /// # Safety
 /// `ctx` and `env` must be valid chibi context and env pointers.
@@ -195,11 +474,11 @@ unsafe fn capture_file_originals(ctx: ffi::sexp, env: ffi::sexp) {
     }
 }
 
-/// shared implementation for all 4 `open-*-file` trampolines.
+/// Shared implementation for all 4 `open-*-file` trampolines.
 ///
-/// checks `FsPolicy` (read for input ops, write for output ops), then delegates
-/// to the captured original chibi primitive. if IS_SANDBOXED is false,
-/// delegates unconditionally (unsandboxed passthrough).
+/// Checks `IS_SANDBOXED` + `FsPolicy` via `check_fs_access`, then delegates
+/// to the captured original chibi primitive. Unsandboxed contexts delegate
+/// unconditionally.
 ///
 /// # Safety
 /// `ctx` and `args` must be valid sexp values.
@@ -270,7 +549,7 @@ unsafe extern "C" fn open_binary_output_file_trampoline(
 
 **Step 4: Update `register_file_module`**
 
-Find `fn register_file_module` (~line 2938). Update docstring and add 4 new registrations:
+Find `fn register_file_module`. Update docstring and add 4 new registrations:
 
 ```rust
 /// Register all 6 `(tein file)` trampolines.
@@ -290,14 +569,14 @@ fn register_file_module(&self) -> Result<()> {
 
 **Step 5: Capture originals in both build paths**
 
-In `build()`, the sandbox block starts at `if let Some(ref modules) = self.sandbox_modules.take()`. Inside, right after `let source_env = ffi::sexp_context_env(ctx)` (~line 1733), add:
+In `build()`, inside the sandbox block, right after `let source_env = ffi::sexp_context_env(ctx)`, add:
 
 ```rust
 // capture open-*-file originals before env restriction
 capture_file_originals(ctx, source_env);
 ```
 
-For the unsandboxed path: find `if self.standard_env { context.register_file_module()?; ... }` (~line 1898). This runs AFTER `Context` is created. The unsandboxed context env is the full standard env. Add capture before `register_file_module`:
+For the unsandboxed path: find `if self.standard_env { context.register_file_module()?; ... }`. Add capture before registration using the raw ctx (which is still accessible):
 
 ```rust
 if self.standard_env {
@@ -309,34 +588,26 @@ if self.standard_env {
 }
 ```
 
-> **Note:** In the sandbox path, `register_file_module` is called on `context` after `sexp_context_env_set(ctx, null_env)` has already switched the env. So `define_fn_variadic` registers into the null env (the restricted env) — correct behaviour.
-
-**Step 6: Run failing tests**
-```bash
-cargo test test_open_input_file_trampoline_allowed test_open_input_file_trampoline_denied test_open_output_file_trampoline_allowed test_open_output_file_trampoline_denied test_open_input_file_unsandboxed_passthrough 2>&1 | tail -20
-```
-These will still fail until `file.sld` exports are updated (task 4). **That's fine** — continue.
-
-**Step 7: Check for compile errors**
+**Step 6: Compile check**
 ```bash
 cargo build 2>&1 | tail -20
 ```
-Should compile clean.
+Should compile clean. Tests will still fail until `file.sld` exports are updated (task 6).
 
-**Step 8: Commit**
+**Step 7: Commit**
 ```bash
 git add tein/src/context.rs
-git commit -m "feat: add open-*-file trampolines + capture_file_originals to (tein file)"
+git commit -m "feat: add open-*-file trampolines + capture_file_originals for (tein file)"
 ```
 
 ---
 
-## Task 3: Remove the old IO wrapper system from context.rs
+## Task 5: Remove the old IO wrapper system from context.rs
 
 **Files:**
 - Modify: `tein/src/context.rs`
 
-**Step 1: Identify + delete dead code**
+**Step 1: Delete dead code**
 
 Remove these items (search by name):
 - `unsafe fn check_and_delegate(...)` (~40 lines)
@@ -346,9 +617,9 @@ Remove these items (search by name):
 - `unsafe extern "C" fn wrapper_open_binary_output_file(...)` (~10 lines)
 - `fn wrapper_fn_for(...)` (~10 lines)
 
-**Step 2: Remove / rework the `has_io` block**
+**Step 2: Remove the `has_io` block, relocate FsPolicy setup**
 
-Find the block starting `// IO wrappers: capture original procs from source env, register wrappers` (~line 1812). This block:
+Find the block starting `// IO wrappers: capture original procs from source env, register wrappers`. This block:
 1. Takes `file_read_prefixes` / `file_write_prefixes` from `self`
 2. Captures originals into `ORIGINAL_PROCS` (now done by `capture_file_originals` earlier)
 3. Registers wrapper fns into `null_env` (now done by `register_file_module`)
@@ -356,10 +627,12 @@ Find the block starting `// IO wrappers: capture original procs from source env,
 
 **Remove** the entire `has_io` block (`let file_read_prefixes = ...; let file_write_prefixes = ...; let has_io = ...; if has_io { ... }`).
 
-**Then add** FsPolicy setup **after** the sandbox block closes (i.e., right before `let context = Context { ... }`), unconditional on `has_io`:
+**Then add** FsPolicy setup **after** the sandbox block closes (right before `let context = Context { ... }`), unconditional on `has_io`:
 
 ```rust
-// set FsPolicy if file_read() or file_write() was configured
+// set FsPolicy if file_read() or file_write() was configured.
+// placed outside the sandbox block so it works for both sandboxed and
+// unsandboxed contexts with file policy configured.
 {
     let file_read_prefixes = self.file_read_prefixes.take();
     let file_write_prefixes = self.file_write_prefixes.take();
@@ -374,21 +647,18 @@ Find the block starting `// IO wrappers: capture original procs from source env,
 }
 ```
 
-> This way `FS_POLICY` is set for **both** sandboxed and (future) unsandboxed-with-policy scenarios.
-
-**Step 3: Keep** `IoOp` enum, `IoOp::ALL`, `IoOp::name()`, `IoOp::is_read()`, `ORIGINAL_PROCS` — still needed by new trampolines.
+**Step 3: Keep** `IoOp` enum, `IoOp::ALL`, `IoOp::name()`, `IoOp::is_read()`, `ORIGINAL_PROCS` — still used by new trampolines.
 
 **Step 4: Compile check**
 ```bash
 cargo build 2>&1 | tail -20
 ```
-Fix any compile errors.
 
 **Step 5: Run full test suite**
 ```bash
 just test 2>&1 | tail -30
 ```
-The IO policy tests (`test_file_read_allowed_path`, `test_file_write_allowed_path`, etc.) must still pass — the policy mechanism is unchanged, just the registration path changed.
+The IO policy tests (`test_file_read_allowed_path`, `test_file_write_allowed_path`, etc.) must still pass.
 
 **Step 6: Lint**
 ```bash
@@ -398,12 +668,12 @@ just lint
 **Step 7: Commit**
 ```bash
 git add tein/src/context.rs
-git commit -m "refactor: remove IO wrapper system, policy enforcement via (tein file) trampolines"
+git commit -m "refactor: remove old IO wrapper system, policy enforcement via (tein file) trampolines"
 ```
 
 ---
 
-## Task 4: Expand (tein file) scheme files in the chibi fork
+## Task 6: Expand (tein file) scheme files in the chibi fork
 
 **IMPORTANT:** Changes go in `target/chibi-scheme/` then **must be pushed** to `emesal/chibi-scheme` branch `emesal-tein` before `cargo build` (which hard-resets from remote).
 
@@ -432,7 +702,7 @@ Create `tein/tests/scheme/tein_file_open.scm`:
 ```bash
 cargo test tein_file_open 2>&1 | tail -20
 ```
-Expected: FAIL — `call-with-input-file` not exported from `(tein file)`.
+Expected: FAIL — `call-with-input-file` not exported.
 
 **Step 3: Update `file.sld`**
 
@@ -506,29 +776,25 @@ git push
 cd /home/fey/projects/tein
 ```
 
-**Step 6: Rebuild**
+**Step 6: Rebuild + run tests**
 ```bash
 just clean && cargo build 2>&1 | tail -20
-```
-
-**Step 7: Run scheme test**
-```bash
 cargo test tein_file_open 2>&1 | tail -20
 ```
 Expected: PASS.
 
-**Step 8: Run all earlier trampoline tests now (they need updated .sld)**
+**Step 7: Run all trampoline tests**
 ```bash
 cargo test test_open_input_file_trampoline_allowed test_open_input_file_trampoline_denied test_open_output_file_trampoline_allowed test_open_output_file_trampoline_denied test_open_input_file_unsandboxed_passthrough 2>&1 | tail -20
 ```
 Expected: PASS.
 
-**Step 9: Full test suite**
+**Step 8: Full test suite**
 ```bash
 just test 2>&1 | tail -30
 ```
 
-**Step 10: Commit tein side**
+**Step 9: Commit tein side**
 ```bash
 git add tein/tests/scheme/tein_file_open.scm
 git commit -m "test: scheme test for (tein file) higher-order wrappers"
@@ -536,19 +802,17 @@ git commit -m "test: scheme test for (tein file) higher-order wrappers"
 
 ---
 
-## Task 5: VFS shadow for (scheme file)
+## Task 7: VFS shadow integration tests for (scheme file) + (scheme repl)
 
 **Files:**
 - Modify: `tein/src/context.rs`
-- Modify: `tein/src/vfs_registry.rs`
 
-**Step 1: Write failing tests**
-
-Add to the sandboxed tests section in context.rs (find `// --- task 8:` around line 7495):
+**Step 1: Write tests**
 
 ```rust
 #[test]
 fn test_scheme_file_shadow_importable_in_sandbox() {
+    let _lock = IO_TEST_LOCK.lock().unwrap();
     use crate::sandbox::Modules;
     let tmp = "/tmp/tein_shadow_file_test.txt";
     std::fs::write(tmp, "shadowed").expect("write");
@@ -592,134 +856,45 @@ fn test_scheme_file_not_shadowed_unsandboxed() {
     ));
     assert_eq!(r.expect("unsandboxed scheme file works"), Value::Bool(true));
 }
-```
 
-**Step 2: Run to confirm failure**
-```bash
-cargo test test_scheme_file_shadow_importable_in_sandbox test_scheme_file_shadow_denies_without_policy test_scheme_file_not_shadowed_unsandboxed 2>&1 | tail -20
-```
-Expected: FAIL — `(scheme file)` blocked by VFS gate in sandbox (no shadow yet).
-
-**Step 3: Add `register_vfs_shadows()` to context.rs**
-
-Add as a free fn near `register_file_module` (or just before it):
-
-```rust
-/// Inject VFS shadow modules for sandboxed contexts.
-///
-/// Registers replacement `.sld` files into the dynamic VFS under their
-/// canonical `/vfs/lib/` paths so chibi's module resolver finds our
-/// policy-checked wrappers instead of native implementations.
-///
-/// Must be called before the VFS gate is armed (before VFS_GATE is set to GATE_CHECK).
-///
-/// current shadows:
-/// - `scheme/file` → re-exports all 10 names from `(tein file)`
-fn register_vfs_shadows() {
-    const SCHEME_FILE_SLD: &str = "\
-(define-library (scheme file)
-  (import (tein file))
-  (export open-input-file open-output-file
-          open-binary-input-file open-binary-output-file
-          call-with-input-file call-with-output-file
-          with-input-from-file with-output-to-file
-          file-exists? delete-file))
-";
-    let path = c"/vfs/lib/scheme/file.sld";
-    unsafe {
-        ffi::tein_vfs_register(
-            path.as_ptr(),
-            SCHEME_FILE_SLD.as_ptr() as *const std::ffi::c_char,
-            SCHEME_FILE_SLD.len() as std::ffi::c_uint,
-        );
-    }
+#[test]
+fn test_scheme_repl_shadow_returns_environment() {
+    use crate::sandbox::Modules;
+    let ctx = Context::builder()
+        .standard_env()
+        .sandboxed(Modules::Safe)
+        .build()
+        .expect("builder");
+    // interaction-environment should return an env (not #f, not error)
+    // verify it's callable and the result is usable (environments are opaque,
+    // but we can check that it doesn't error)
+    let r = ctx.evaluate(
+        "(import (scheme repl)) (let ((e (interaction-environment))) #t)"
+    );
+    assert_eq!(r.expect("scheme repl shadow works"), Value::Bool(true));
 }
 ```
 
-**Step 4: Call `register_vfs_shadows()` in `build()` sandbox path**
-
-In `build()`, inside the `if let Some(ref modules) = self.sandbox_modules.take()` block, find where `IS_SANDBOXED` is set to `true` (line ~1731):
-
-```rust
-IS_SANDBOXED.with(|c| c.set(true));
-```
-
-Add the shadow call **immediately after** this (before `VFS_GATE.with(|cell| cell.set(GATE_CHECK))`):
-
-```rust
-IS_SANDBOXED.with(|c| c.set(true));
-register_vfs_shadows(); // inject scheme/file shadow before gate is armed
-```
-
-**Step 5: Add `scheme/file` to `vfs_registry.rs`**
-
-`scheme/file` needs to be in the allowlist so the VFS gate permits it. It's a shadow-only module (no static files — registered dynamically). Add a `VfsSource::Dynamic` entry in the appropriate section (near other `scheme/*` entries — after `scheme/show` or in the r7rs section):
-
-```rust
-// scheme/file: VFS shadow — registered dynamically by register_vfs_shadows()
-// in sandboxed contexts. resolves to (tein file) trampolines for FsPolicy enforcement.
-// unsandboxed contexts use chibi's native scheme/file directly.
-VfsEntry {
-    path: "scheme/file",
-    deps: &["tein/file"],
-    files: &[],
-    clib: None,
-    default_safe: true,
-    source: VfsSource::Dynamic,
-    feature: None,
-},
-```
-
-Also update `tein/file` deps to include `scheme/file` so transitive resolution works bidirectionally (any allowlist entry that includes `tein/file` automatically pulls `scheme/file` too):
-
-Find the `tein/file` entry and update its deps:
-```rust
-VfsEntry {
-    path: "tein/file",
-    deps: &["scheme/base", "scheme/file"],  // scheme/file added
-    ...
-}
-```
-
-> **Careful:** this creates a cycle `tein/file` ↔ `scheme/file`. The `registry_resolve_deps` function handles cycles via `seen` set — it's safe.
-
-**Step 6: Run tests**
+**Step 2: Run**
 ```bash
-cargo test test_scheme_file_shadow_importable_in_sandbox test_scheme_file_shadow_denies_without_policy test_scheme_file_not_shadowed_unsandboxed 2>&1 | tail -20
+cargo test test_scheme_file_shadow_importable test_scheme_file_shadow_denies test_scheme_file_not_shadowed test_scheme_repl_shadow_returns 2>&1 | tail -20
 ```
 Expected: PASS.
 
-**Step 7: Update `registry_safe_allowlist_contains_expected_modules` test in `sandbox.rs`**
-
-Add assertions inside the test:
-```rust
-assert!(
-    safe.iter().any(|m| m == "scheme/file"),
-    "scheme/file missing from safe (shadow dep)"
-);
-```
-
-**Step 8: Full test suite**
+**Step 3: Full test suite**
 ```bash
 just test 2>&1 | tail -30
 ```
 
-**Step 9: Lint**
+**Step 4: Commit**
 ```bash
-just lint
-```
-
-**Step 10: Commit**
-```bash
-git add tein/src/context.rs tein/src/vfs_registry.rs
-git commit -m "feat: VFS shadow for (scheme file) — sandboxed contexts delegate to (tein file)"
+git add tein/src/context.rs
+git commit -m "test: VFS shadow integration tests for (scheme file) + (scheme repl)"
 ```
 
 ---
 
-## Task 6: Enable (scheme show) / (srfi 166) in Modules::Safe
-
-With the shadow in place, `(scheme file)` is resolvable in sandboxed contexts. Flip the relevant registry entries.
+## Task 8: Enable (scheme show) / (srfi 166) in Modules::Safe
 
 **Files:**
 - Modify: `tein/src/vfs_registry.rs`
@@ -760,45 +935,35 @@ fn test_srfi_166_base_importable_in_sandbox() {
 ```bash
 cargo test test_scheme_show_importable_in_sandbox test_srfi_166_base_importable_in_sandbox 2>&1 | tail -20
 ```
-Expected: FAIL — `(scheme show)` blocked by gate.
+Expected: FAIL — blocked by gate.
 
-**Step 3: Update registry**
+**Step 3: Update registry — flip safe flags**
 
 In `tein/src/vfs_registry.rs`:
 
-1. Find `scheme/show` entry (~line 551). Flip `default_safe: false` → `default_safe: true`. Update comment:
+1. `scheme/show` — flip `default_safe: false` → `default_safe: true`. Update comment:
 ```rust
-// scheme/show: (scheme file) dep satisfied via VFS shadow → (tein file)
-VfsEntry {
-    path: "scheme/show",
-    deps: &["srfi/166"],
-    ...
-    default_safe: true,
-    ...
-}
+// scheme/show: deps satisfied via shadows — scheme/file via (tein file),
+// scheme/repl via (current-environment)
 ```
 
-2. Find `srfi/166` entry (~line 1096). Flip `default_safe: false` → `default_safe: true`.
+2. `srfi/166` — flip `default_safe: false` → `default_safe: true`
 
-3. Find `srfi/166/columnar` entry (~line 1155). Add `"scheme/file"` to its deps and flip `default_safe: false` → `default_safe: true`:
+3. `srfi/166/base` — flip `default_safe: false` → `default_safe: true`. Update comment:
 ```rust
-VfsEntry {
-    path: "srfi/166/columnar",
-    deps: &[
-        "scheme/base",
-        "scheme/char",
-        "scheme/file",   // shadow dep — resolves via (tein file) in sandbox
-        "srfi/1",
-        "srfi/117",
-        "srfi/130",
-        "srfi/166/base",
-        "chibi/optional",
-    ],
-    ...
-    default_safe: true,
-    ...
-}
+// scheme/repl dep satisfied via VFS shadow (neutered interaction-environment)
 ```
+
+4. `srfi/166/pretty` — flip `default_safe: false` → `default_safe: true`
+
+5. `srfi/166/columnar` — flip `default_safe: false` → `default_safe: true`. Update comment:
+```rust
+// scheme/file dep satisfied via VFS shadow → (tein file)
+```
+
+6. `srfi/166/unicode` — flip `default_safe: false` → `default_safe: true`
+
+7. `srfi/166/color` — flip `default_safe: false` → `default_safe: true`
 
 **Step 4: Run tests**
 ```bash
@@ -806,10 +971,18 @@ cargo test test_scheme_show_importable_in_sandbox test_srfi_166_base_importable_
 ```
 Expected: PASS.
 
-**Step 5: Update `registry_safe_allowlist_contains_expected_modules` in `sandbox.rs`**
+**Step 5: Update `registry_safe_allowlist_contains_expected_modules` test in `sandbox.rs`**
 
-Add:
+Add assertions:
 ```rust
+assert!(
+    safe.iter().any(|m| m == "scheme/file"),
+    "scheme/file missing from safe (shadow)"
+);
+assert!(
+    safe.iter().any(|m| m == "scheme/repl"),
+    "scheme/repl missing from safe (shadow)"
+);
 assert!(
     safe.iter().any(|m| m == "scheme/show"),
     "scheme/show missing from safe"
@@ -820,34 +993,31 @@ assert!(
 );
 ```
 
-**Step 6: Full test suite**
+**Step 6: Full test suite + lint**
 ```bash
 just test 2>&1 | tail -30
-```
-
-**Step 7: Lint**
-```bash
 just lint
 ```
 
-**Step 8: Commit**
+**Step 7: Commit**
 ```bash
-git add tein/src/vfs_registry.rs
-git commit -m "feat: enable (scheme show) / (srfi 166) in Modules::Safe via (scheme file) shadow"
+git add tein/src/vfs_registry.rs tein/src/sandbox.rs
+git commit -m "feat: enable (scheme show) / (srfi 166) in Modules::Safe via VFS shadows"
 ```
 
 ---
 
-## Task 7: Integration test — srfi/166/columnar from-file with FsPolicy
+## Task 9: Integration test — srfi/166/columnar from-file with FsPolicy
 
 **Files:**
 - Modify: `tein/src/context.rs`
 
-**Step 1: Write test**
+**Step 1: Write tests**
 
 ```rust
 #[test]
 fn test_srfi_166_columnar_from_file_with_policy() {
+    let _lock = IO_TEST_LOCK.lock().unwrap();
     use crate::sandbox::Modules;
     let tmp = "/tmp/tein_from_file_test.txt";
     std::fs::write(tmp, "line1\nline2\n").expect("write");
@@ -898,25 +1068,34 @@ git commit -m "test: srfi/166/columnar from-file integration with FsPolicy"
 
 ---
 
-## Task 8: Docs — sandbox.rs comment + AGENTS.md
+## Task 10: Docs — sandbox.rs comment + AGENTS.md + design doc
 
 **Files:**
 - Modify: `tein/src/sandbox.rs`
 - Modify: `AGENTS.md`
+- Modify: `docs/plans/2026-03-01-vfs-shadow-scheme-file-design.md`
 
 **Step 1: Update sandbox.rs comment block**
 
-Find `// modules NOT in the VFS registry:` (~line 111). Update:
+Find `// modules NOT in the VFS registry:`. Replace with:
+
 ```rust
-// unsandboxed-blocked modules:
+// VFS shadow modules:
 //
-// - `scheme/file` — in the registry as `VfsSource::Dynamic` (shadow-only). in sandboxed
-//   contexts, register_vfs_shadows() injects a replacement .sld that re-exports from
-//   (tein file), providing FsPolicy enforcement. unsandboxed contexts use chibi's native
-//   scheme/file directly (no shadow registered).
-// - `scheme/process-context` — `exit`/`emergency-exit` from `(chibi process)` kills the
-//   host process, bypassing rust error handling. use `(tein process)` instead.
-// - `scheme/load` — loads arbitrary files. use `(tein load)` instead.
+// the following modules have `VfsSource::Shadow` entries in the registry.
+// in sandboxed contexts, `register_vfs_shadows()` injects replacement `.sld`
+// files that re-export from safe tein counterparts or provide neutered stubs.
+// unsandboxed contexts use chibi's native versions (no shadow registered).
+//
+// - `scheme/file` — re-exports (tein file), providing FsPolicy enforcement
+// - `scheme/repl` — neutered interaction-environment via (current-environment)
+//
+// modules NOT shadowed and intentionally blocked:
+//
+// - `scheme/process-context` — exit/emergency-exit kills the host process.
+//   use (tein process) instead.
+// - `scheme/load` — loads arbitrary files. use (tein load) instead.
+// - `scheme/eval` — eval + environment. tracked for future shadow (GH issue).
 // - `scheme/r5rs` — re-exports scheme/file, scheme/load, scheme/process-context.
 ```
 
@@ -924,20 +1103,30 @@ Find `// modules NOT in the VFS registry:` (~line 111). Update:
 
 Find: `set IS_SANDBOXED thread-local →`
 
-Change to:
+Insert after `set IS_SANDBOXED thread-local`:
 ```
-set IS_SANDBOXED thread-local → register_vfs_shadows() (injects scheme/file.sld → (tein file)) →
+→ register_vfs_shadows() (injects scheme/file.sld → (tein file), scheme/repl.sld → neutered) →
 ```
 
-**Step 3: Commit**
+**Step 3: Update design doc status**
+
+Change the status line at the top of `docs/plans/2026-03-01-vfs-shadow-scheme-file-design.md` from `**status: BLOCKED**` to `**status: IMPLEMENTED**` and add a note:
+
+```
+**status: IMPLEMENTED** — superseded by implementation plan `2026-03-01-vfs-shadow-scheme-file.md`.
+Architecture evolved: `VfsSource::Shadow` variant in registry (data-driven) instead of separate
+`VFS_SHADOWS` array. Added `scheme/repl` shadow for `interaction-environment`.
+```
+
+**Step 4: Commit**
 ```bash
-git add tein/src/sandbox.rs AGENTS.md
-git commit -m "docs: update sandbox comment + AGENTS.md for scheme/file shadow"
+git add tein/src/sandbox.rs AGENTS.md docs/plans/2026-03-01-vfs-shadow-scheme-file-design.md
+git commit -m "docs: update sandbox comments, AGENTS.md, and design doc for VFS shadows"
 ```
 
 ---
 
-## Task 9: Final verification + PR
+## Task 11: Final verification + lint + batch notes
 
 **Step 1: Full test suite**
 ```bash
@@ -950,40 +1139,60 @@ Expected: all pass.
 just lint
 ```
 
-**Step 3: Create PR**
+**Step 3: Update this plan**
+
+Mark all tasks as complete. Add notes for AGENTS.md collection (final step per workflow):
+
+- `VfsSource::Shadow` — new registry variant for sandbox-only module replacements
+- `register_vfs_shadows()` — iterates registry, injects Shadow entries before VFS gate
+- `scheme/file` shadow + `scheme/repl` shadow — first two uses of the pattern
+- `capture_file_originals()` — must be called in both sandbox and unsandbox build paths
+- old IO wrapper system fully removed — `check_and_delegate`, `wrapper_fn_for` etc. gone
+- `(current-environment)` from `(chibi)` is always available and returns the sandbox env in sandboxed contexts — useful for neutering env-exposing procedures
+
+**Step 4: Commit plan update**
+```bash
+git add docs/plans/2026-03-01-vfs-shadow-scheme-file.md
+git commit -m "docs: mark implementation plan complete with batch notes"
+```
+
+**Step 5: Halt for context clear**
+
+---
+
+## Task 12: PR
+
+After context clear and final verification:
+
 ```bash
 gh pr create \
   --base dev \
-  --title "feat: (scheme file) VFS shadow + (scheme show) in Modules::Safe" \
+  --title "feat: VFS shadow system + (scheme file/repl/show) in sandbox" \
   --body "$(cat <<'EOF'
 ## summary
 
-- expands `(tein file)` to full `(scheme file)` surface: 4 new `open-*-file` trampolines + 4 higher-order scheme wrappers (`call-with-*`, `with-*-from/to-file`)
-- dynamic VFS shadow: sandboxed contexts inject `scheme/file.sld` re-exporting from `(tein file)` — policy-checked and gate-permitted
-- removes old IO wrapper system (`check_and_delegate`, `wrapper_open_*`, `wrapper_fn_for`, `has_io` block) — enforcement unified in trampolines
-- enables `(scheme show)` / `(srfi 166)` + sub-modules in `Modules::Safe`
-- `srfi/166/columnar` `from-file` works in sandboxed contexts with `file_read` policy
+- introduces `VfsSource::Shadow` — data-driven VFS shadow system in the module registry. shadow `.sld` content is declared inline in `VFS_REGISTRY` entries; `register_vfs_shadows()` injects them into the dynamic VFS at sandbox build time only
+- `scheme/file` shadow: re-exports all 10 names from `(tein file)` with FsPolicy enforcement
+- `scheme/repl` shadow: neutered `interaction-environment` via `(current-environment)` — returns the sandbox's restricted env
+- expands `(tein file)` from 2 to 10 exports: 4 new `open-*-file` rust trampolines + 4 higher-order scheme wrappers
+- removes old IO wrapper system (`check_and_delegate`, `wrapper_open_*`, `wrapper_fn_for`, `has_io` block) — policy enforcement unified in trampolines
+- enables `(scheme show)` / `(srfi 166)` + all sub-modules in `Modules::Safe`
+- `srfi/166/columnar` `from-file` works in sandbox with `file_read` policy
 
 closes #91
 
 ## test plan
 
-- [ ] `test_open_input_file_trampoline_*` — new trampoline policy tests pass
-- [ ] `test_open_input_file_unsandboxed_passthrough` — unsandboxed delegation works
-- [ ] `test_scheme_file_shadow_*` — shadow resolution + policy checks
-- [ ] `test_scheme_show_importable_in_sandbox` — scheme/show in safe set
-- [ ] `test_srfi_166_columnar_from_file_*` — from-file with/without policy
-- [ ] scheme/tein_file_open.scm — higher-order wrappers
-- [ ] all existing IO policy tests still pass
+- [ ] trampoline policy tests (allowed/denied for input+output)
+- [ ] unsandboxed passthrough for open-input-file
+- [ ] scheme/file shadow resolution + policy checks in sandbox
+- [ ] scheme/repl shadow returns usable environment
+- [ ] scheme/show importable in sandbox
+- [ ] srfi/166/columnar from-file with/without policy
+- [ ] higher-order wrappers (call-with-*, with-*-from/to-file)
+- [ ] all existing IO policy tests pass
+- [ ] registry safe allowlist contains new modules
 - [ ] `just test` green
 EOF
 )"
 ```
-
----
-
-## Appendix: unsandboxed path for `file_read`/`file_write`
-
-Currently `file_read`/`file_write` only work in sandboxed contexts (the `has_io` block only runs in the sandbox path). After this refactor, `FS_POLICY` is set outside the sandbox path too — **this is a behaviour change**: unsandboxed contexts with `file_read`/`file_write` configured will now enforce policy via the trampolines.
-
-This is actually *correct* and desirable behaviour (the builder docs say file_read auto-activates `sandboxed(Modules::Safe)` when no explicit `sandboxed()` call is made, but the policy check should still apply). No test changes needed — the new tests confirm it works in sandbox. Just be aware during review.

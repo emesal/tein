@@ -42,7 +42,7 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
+    sandbox::{FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -67,25 +67,6 @@ impl Drop for ExtApiGuard {
     fn drop(&mut self) {
         EXT_API.with(|c| c.set(std::ptr::null()));
     }
-}
-
-// --- original proc thread-locals for IO wrappers ---
-//
-// when file_read() or file_write() is configured, we capture the original
-// chibi primitives before switching to the restricted env, then store them
-// here so our wrapper functions can delegate after policy checks.
-
-// original procs for the 4 wrapped file-opening primitives.
-// indexed by IoOp discriminant.
-thread_local! {
-    static ORIGINAL_PROCS: [Cell<ffi::sexp>; 4] = const {
-        [
-            Cell::new(std::ptr::null_mut()),
-            Cell::new(std::ptr::null_mut()),
-            Cell::new(std::ptr::null_mut()),
-            Cell::new(std::ptr::null_mut()),
-        ]
-    };
 }
 
 // --- port store thread-local for custom port trampolines ---
@@ -947,41 +928,6 @@ unsafe extern "C" fn toml_stringify_trampoline(
     }
 }
 
-/// The 4 file-opening primitives we wrap with policy checks.
-#[derive(Clone, Copy)]
-#[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
-enum IoOp {
-    InputFile = 0,
-    BinaryInputFile = 1,
-    OutputFile = 2,
-    BinaryOutputFile = 3,
-}
-
-impl IoOp {
-    /// Scheme primitive name for this operation.
-    const fn name(self) -> &'static str {
-        match self {
-            IoOp::InputFile => "open-input-file",
-            IoOp::BinaryInputFile => "open-binary-input-file",
-            IoOp::OutputFile => "open-output-file",
-            IoOp::BinaryOutputFile => "open-binary-output-file",
-        }
-    }
-
-    /// Whether this is a read or write operation.
-    const fn is_read(self) -> bool {
-        matches!(self, IoOp::InputFile | IoOp::BinaryInputFile)
-    }
-
-    /// All operations as a slice for iteration.
-    const ALL: [IoOp; 4] = [
-        IoOp::InputFile,
-        IoOp::BinaryInputFile,
-        IoOp::OutputFile,
-        IoOp::BinaryOutputFile,
-    ];
-}
-
 /// UX stub for bindings excluded from module-level sandboxed contexts.
 ///
 /// Extracts its name from the opcode's name slot (set by
@@ -1030,104 +976,6 @@ unsafe extern "C" fn ux_stub(
     }
 }
 
-/// Shared policy check + delegation for all file-open wrappers.
-///
-/// Extracts the filename from the first arg, checks against FsPolicy,
-/// and either delegates to the original primitive or returns a policy error.
-unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::sexp {
-    unsafe {
-        // extract filename string from first arg
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "open-file: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let path =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
-
-        // check policy
-        let allowed = FS_POLICY.with(|cell| {
-            let policy = cell.borrow();
-            match &*policy {
-                Some(p) => {
-                    if op.is_read() {
-                        p.check_read(path)
-                    } else {
-                        p.check_write(path)
-                    }
-                }
-                None => false,
-            }
-        });
-
-        if !allowed {
-            let op_kind = if op.is_read() { "read" } else { "write" };
-            let msg = format!("[sandbox:file] {} ({} not permitted)", path, op_kind);
-            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        // delegate to original primitive
-        let original = ORIGINAL_PROCS.with(|procs| procs[op as usize].get());
-        ffi::sexp_apply_proc(ctx, original, args)
-    }
-}
-
-// 4 wrapper functions — one per file-opening primitive.
-// each is a thin shim that calls check_and_delegate with the right IoOp.
-
-unsafe extern "C" fn wrapper_open_input_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::InputFile) }
-}
-
-unsafe extern "C" fn wrapper_open_binary_input_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::BinaryInputFile) }
-}
-
-unsafe extern "C" fn wrapper_open_output_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::OutputFile) }
-}
-
-unsafe extern "C" fn wrapper_open_binary_output_file(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::BinaryOutputFile) }
-}
-
-/// Get the wrapper function pointer for a given IoOp.
-fn wrapper_fn_for(
-    op: IoOp,
-) -> unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp {
-    match op {
-        IoOp::InputFile => wrapper_open_input_file,
-        IoOp::BinaryInputFile => wrapper_open_binary_input_file,
-        IoOp::OutputFile => wrapper_open_output_file,
-        IoOp::BinaryOutputFile => wrapper_open_binary_output_file,
-    }
-}
-
 // --- trampoline helpers ---
 
 /// Extract the first argument as a `&str`, returning an error sexp on type mismatch.
@@ -1157,7 +1005,7 @@ unsafe fn extract_string_arg<'a>(
 }
 
 /// FsPolicy access direction for [`check_fs_access`].
-enum FsAccess {
+pub(crate) enum FsAccess {
     Read,
     Write,
 }
@@ -1167,7 +1015,7 @@ enum FsAccess {
 /// - unsandboxed (IS_SANDBOXED=false): allows unconditionally
 /// - sandboxed with matching FsPolicy: delegates to `check_read`/`check_write`
 /// - sandboxed without FsPolicy configured: denies
-fn check_fs_access(path: &str, access: FsAccess) -> bool {
+pub(crate) fn check_fs_access(path: &str, access: FsAccess) -> bool {
     let sandboxed = IS_SANDBOXED.with(|c| c.get());
     if !sandboxed {
         return true;
@@ -1249,6 +1097,11 @@ unsafe extern "C" fn delete_file_trampoline(
         }
     }
 }
+
+// --- open-*-file enforcement ---
+//
+// open-*-file policy enforcement is handled at the C opcode level
+// (eval.c patches F, G) via the FS policy gate callback.
 
 // --- (tein load) trampoline ---
 
@@ -1352,6 +1205,11 @@ unsafe extern "C" fn get_env_var_trampoline(
             Err(e) => return e,
         };
 
+        // sandboxed contexts get neutered env var access
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return ffi::get_false();
+        }
+
         match std::env::var(name) {
             Ok(val) => {
                 let c_val = CString::new(val.as_str()).unwrap_or_default();
@@ -1363,6 +1221,7 @@ unsafe extern "C" fn get_env_var_trampoline(
 }
 
 /// `get-environment-variables` trampoline: returns alist of all env vars as `((name . value) ...)`.
+/// sandboxed contexts return `'()`.
 unsafe extern "C" fn get_env_vars_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1370,6 +1229,11 @@ unsafe extern "C" fn get_env_vars_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        // sandboxed contexts get neutered env var access
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return ffi::get_null();
+        }
+
         let mut result = ffi::get_null();
         for (key, val) in std::env::vars() {
             // root accumulator so GC doesn't sweep the partial list
@@ -1400,7 +1264,8 @@ unsafe extern "C" fn get_env_vars_trampoline(
     }
 }
 
-/// `command-line` trampoline: returns list of command-line args.
+/// `command-line` trampoline: returns the host argv as a list of strings.
+/// sandboxed contexts return `'("tein")`.
 unsafe extern "C" fn command_line_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1408,6 +1273,17 @@ unsafe extern "C" fn command_line_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        // sandboxed contexts get a fake command line
+        if IS_SANDBOXED.with(|c| c.get()) {
+            let name = CString::new("tein").unwrap();
+            let s = ffi::sexp_c_str(ctx, name.as_ptr(), 4);
+            if ffi::sexp_exceptionp(s) != 0 {
+                return s;
+            }
+            let _s_root = ffi::GcRoot::new(ctx, s);
+            return ffi::sexp_cons(ctx, s, ffi::get_null());
+        }
+
         let mut result = ffi::get_null();
         let args: Vec<String> = std::env::args().collect();
         // build list in reverse order so head = argv[0]
@@ -1435,6 +1311,17 @@ unsafe extern "C" fn command_line_trampoline(
 /// via `check_exit()` and returns `Ok(value)` to the rust caller.
 ///
 /// semantics: `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj
+///
+/// **r7rs deviation**: r7rs `exit` must run all `dynamic-wind` "after" thunks
+/// before handing control to the OS. tein's `exit` does **not** — it immediately
+/// aborts the VM by throwing an exception, which is `emergency-exit` semantics.
+/// tein has no unwind continuation established around each `evaluate()` call, so
+/// r7rs-compliant exit (with dynamic-wind cleanup) would require an architectural
+/// change. tracked in GH #101.
+///
+/// both `exit` and `emergency-exit` therefore have identical emergency-exit
+/// semantics today. a future standalone interpreter host can wrap `evaluate()` in
+/// a continuation and re-route `exit` through it to achieve correct cleanup.
 unsafe extern "C" fn exit_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1714,6 +1601,7 @@ impl ContextBuilder {
             // save current gate values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
             let prev_vfs_gate = VFS_GATE.with(|cell| cell.get());
+            let prev_fs_gate = FS_GATE.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
             let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
@@ -1727,8 +1615,12 @@ impl ContextBuilder {
                     registry_safe_allowlist, unexported_stubs,
                 };
 
-                // mark sandboxed so (tein file) trampolines apply policy
+                // mark sandboxed so policy enforcement applies
                 IS_SANDBOXED.with(|c| c.set(true));
+                // arm FS policy gate — C opcodes will call tein_fs_policy_check
+                FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
+                ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
+                crate::sandbox::register_vfs_shadows(); // inject shadow modules before VFS gate is armed
 
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
@@ -1809,44 +1701,20 @@ impl ContextBuilder {
                     );
                 }
 
-                // IO wrappers: capture original procs from source env, register wrappers
+                ffi::sexp_context_env_set(ctx, null_env);
+            }
+
+            // set FsPolicy if file_read() or file_write() was configured.
+            // note: file_read()/file_write() auto-activate sandboxed(Modules::Safe)
+            // when called without an explicit sandboxed() call, so FS_POLICY is always
+            // paired with IS_SANDBOXED=true in practice. the FS_GATE (C-level opcode
+            // enforcement) is only armed inside the sandbox block above — unsandboxed
+            // + FsPolicy is unreachable via the public API. FsPolicy is placed here
+            // (outside the sandbox block) as a pure data write; the C gate remains off.
+            {
                 let file_read_prefixes = self.file_read_prefixes.take();
                 let file_write_prefixes = self.file_write_prefixes.take();
-                let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
-                if has_io {
-                    let undefined = ffi::get_void();
-                    for op in IoOp::ALL {
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let sym =
-                            ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
-                        if val != undefined {
-                            ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
-                        }
-                    }
-
-                    let read_ops = file_read_prefixes.is_some();
-                    let write_ops = file_write_prefixes.is_some();
-                    for op in IoOp::ALL {
-                        let want = if op.is_read() { read_ops } else { write_ops };
-                        if !want {
-                            continue;
-                        }
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let wrapper = wrapper_fn_for(op);
-                        ffi::sexp_define_foreign_proc(
-                            ctx,
-                            null_env,
-                            c_name.as_ptr(),
-                            0,
-                            ffi::SEXP_PROC_VARIADIC,
-                            c_name.as_ptr(),
-                            Some(wrapper),
-                        );
-                    }
-
+                if file_read_prefixes.is_some() || file_write_prefixes.is_some() {
                     FS_POLICY.with(|cell| {
                         *cell.borrow_mut() = Some(FsPolicy {
                             read_prefixes: file_read_prefixes.unwrap_or_default(),
@@ -1854,14 +1722,13 @@ impl ContextBuilder {
                         });
                     });
                 }
-
-                ffi::sexp_context_env_set(ctx, null_env);
             }
 
             let context = Context {
                 ctx,
                 step_limit: self.step_limit,
                 prev_vfs_gate,
+                prev_fs_gate,
                 prev_fs_policy,
                 prev_vfs_allowlist,
                 prev_is_sandboxed,
@@ -1955,6 +1822,8 @@ pub struct Context {
     step_limit: Option<u64>,
     /// previous VFS_GATE level, restored on drop
     prev_vfs_gate: u8,
+    /// previous FS_GATE level, restored on drop
+    prev_fs_gate: u8,
     /// previous FS_POLICY value, restored on drop
     prev_fs_policy: Option<FsPolicy>,
     /// previous VFS_ALLOWLIST, restored on drop
@@ -2930,11 +2799,13 @@ impl Context {
         Ok(())
     }
 
-    /// Register `file-exists?` and `delete-file` native functions.
+    /// Register `file-exists?` and `delete-file` trampolines for `(tein file)`.
     ///
-    /// Called during `build()` for standard-env contexts. the VFS module
-    /// `(tein file)` exports only these two names — the standard open-* and
-    /// higher-order wrappers are already in the env and don't need re-exporting.
+    /// `open-*-file` enforcement is handled at the C opcode level via the FS
+    /// policy gate (eval.c patches F, G) — no rust trampolines are needed for
+    /// those. `(tein file)` also exports 4 higher-order wrappers
+    /// (`call-with-*`, `with-*-from/to-file`) defined in `file.scm`.
+    /// Called during `build()` after context creation.
     fn register_file_module(&self) -> Result<()> {
         self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
         self.define_fn_variadic("delete-file", delete_file_trampoline)?;
@@ -3055,6 +2926,8 @@ impl Drop for Context {
         // unsandboxed contexts (default), so this is safe when no outer context exists.
         VFS_GATE.with(|cell| cell.set(self.prev_vfs_gate));
         unsafe { ffi::vfs_gate_set(self.prev_vfs_gate as i32) };
+        FS_GATE.with(|cell| cell.set(self.prev_fs_gate));
+        unsafe { ffi::fs_policy_gate_set(self.prev_fs_gate as i32) };
         VFS_ALLOWLIST.with(|cell| {
             *cell.borrow_mut() = std::mem::take(&mut self.prev_vfs_allowlist);
         });
@@ -3063,12 +2936,6 @@ impl Drop for Context {
         FS_POLICY.with(|cell| {
             *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
         });
-        ORIGINAL_PROCS.with(|procs| {
-            for p in procs {
-                p.set(std::ptr::null_mut());
-            }
-        });
-
         // restore sandbox flag for the thread (defensive restore-previous pattern)
         IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
 
@@ -4349,7 +4216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tein_process_blocked_by_default_sandbox() {
+    fn test_tein_process_safe_in_sandbox() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
@@ -4357,12 +4224,21 @@ mod tests {
             .step_limit(5_000_000)
             .build()
             .expect("sandboxed context");
+        // (tein process) is in the safe set — trampolines neuter env/argv in sandbox
         let r = ctx.evaluate("(import (tein process))");
         assert!(
-            r.is_err() || matches!(r, Ok(Value::String(ref s)) if s.contains("couldn't find")),
-            "expected (tein process) to be blocked in Modules::Safe, got: {:?}",
-            r
+            r.is_ok(),
+            "(tein process) should be importable in sandbox: {r:?}"
         );
+        // env vars neutered
+        let r = ctx.evaluate("(get-environment-variable \"HOME\")");
+        assert_eq!(r.unwrap(), Value::Boolean(false));
+        // env var list neutered
+        let r = ctx.evaluate("(get-environment-variables)");
+        assert_eq!(r.unwrap(), Value::Nil);
+        // command-line returns fake
+        let r = ctx.evaluate("(command-line)");
+        assert_eq!(r.unwrap(), Value::List(vec![Value::String("tein".into())]));
     }
 
     #[test]
@@ -4550,6 +4426,31 @@ mod tests {
         assert_eq!(r, Value::String("done".to_string()));
     }
 
+    #[test]
+    fn test_tein_process_exit_skips_dynamic_wind() {
+        // r7rs deviation (GH #101): tein's exit does NOT run dynamic-wind
+        // "after" thunks — it has emergency-exit semantics. this test asserts
+        // the *current* behaviour. update when GH #101 is fixed.
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        // in r7rs-compliant exit, the after thunk would run before returning.
+        // tein exits immediately, so we get the exit value directly.
+        let r = ctx
+            .evaluate(
+                "(dynamic-wind \
+                   (lambda () #f) \
+                   (lambda () (exit 42)) \
+                   (lambda () (error \"after thunk ran — unexpected\")))",
+            )
+            .unwrap();
+        // exits with 42; after thunk never runs (no error thrown)
+        assert_eq!(
+            r,
+            Value::Integer(42),
+            "exit bypasses dynamic-wind after thunk (GH #101)"
+        );
+    }
+
     // --- phase 3: timeout context ---
 
     #[test]
@@ -4626,8 +4527,8 @@ mod tests {
 
     // --- IO policy tests ---
     //
-    // IO tests use thread-local state (FS_POLICY, ORIGINAL_PROCS) so they
-    // must not run concurrently on the same thread. we use a mutex to
+    // IO tests use thread-local state (FS_POLICY, FS_GATE, IS_SANDBOXED) so
+    // they must not run concurrently on the same thread. we use a mutex to
     // serialise them.
 
     static IO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4654,10 +4555,10 @@ mod tests {
             .build()
             .expect("builder");
 
-        // open-input-file is registered directly as a wrapper — no (scheme file) import needed.
-        // (scheme read) provides `read` and `close-input-port`.
+        // open-input-file is a chibi opcode — import (tein file) to get it in sandbox.
+        // (scheme read) provides `read`.
         let code = format!(
-            r#"(import (scheme base)) (import (scheme read)) (define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
+            r#"(import (scheme base) (scheme read) (tein file)) (define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
             file.display()
         );
         let result = ctx.evaluate(&code).expect("should succeed");
@@ -4681,7 +4582,7 @@ mod tests {
             .expect("builder");
 
         let err = ctx
-            .evaluate("(open-input-file \"/etc/passwd\")")
+            .evaluate("(import (tein file)) (open-input-file \"/etc/passwd\")")
             .unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
@@ -4711,7 +4612,7 @@ mod tests {
             .expect("builder");
 
         let code = format!(
-            r#"(import (scheme base)) (define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
+            r#"(import (scheme base) (tein file)) (define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
             file.display()
         );
         ctx.evaluate(&code).expect("should succeed");
@@ -4735,7 +4636,8 @@ mod tests {
             .build()
             .expect("builder");
 
-        let err = ctx.evaluate("(open-output-file \"/tmp/tein-io-test-nope.txt\")");
+        let err =
+            ctx.evaluate("(import (tein file)) (open-output-file \"/tmp/tein-io-test-nope.txt\")");
         assert!(err.is_err(), "write to unallowed path should be denied");
     }
 
@@ -4754,7 +4656,7 @@ mod tests {
 
         // try to escape via ../ — canonicalisation should catch this
         let evil_path = format!("{}/../../../etc/passwd", dir.display());
-        let code = format!(r#"(open-input-file "{}")"#, evil_path);
+        let code = format!(r#"(import (tein file)) (open-input-file "{}")"#, evil_path);
         let err = ctx.evaluate(&code);
         assert!(err.is_err(), "path traversal should be denied");
     }
@@ -4781,7 +4683,10 @@ mod tests {
                 .expect("builder");
 
             // the symlink points outside the allowed prefix, so should be denied
-            let code = format!(r#"(open-input-file "{}")"#, link.display());
+            let code = format!(
+                r#"(import (tein file)) (open-input-file "{}")"#,
+                link.display()
+            );
             let err = ctx.evaluate(&code);
             assert!(
                 err.is_err(),
@@ -4808,7 +4713,7 @@ mod tests {
             .expect("builder");
 
         let code = format!(
-            r#"(import (scheme base)) (define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
+            r#"(import (scheme base) (tein file)) (define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
             file.display()
         );
         ctx.evaluate(&code).expect("should create new file");
@@ -4832,7 +4737,7 @@ mod tests {
 
         // parent dir doesn't exist, so check_write fails (can't canonicalise parent)
         let code = format!(
-            r#"(open-output-file "{}/nonexistent_subdir/file.txt")"#,
+            r#"(import (tein file)) (open-output-file "{}/nonexistent_subdir/file.txt")"#,
             dir.display()
         );
         let err = ctx.evaluate(&code);
@@ -4842,32 +4747,32 @@ mod tests {
     #[test]
     fn test_file_read_without_policy() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // sandboxed without file_read — open-input-file not in scope
+        // sandboxed without file_read — C gate denies access
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(crate::sandbox::Modules::Safe)
             .build()
             .expect("builder");
-        let err = ctx.evaluate("(import (scheme base)) (open-input-file \"/etc/passwd\")");
+        let err = ctx.evaluate("(import (tein file)) (open-input-file \"/etc/passwd\")");
         assert!(
             err.is_err(),
-            "open-input-file should be undefined without file_read()"
+            "open-input-file should be denied without file_read()"
         );
     }
 
     #[test]
     fn test_file_write_without_policy() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // sandboxed without file_write — open-output-file not in scope
+        // sandboxed without file_write — C gate denies access
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(crate::sandbox::Modules::Safe)
             .build()
             .expect("builder");
-        let err = ctx.evaluate("(import (scheme base)) (open-output-file \"/tmp/nope.txt\")");
+        let err = ctx.evaluate("(import (tein file)) (open-output-file \"/tmp/nope.txt\")");
         assert!(
             err.is_err(),
-            "open-output-file should be undefined without file_write()"
+            "open-output-file should be denied without file_write()"
         );
     }
 
@@ -4899,10 +4804,10 @@ mod tests {
             .expect("mutation");
         assert_eq!(r, Value::Integer(99));
 
-        // file read works via wrapper — open-input-file is in env directly,
+        // file read via C opcode — import (tein file) to get open-input-file in sandbox.
         // (scheme read) provides `read`.
         let code = format!(
-            r#"(import (scheme read)) (define p (open-input-file "{}")) (read p)"#,
+            r#"(import (scheme read) (tein file)) (define p (open-input-file "{}")) (read p)"#,
             file.display()
         );
         let r = ctx.evaluate(&code).expect("file read");
@@ -4932,6 +4837,131 @@ mod tests {
         assert!(err.is_err(), "fd primitives should be blocked");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- open-*-file C-level policy tests ---
+
+    #[test]
+    fn test_open_input_file_allowed() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_input_allowed");
+        let file = dir.join("data.txt");
+        std::fs::write(&file, "hello").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+        // import (tein file) to get open-input-file in sandbox
+        let code = format!(
+            "(import (scheme base) (tein file)) (let ((p (open-input-file \"{path}\"))) (close-input-port p) #t)"
+        );
+        let r = ctx.evaluate(&code).expect("open-input-file allowed");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_open_input_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_input_denied");
+        let file = dir.join("secret.txt");
+        std::fs::write(&file, "no").expect("write");
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies access — path not in allowed prefix
+        let code = format!("(import (tein file)) (open-input-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_output_file_allowed() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_output_allowed");
+        let file = dir.join("out.txt");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+        // import (tein file) to get open-output-file in sandbox
+        let code = format!(
+            "(import (scheme base) (tein file)) (let ((p (open-output-file \"{path}\"))) (close-output-port p) #t)"
+        );
+        let r = ctx.evaluate(&code).expect("open-output-file allowed");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_open_output_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_output_denied");
+        let path = dir.join("nope.txt").to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies access — path not in allowed prefix
+        let code = format!("(import (tein file)) (open-output-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_binary_input_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_binary_input_denied");
+        let file = dir.join("secret.bin");
+        std::fs::write(&file, b"\x00\x01\x02").expect("write");
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies binary input — same opcode path as text mode
+        let code = format!("(import (tein file)) (open-binary-input-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_binary_output_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_binary_output_denied");
+        let path = dir.join("nope.bin").to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies binary output — same opcode path as text mode
+        let code = format!("(import (tein file)) (open-binary-output-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_input_file_unsandboxed_passthrough() {
+        // unsandboxed: open-input-file is the chibi opcode; FS gate is off, all access allowed
+        let tmp = "/tmp/tein_open_unsandboxed_test.txt";
+        std::fs::write(tmp, "test").expect("write");
+        let ctx = Context::builder().standard_env().build().expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(r.expect("unsandboxed passthrough"), Value::Boolean(true));
     }
 
     // --- standard environment ---
@@ -5146,6 +5176,30 @@ mod tests {
                 cell.get(),
                 GATE_OFF,
                 "VFS gate should reset to off after context drop"
+            );
+        });
+    }
+
+    #[test]
+    fn test_fs_gate_cleared_on_drop() {
+        use crate::sandbox::{FS_GATE, FS_GATE_CHECK, FS_GATE_OFF, Modules};
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .sandboxed(Modules::only(&["scheme/base"]))
+                .build()
+                .expect("standard + sandboxed");
+
+            FS_GATE.with(|cell| {
+                assert_eq!(cell.get(), FS_GATE_CHECK);
+            });
+        }
+        // after drop, gate should reset
+        FS_GATE.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                FS_GATE_OFF,
+                "FS gate should reset to off after context drop"
             );
         });
     }
@@ -5625,7 +5679,7 @@ mod tests {
             .expect("builder");
 
         let err = ctx
-            .evaluate("(open-input-file \"/etc/passwd\")")
+            .evaluate("(import (tein file)) (open-input-file \"/etc/passwd\")")
             .unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
@@ -7506,10 +7560,10 @@ mod tests {
             .file_read(&["/tmp/"])
             .build()
             .expect("build");
-        // open-input-file is the IO wrapper registered directly in the null env.
+        // open-input-file is a chibi opcode — import (tein file) to get it in sandbox.
         // (scheme read) provides `read`; (scheme base) provides close-input-port.
         let code = format!(
-            r#"(import (scheme base)) (import (scheme read))
+            r#"(import (scheme base) (scheme read) (tein file))
                (let ((p (open-input-file "{tmp}")))
                  (let ((v (read p))) (close-input-port p) v))"#
         );
@@ -7526,9 +7580,9 @@ mod tests {
             .file_read(&["/tmp/"])
             .build()
             .expect("build");
-        // reading from /etc/ should be blocked by IO policy
+        // reading from /etc/ should be blocked by IO policy (C gate denies)
         let err = ctx
-            .evaluate(r#"(import (scheme base)) (open-input-file "/etc/hostname")"#)
+            .evaluate(r#"(import (tein file)) (open-input-file "/etc/hostname")"#)
             .expect_err("should be blocked");
         let msg = format!("{err:?}");
         assert!(
@@ -7558,5 +7612,181 @@ mod tests {
         } else {
             panic!("expected Modules::Only");
         }
+    }
+
+    // --- VFS shadow tests ---
+
+    #[test]
+    fn test_scheme_repl_shadow_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // (scheme repl) in sandbox should resolve to our shadow
+        let r = ctx
+            .evaluate("(import (scheme base) (scheme repl)) (procedure? interaction-environment)");
+        assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_file_shadow_importable_in_sandbox() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        let tmp = "/tmp/tein_shadow_file_test.txt";
+        std::fs::write(tmp, "shadowed").expect("write");
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("builder");
+        // (scheme file) in sandbox should resolve to our shadow
+        let r = ctx.evaluate(&format!(
+            "(import (scheme base) (scheme file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(r.expect("scheme file shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_file_shadow_denies_without_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            // no file_read configured
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (scheme file)) (open-input-file \"/etc/passwd\")");
+        assert!(
+            r.is_err(),
+            "scheme/file open-input-file denied without policy"
+        );
+    }
+
+    #[test]
+    fn test_tein_file_not_shadowed_unsandboxed() {
+        // unsandboxed: (tein file) trampolines allow all file access (no policy check)
+        // note: (scheme file) is not available in unsandboxed mode — tein's module path
+        // is VFS-only and the shadow is only registered in sandboxed contexts.
+        // (tein file) is the correct import for file ops in unsandboxed contexts.
+        let tmp = "/tmp/tein_unsandboxed_scheme_file.txt";
+        std::fs::write(tmp, "native").expect("write");
+        let ctx = Context::builder().standard_env().build().expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(import (scheme base) (tein file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(
+            r.expect("unsandboxed tein file works"),
+            Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_scheme_repl_shadow_returns_environment() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // interaction-environment should return an env (not #f, not error)
+        let r = ctx.evaluate(
+            "(import (scheme base) (scheme repl)) (let ((e (interaction-environment))) #t)",
+        );
+        assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_srfi_98_shadow_neuters_env_vars_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // srfi/98 shadow replaces the C clib — get-environment-variable always #f
+        let r = ctx
+            .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"HOME\")")
+            .expect("srfi/98 importable in sandbox");
+        assert_eq!(
+            r,
+            Value::Boolean(false),
+            "get-environment-variable neutered"
+        );
+        let r = ctx
+            .evaluate("(get-environment-variables)")
+            .expect("get-environment-variables");
+        assert_eq!(
+            r,
+            Value::Nil,
+            "get-environment-variables returns empty list"
+        );
+    }
+
+    // --- (scheme show) / (srfi 166) sandbox tests ---
+
+    #[test]
+    fn test_scheme_show_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (scheme show)) (show #f \"hello\")");
+        assert!(r.is_ok(), "scheme show importable in sandbox: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_base_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (srfi 166 base)) (show #f (displayed \"test\"))");
+        assert!(r.is_ok(), "srfi/166/base importable in sandbox: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_columnar_from_file_with_policy() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        let dir = io_test_dir("columnar_from_file");
+        let file = dir.join("lines.txt");
+        std::fs::write(&file, "line1\nline2\n").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(import (srfi 166)) (show #f (from-file \"{path}\"))"
+        ));
+        assert!(r.is_ok(), "from-file with read policy: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_columnar_from_file_denied_without_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        // from-file calls open-input-file which hits the policy check
+        let r = ctx
+            .evaluate("(import (srfi 166)) (show #f (from-file \"/tmp/nonexistent_tein_test\"))");
+        assert!(r.is_err(), "from-file without policy should fail");
     }
 }
