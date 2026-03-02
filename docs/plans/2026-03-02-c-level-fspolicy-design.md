@@ -1,6 +1,6 @@
 # C-level FsPolicy enforcement in chibi's open-*-file opcodes
 
-**status: APPROVED**
+**status: IMPLEMENTED**
 **date:** 2026-03-02
 **branch:** `feature/vfs-shadow-scheme-file-2603` (continuation)
 

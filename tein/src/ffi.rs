@@ -798,7 +798,7 @@ extern "C" fn tein_vfs_gate_check(path: *const c_char) -> c_int {
 /// Returns 1 (allow) or 0 (deny).
 #[unsafe(no_mangle)]
 extern "C" fn tein_fs_policy_check(path: *const c_char, is_read: c_int) -> c_int {
-    use crate::context::{check_fs_access, FsAccess};
+    use crate::context::{FsAccess, check_fs_access};
 
     let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
     let access = if is_read != 0 {

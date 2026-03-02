@@ -42,10 +42,7 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{
-        FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST,
-        VFS_GATE,
-    },
+    sandbox::{FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -4605,7 +4602,8 @@ mod tests {
             .build()
             .expect("builder");
 
-        let err = ctx.evaluate("(import (tein file)) (open-output-file \"/tmp/tein-io-test-nope.txt\")");
+        let err =
+            ctx.evaluate("(import (tein file)) (open-output-file \"/tmp/tein-io-test-nope.txt\")");
         assert!(err.is_err(), "write to unallowed path should be denied");
     }
 
@@ -4651,7 +4649,10 @@ mod tests {
                 .expect("builder");
 
             // the symlink points outside the allowed prefix, so should be denied
-            let code = format!(r#"(import (tein file)) (open-input-file "{}")"#, link.display());
+            let code = format!(
+                r#"(import (tein file)) (open-input-file "{}")"#,
+                link.display()
+            );
             let err = ctx.evaluate(&code);
             assert!(
                 err.is_err(),
@@ -7666,9 +7667,8 @@ mod tests {
             .build()
             .expect("builder");
         // from-file calls open-input-file which hits the policy check
-        let r = ctx.evaluate(
-            "(import (srfi 166)) (show #f (from-file \"/tmp/nonexistent_tein_test\"))",
-        );
+        let r = ctx
+            .evaluate("(import (srfi 166)) (show #f (from-file \"/tmp/nonexistent_tein_test\"))");
         assert!(r.is_err(), "from-file without policy should fail");
     }
 }

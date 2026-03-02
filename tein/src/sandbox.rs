@@ -38,6 +38,13 @@
 //! Paths are canonicalised before prefix-checking, so symlink and `..`
 //! traversals are resolved.
 //!
+//! Enforcement is at the C opcode level: `eval.c` patches F and G call
+//! `tein_fs_check_access()` before `fopen()` in `sexp_open_input_file_op`
+//! and `sexp_open_output_file_op`. The C dispatcher checks `tein_fs_policy_gate`
+//! (thread-local, 0=off, 1=check) and calls the rust callback
+//! `tein_fs_policy_check` which delegates to [`FsPolicy`] prefix matching.
+//! `file-exists?` and `delete-file` remain rust trampolines (no opcode equivalents).
+//!
 //! # VFS gate
 //!
 //! Module imports in sandboxed contexts are restricted automatically:
