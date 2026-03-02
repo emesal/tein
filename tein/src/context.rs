@@ -4880,7 +4880,7 @@ mod tests {
 
     #[test]
     fn test_open_input_file_unsandboxed_passthrough() {
-        // unsandboxed: open-input-file trampoline delegates to chibi original unconditionally
+        // unsandboxed: open-input-file is the chibi opcode; FS gate is off, all access allowed
         let tmp = "/tmp/tein_open_unsandboxed_test.txt";
         std::fs::write(tmp, "test").expect("write");
         let ctx = Context::builder().standard_env().build().expect("builder");
