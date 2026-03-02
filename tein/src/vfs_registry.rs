@@ -573,12 +573,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/file: VFS shadow — sandboxed contexts resolve to (tein file) trampolines.
+    // scheme/file: VFS shadow — sandboxed contexts re-export from (tein file).
+    // policy enforcement for open-*-file is at the C opcode level (eval.c patches F, G).
     // unsandboxed contexts use chibi's native scheme/file directly.
-    //
-    // (tein file) exports the 4 open-*-file trampolines under internal names
-    // (tein-open-input-file etc.) so chibi can resolve them at library compile time.
-    // this shadow imports and re-exports them under the standard r7rs names.
     VfsEntry {
         path: "scheme/file",
         deps: &["tein/file"],
@@ -589,12 +586,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (scheme file)
-  (import (tein file)
-          (rename (tein file)
-                  (tein-open-input-file        open-input-file)
-                  (tein-open-binary-input-file  open-binary-input-file)
-                  (tein-open-output-file        open-output-file)
-                  (tein-open-binary-output-file open-binary-output-file)))
+  (import (tein file))
   (export file-exists? delete-file
           open-input-file open-binary-input-file
           open-output-file open-binary-output-file
