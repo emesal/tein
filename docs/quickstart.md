@@ -44,7 +44,8 @@ Two constructors cover most use cases:
 ```rust
 use tein::{Context, Value};
 
-// minimal environment — core syntax only: define, lambda, if, let, begin, quote, set!
+// primitive environment — all built-in opcodes (arithmetic, car/cdr, etc.) and syntax,
+// but no standard library: no map, for-each, string-split, call/cc, etc.
 let ctx = Context::new()?;
 let result = ctx.evaluate("(+ 1 2 3)")?;
 assert_eq!(result, Value::Integer(6));
@@ -97,8 +98,13 @@ let ctx = Context::new()?;
 let n: i64  = ctx.evaluate("42")?.as_integer().unwrap();
 let f: f64  = ctx.evaluate("3.14")?.as_float().unwrap();
 let b: bool = ctx.evaluate("#t")?.as_bool().unwrap();
-let s: &str = ctx.evaluate(r#""hello""#)?.as_string().unwrap();
-let v: &[Value] = ctx.evaluate("(list 10 20 30)")?.as_list().unwrap();
+
+// as_string() and as_list() borrow from the Value — bind it first
+let val = ctx.evaluate(r#""hello""#)?;
+let s: &str = val.as_string().unwrap();
+
+let val = ctx.evaluate("(list 10 20 30)")?;
+let v: &[Value] = val.as_list().unwrap();
 ```
 
 All helpers return `None` when the value is the wrong type — no panics.
