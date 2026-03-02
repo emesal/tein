@@ -42,7 +42,10 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
+    sandbox::{
+        FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST,
+        VFS_GATE,
+    },
 };
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
@@ -1732,6 +1735,7 @@ impl ContextBuilder {
             // save current gate values before overwriting — restored on drop so that
             // a second context on the same thread (sequential or nested) is not affected.
             let prev_vfs_gate = VFS_GATE.with(|cell| cell.get());
+            let prev_fs_gate = FS_GATE.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
             let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
@@ -1745,8 +1749,11 @@ impl ContextBuilder {
                     registry_safe_allowlist, unexported_stubs,
                 };
 
-                // mark sandboxed so (tein file) trampolines apply policy
+                // mark sandboxed so policy enforcement applies
                 IS_SANDBOXED.with(|c| c.set(true));
+                // arm FS policy gate — C opcodes will call tein_fs_policy_check
+                FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
+                ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
                 crate::sandbox::register_vfs_shadows(); // inject shadow modules before gate is armed
 
                 let source_env = ffi::sexp_context_env(ctx);
@@ -1853,6 +1860,7 @@ impl ContextBuilder {
                 ctx,
                 step_limit: self.step_limit,
                 prev_vfs_gate,
+                prev_fs_gate,
                 prev_fs_policy,
                 prev_vfs_allowlist,
                 prev_is_sandboxed,
@@ -1953,6 +1961,8 @@ pub struct Context {
     step_limit: Option<u64>,
     /// previous VFS_GATE level, restored on drop
     prev_vfs_gate: u8,
+    /// previous FS_GATE level, restored on drop
+    prev_fs_gate: u8,
     /// previous FS_POLICY value, restored on drop
     prev_fs_policy: Option<FsPolicy>,
     /// previous VFS_ALLOWLIST, restored on drop
@@ -3085,6 +3095,8 @@ impl Drop for Context {
         // unsandboxed contexts (default), so this is safe when no outer context exists.
         VFS_GATE.with(|cell| cell.set(self.prev_vfs_gate));
         unsafe { ffi::vfs_gate_set(self.prev_vfs_gate as i32) };
+        FS_GATE.with(|cell| cell.set(self.prev_fs_gate));
+        unsafe { ffi::fs_policy_gate_set(self.prev_fs_gate as i32) };
         VFS_ALLOWLIST.with(|cell| {
             *cell.borrow_mut() = std::mem::take(&mut self.prev_vfs_allowlist);
         });

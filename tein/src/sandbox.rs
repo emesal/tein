@@ -131,6 +131,11 @@ pub(crate) const GATE_OFF: u8 = 0;
 /// numeric gate level for C interop — rust callback checks the allowlist.
 pub(crate) const GATE_CHECK: u8 = 1;
 
+/// numeric FS policy gate level for C interop. mirrors `tein_fs_policy_gate` in `tein_shim.c`.
+pub(crate) const FS_GATE_OFF: u8 = 0;
+/// numeric FS policy gate level — rust callback checks IS_SANDBOXED + FsPolicy.
+pub(crate) const FS_GATE_CHECK: u8 = 1;
+
 thread_local! {
     /// numeric gate level (0=off, 1=check). set during Context::build(), cleared on drop.
     pub(crate) static VFS_GATE: Cell<u8> = const { Cell::new(GATE_OFF) };
@@ -138,6 +143,10 @@ thread_local! {
     /// the resolved allowlist, populated when gate is `Allow`.
     /// read by the C→rust callback (`tein_vfs_gate_check`) during module resolution.
     pub(crate) static VFS_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
+    /// FS policy gate level (0=off, 1=check). set during Context::build(), cleared on drop.
+    /// when armed, C-level `open-*-file` opcodes call `tein_fs_policy_check` (rust callback).
+    pub(crate) static FS_GATE: Cell<u8> = const { Cell::new(FS_GATE_OFF) };
 }
 
 /// resolve transitive deps from `VFS_REGISTRY`.
