@@ -7607,6 +7607,29 @@ mod tests {
         assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
     }
 
+    #[test]
+    fn test_srfi_98_shadow_neuters_env_vars_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // srfi/98 shadow replaces the C clib — get-environment-variable always #f
+        let r = ctx
+            .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"HOME\")")
+            .expect("srfi/98 importable in sandbox");
+        assert_eq!(r, Value::Boolean(false), "get-environment-variable neutered");
+        let r = ctx
+            .evaluate("(get-environment-variables)")
+            .expect("get-environment-variables");
+        assert_eq!(
+            r,
+            Value::Nil,
+            "get-environment-variables returns empty list"
+        );
+    }
+
     // --- (scheme show) / (srfi 166) sandbox tests ---
 
     #[test]

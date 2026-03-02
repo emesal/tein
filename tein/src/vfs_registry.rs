@@ -901,6 +901,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     },
     // srfi/98: env var access. clib for unsandboxed; shadow neuters in sandbox.
     // needed by srfi/128 (hash salt) in the (scheme show) dep chain.
+    // two entries: Embedded (C clib, unsandboxed) + Shadow (neutered stubs, sandboxed).
     VfsEntry {
         path: "srfi/98",
         deps: &[],
@@ -913,6 +914,18 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         }),
         default_safe: true,
         source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    // srfi/98: VFS shadow — sandboxed contexts get neutered env var stubs.
+    // get-environment-variable always returns #f; get-environment-variables returns '().
+    VfsEntry {
+        path: "srfi/98",
+        deps: &[],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
         feature: None,
         shadow_sld: Some("\
 (define-library (srfi 98)
