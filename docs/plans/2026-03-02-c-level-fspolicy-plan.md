@@ -23,12 +23,12 @@
 - [x] Task 5: Remove open-*-file trampolines + ORIGINAL_PROCS + IoOp
 - [x] Task 6: Update (tein file) scheme files in chibi fork (pushed to fork)
 - [x] Task 7: Simplify (scheme file) shadow + update vfs_registry
-- [ ] Task 8: Integration tests — srfi/166/columnar from-file
-- [ ] Task 9: Docs — AGENTS.md + sandbox.rs comment + design doc
-- [ ] Task 10: Final verification + plan update + handoff
+- [x] Task 8: Integration tests — srfi/166/columnar from-file (both pass, no changes needed)
+- [x] Task 9: Docs — AGENTS.md + sandbox.rs comment + design doc
+- [x] Task 10: Final verification + plan update + handoff
 - [ ] Task 11: PR creation
 
-**status:** 356 lib tests pass, 0 failures. lint not yet run.
+**status:** 714 tests pass (356 lib + integration + macros + sexp), 0 failures. lint clean.
 
 ### notes for continued execution
 

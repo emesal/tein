@@ -8,7 +8,7 @@
 
 ## progress
 
-tasks 1–8 complete. tasks 9–12 remain.
+tasks 1–8 complete. C-level FsPolicy refactor (separate plan) complete. task 12 (PR) remains.
 
 ### completed
 - **task 1:** branch created, GH issue #97 opened for deferred `(scheme eval)` + full REPL
@@ -20,10 +20,22 @@ tasks 1–8 complete. tasks 9–12 remain.
 - **task 7:** VFS shadow integration tests written and passing (710/710). also fixed `(scheme file)` shadow — original `(define open-input-file open-input-file)` approach didn't work (chibi compiles free-var refs as UNDEF slots at library compile time). fix: register open-*-file trampolines under both R7RS names AND internal `tein-open-*-file` names; export internal names from `(tein file)` sld; shadow sld uses `(rename (tein file) ...)` to import them as R7RS names. fork updated and pushed (`d35f167e`).
 - **task 8:** RESOLVED. root cause was missing `ClibEntry` for `srfi/27`, `srfi/95`, `srfi/98` — all three use `include-shared` (C extensions) but had `clib: None`. this was NOT sandbox-specific; they failed in unsandboxed contexts too. fix: added clibs + neutered `(tein process)` trampolines for sandbox + added `scheme/process-context` and `srfi/98` shadows. see batch 4 details below.
 
-### remaining (tasks 9–12)
-- **task 9:** `srfi/166/columnar` from-file integration tests with/without FsPolicy
-- **task 10:** docs update — AGENTS.md sandboxing flow, design doc status (sandbox.rs comment block already updated in batch 4)
-- **task 11:** final verification + lint + plan update commit
+### completed via C-level FsPolicy plan (`docs/plans/2026-03-02-c-level-fspolicy-plan.md`)
+- **task 9 (original):** `srfi/166/columnar` from-file integration tests — both pass with C-level enforcement
+- **task 10 (original):** docs — AGENTS.md sandboxing/IO flows updated, sandbox.rs comment updated, design doc marked IMPLEMENTED
+- **task 11 (original):** final verification — 714 tests pass, lint clean
+
+### C-level FsPolicy refactor (completed)
+moved `open-*-file` FsPolicy enforcement from rust trampolines to C-level opcodes:
+- `tein_shim.c`: FS policy gate + callback dispatcher
+- `eval.c`: patches F (open-input-file) and G (open-output-file)
+- `ffi.rs`: `tein_fs_policy_check` C→rust callback
+- `sandbox.rs`: `FS_GATE` thread-local, armed in sandboxed build
+- removed: `ORIGINAL_PROCS`, `capture_file_originals`, `IoOp`, 4 open-*-file trampolines
+- `(tein file)` simplified: imports `(chibi)` for opcodes
+- `(scheme file)` shadow simplified: pure re-export from `(tein file)`
+
+### remaining
 - **task 12:** PR creation (base branch: `dev`, closes #91)
 
 ---
@@ -98,24 +110,24 @@ the previous blocker hypothesis about VFS gate / clib path handling / `(chibi as
 
 ## architecture notes (all batches)
 
-### (tein file) export architecture
+### (tein file) export architecture (post C-level FsPolicy)
 
-**`(tein file)` exports 10 symbols**: `file-exists?`, `delete-file`, `call-with-input-file`, `call-with-output-file`, `with-input-from-file`, `with-output-to-file`, **plus** `tein-open-input-file`, `tein-open-binary-input-file`, `tein-open-output-file`, `tein-open-binary-output-file`.
+**`(tein file)` exports 10 symbols**: `file-exists?`, `delete-file`, `open-input-file`, `open-binary-input-file`, `open-output-file`, `open-binary-output-file`, `call-with-input-file`, `call-with-output-file`, `with-input-from-file`, `with-output-to-file`.
 
-the 4 `open-*-file` trampolines are registered under BOTH the R7RS names (for direct env use) AND internal `tein-open-*-file` names (for library-level export). the internal names are exported by `(tein file)` so the `(scheme file)` shadow can import and re-export them as R7RS names via `(rename (tein file) ...)`.
+`open-*-file` are chibi opcodes from `(chibi)` — imported by `(tein file)` and re-exported. FsPolicy enforcement is at the C opcode level (eval.c patches F, G). `file-exists?` and `delete-file` are rust trampolines. the 4 higher-order wrappers are scheme-defined in `file.scm`.
 
-### (scheme file) shadow — import+rename approach
+### (scheme file) shadow — pure re-export
 
-the shadow `.sld` uses:
+the shadow `.sld` is a simple re-export from `(tein file)`:
 ```scheme
 (define-library (scheme file)
-  (import (tein file)
-          (rename (tein file)
-                  (tein-open-input-file        open-input-file)
-                  ...))
-  (export ...))
+  (import (tein file))
+  (export file-exists? delete-file
+          open-input-file open-binary-input-file
+          open-output-file open-binary-output-file
+          call-with-input-file call-with-output-file
+          with-input-from-file with-output-to-file))
 ```
-this works because chibi resolves the renamed imports from `(tein file)`'s export list, which finds them in the top-level env via the env chain at import time (not compile time).
 
 ### (scheme file) unsandboxed — NOT available
 
@@ -140,8 +152,11 @@ trampolines check `IS_SANDBOXED` thread-local:
 
 ### chibi fork state
 
-`~/forks/chibi-scheme` at `d35f167e` (batch 3):
-- `file.sld` now exports 10 symbols (added `tein-open-*-file` internal names)
+`~/forks/chibi-scheme` (branch `emesal-tein`):
+- `tein_shim.c`: FS policy gate + `tein_fs_check_access` dispatcher + `tein_fs_policy_gate_set`
+- `eval.c`: patches F (open-input-file) + G (open-output-file) — call `tein_fs_check_access` before `fopen()`
+- `file.sld`: imports `(chibi)` for opcodes, exports 10 symbols (R7RS names)
+- `file.scm`: 4 higher-order wrappers, updated header comment
 
 ---
 
@@ -161,4 +176,4 @@ in `sandbox.rs`:
 
 ---
 
-## 712/712 tests green, lint clean. last commit: `3a80842`.
+## 714/714 tests green, lint clean. last commit: `600fe2b`.
