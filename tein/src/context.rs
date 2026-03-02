@@ -7802,4 +7802,42 @@ mod tests {
         let r = ctx.evaluate("(import (srfi 166 base)) (show #f (displayed \"test\"))");
         assert!(r.is_ok(), "srfi/166/base importable in sandbox: {r:?}");
     }
+
+    #[test]
+    fn test_srfi_166_columnar_from_file_with_policy() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        let dir = io_test_dir("columnar_from_file");
+        let file = dir.join("lines.txt");
+        std::fs::write(&file, "line1\nline2\n").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(import (srfi 166)) (show #f (from-file \"{path}\"))"
+        ));
+        assert!(r.is_ok(), "from-file with read policy: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_columnar_from_file_denied_without_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        // from-file calls open-input-file which hits the policy check
+        let r = ctx.evaluate(
+            "(import (srfi 166)) (show #f (from-file \"/tmp/nonexistent_tein_test\"))",
+        );
+        assert!(r.is_err(), "from-file without policy should fail");
+    }
 }
