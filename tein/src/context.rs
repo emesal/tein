@@ -2781,21 +2781,12 @@ impl Context {
         Ok(())
     }
 
-    /// Register all `(tein file)` trampolines.
+    /// Register `file-exists?` and `delete-file` trampolines for `(tein file)`.
     ///
-    /// The 4 `open-*-file` trampolines are registered under their canonical
-    /// R7RS names (`open-input-file` etc.) to enforce policy for all code
-    /// regardless of whether `(tein file)` is explicitly imported. Sandboxed
-    /// contexts have these in the null_env; code that doesn't import `(tein
-    /// file)` still gets policy enforcement when calling `open-input-file`.
-    ///
-    /// `(tein file)` exports 6 symbols: `file-exists?`, `delete-file`, and
-    /// the 4 higher-order wrappers (`call-with-*`, `with-*-from/to-file`)
-    /// defined in `file.scm`. The 4 primitive trampolines are registered
-    /// Register `file-exists?` and `delete-file` trampolines.
-    ///
-    /// `open-*-file` enforcement is handled at the C opcode level
-    /// (eval.c patches F, G) via the FS policy gate callback.
+    /// `open-*-file` enforcement is handled at the C opcode level via the FS
+    /// policy gate (eval.c patches F, G) — no rust trampolines are needed for
+    /// those. `(tein file)` also exports 4 higher-order wrappers
+    /// (`call-with-*`, `with-*-from/to-file`) defined in `file.scm`.
     /// Called during `build()` after context creation.
     fn register_file_module(&self) -> Result<()> {
         self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
