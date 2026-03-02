@@ -80,37 +80,33 @@ the two identities converge in agentic and stochastic use cases: the rust ecosys
 - [x] init closure, `reset()`, shared channel protocol (`thread.rs`)
 - [x] `ContextBuilder` gains `Clone` (required for fresh mode rebuild)
 
----
-
-## roadmap
-
 ### milestone 8 — rust ecosystem bridge
 
 expose high-value rust crates as idiomatic r7rs scheme modules. this is the "scheme with rust inside" story — building blocks that scheme programs can import and compose freely.
 
-**`(tein json)`** — JSON via serde_json. bidirectional: scheme values ↔ JSON strings, leveraging the existing serde foundation in tein-sexp.
+- [x] `#[tein_module]` / `#[tein_const]` proc macros — rust→scheme module generation with doc-attr scraping
+- [x] `(tein docs)` — runtime doc alists from `#[tein_module]` for LLM context dumps
+- [x] `(tein json)` — JSON via serde_json, bidirectional scheme↔JSON
+- [x] `(tein toml)` — TOML parsing and serialisation
+- [x] `(tein uuid)` — UUID generation
+- [x] `(tein time)` — r7rs `current-second`, `current-jiffy`, `jiffies-per-second`
+- [x] `(tein process)` — exit escape hatch + neutered env/argv trampolines for sandbox
+- [x] `(tein file)` / `(tein load)` — R7RS file IO with FsPolicy + VFS-restricted load
+- [x] feature-gated format modules: `json`/`toml`/`uuid`/`time` cargo feature flags
+- [x] cdylib extension system: `tein-ext` stable C ABI vtable, `ctx.load_extension()`
+- [x] type parity: `Value::Vector`, `Value::Char`, `Value::Bytevector` fully bridged
 
-**`(tein regex)`** — regex via the `regex` crate.
+**still open in M8:**
 
-**`(tein crypto)`** — hashing (blake3, sha2) and CSPRNG (rand).
+- [ ] `(tein regex)` / SRFI-115 (`(chibi regexp)`) — issues #85, #37
+- [ ] `(tein crypto)` — hashing (blake3, sha2) and CSPRNG — issue #38
+- [ ] cross-platform cdylib loading (.dylib macOS, .dll Windows) — issue #66
+- [ ] SRFI-19 time data types via rust trampolines — issue #84
+- [ ] foreign type constructor macro — issue #41
 
-**`(tein uuid)`** — UUID generation.
+---
 
-**`#[tein_module]` proc macro** — generalises the boilerplate for exposing rust crates as scheme modules. auto-generates scheme-side glue (predicates, constructors, method procs) from annotated rust. makes adding further modules fast and consistent.
-
-```rust
-// rough sketch — exact design tbd in implementation planning
-#[tein_module("regex")]
-mod regex_module {
-    #[tein_fn] fn compile(pattern: &str) -> Result<Regex, Error> { ... }
-    #[tein_type] impl Regex {
-        #[tein_method] fn is_match(&self, text: &str) -> bool { ... }
-    }
-}
-// → generates (tein regex) VFS module with make-regex, regex?, regex-is-match, etc.
-```
-
-**foreign type constructor macro** — ergonomic rust-side `make-type` registration, complementing `#[tein_module]` for simpler cases where a full module proc macro is overkill.
+## roadmap
 
 ### milestone 9 — tein as a scheme
 
@@ -128,7 +124,7 @@ tein as a first-class scheme implementation, not just a rust library.
 
 **`(tein introspect)`** — environment introspection API for LLM agents. exposes chibi's existing runtime knowledge — env bindings, procedure arity, module exports, binding metadata — as scheme procedures. an LLM working inside a tein sandbox can query what's in scope, what arguments a procedure takes, and what modules are available, without needing an external LSP server or static analyser. thin shim over chibi internals, not a reimplementation. complements `(tein docs)` by answering structural questions about the live environment.
 
-**scheme test harness** — run `.scm` files as cargo integration tests. enables testing scheme-level behaviour idiomatically.
+**scheme test harness** — ✓ shipped: `tests/scheme_tests.rs` + `tests/scheme/*.scm` integration runner.
 
 ### milestone 10 — capability modules
 
