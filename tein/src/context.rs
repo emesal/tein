@@ -7670,7 +7670,11 @@ mod tests {
         let r = ctx
             .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"HOME\")")
             .expect("srfi/98 importable in sandbox");
-        assert_eq!(r, Value::Boolean(false), "get-environment-variable neutered");
+        assert_eq!(
+            r,
+            Value::Boolean(false),
+            "get-environment-variable neutered"
+        );
         let r = ctx
             .evaluate("(get-environment-variables)")
             .expect("get-environment-variables");
