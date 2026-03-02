@@ -272,8 +272,8 @@ let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 let port = ctx.open_output_port(SharedWriter(Arc::clone(&buf)))?;
 
 // pass the port Value to Scheme's display/write/newline
-let add_fn = ctx.evaluate("display")?;
-ctx.call(&add_fn, &[Value::String("hello".into()), port])?;
+let display_fn = ctx.evaluate("display")?;
+ctx.call(&display_fn, &[Value::String("hello".into()), port])?;
 
 let written = buf.lock().unwrap();
 assert_eq!(&*written, b"hello");
