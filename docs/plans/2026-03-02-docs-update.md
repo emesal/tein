@@ -29,9 +29,9 @@ is a first-class narrative in `tein-for-agents.md`.
 - [x] Task 6: docs/rust-scheme-bridge.md (commit 378018a — register_reader takes b'j' u8, not char)
 - [x] Task 7: docs/modules.md (commit 1268f66 — tein/process IS in Modules::Safe; added tein/file and tein/load sections)
 - [x] Task 8: docs/extensions.md (commit 236f792)
-- [ ] Task 9: docs/tein-for-agents.md
-- [ ] Task 10: docs/reference.md
-- [ ] Task 11: docs/guide.md rewrite as index
+- [x] Task 9: docs/tein-for-agents.md (commit ec59b92)
+- [x] Task 10: docs/reference.md (commit 9d1b15b — Value::Unspecified displays as #<unspecified>; added Vector + Other variants; tein/process IS in Safe)
+- [x] Task 11: docs/guide.md rewrite as index (commit 09542f5)
 - [ ] Task 12: ARCHITECTURE.md update
 - [ ] Task 13: ROADMAP.md update
 - [ ] Task 14: final pass + PR
