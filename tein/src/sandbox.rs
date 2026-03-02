@@ -172,7 +172,8 @@ pub fn registry_resolve_deps(paths: &[&str]) -> Vec<String> {
         }
         result.push(path.to_string());
 
-        if let Some(entry) = VFS_REGISTRY.iter().find(|e| e.path == path) {
+        // union deps from all entries with this path (handles Embedded + Shadow pairs)
+        for entry in VFS_REGISTRY.iter().filter(|e| e.path == path) {
             for dep in entry.deps {
                 if !seen.contains(dep) {
                     stack.push(dep);

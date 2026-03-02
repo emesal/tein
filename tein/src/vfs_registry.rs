@@ -492,7 +492,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/repl: default_safe: false — exports interaction-environment
+    // scheme/repl: default_safe: false — exports interaction-environment (unsafe in sandbox).
+    // two entries: Embedded (chibi native, unsandboxed) + Shadow (neutered, sandboxed).
+    // registry_resolve_deps unions deps across both entries.
     VfsEntry {
         path: "scheme/repl",
         deps: &[],
