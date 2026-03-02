@@ -7789,4 +7789,52 @@ mod tests {
             .evaluate("(import (srfi 166)) (show #f (from-file \"/tmp/nonexistent_tein_test\"))");
         assert!(r.is_err(), "from-file without policy should fail");
     }
+
+    // --- clib loading regression tests (issue #98) ---
+
+    #[test]
+    fn test_chibi_weak_clib_loads() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(1_000_000)
+            .build()
+            .expect("build");
+        // chibi/weak requires include-shared "weak" — fails without ClibEntry
+        let result = ctx
+            .evaluate(
+                "(import (chibi weak)) \
+                 (let ((e (make-ephemeron 'key 'value))) \
+                   (and (ephemeron? e) \
+                        (eq? (ephemeron-key e) 'key) \
+                        (eq? (ephemeron-value e) 'value)))",
+            )
+            .expect("chibi/weak should load and work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_chibi_weak_clib_loads_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(1_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (chibi weak)) (ephemeron? (make-ephemeron 'a 'b))")
+            .expect("chibi/weak should load in sandbox");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    // NOTE: scheme/time has a deep dependency chain (scheme/process-context,
+    // scheme/file, scheme/read, scheme/time/tai-to-utc-offset) and performs
+    // file IO at load time (leap second list). it is default_safe: false.
+    // the ClibEntry fix (issue #98) is verified structurally — it follows the
+    // same pattern as all other clib entries and the build succeeds (the C
+    // source compiles and is linked into the static library table).
+    // a full integration test for (scheme time) would require either:
+    //   - a non-sandboxed context with filesystem access to chibi's scheme/process-context, or
+    //   - making scheme/process-context available as both Embedded and Shadow
+    // neither is warranted for a clib audit fix.
 }
