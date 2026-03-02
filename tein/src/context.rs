@@ -1609,7 +1609,7 @@ impl ContextBuilder {
                 // arm FS policy gate — C opcodes will call tein_fs_policy_check
                 FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
                 ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
-                crate::sandbox::register_vfs_shadows(); // inject shadow modules before gate is armed
+                crate::sandbox::register_vfs_shadows(); // inject shadow modules before VFS gate is armed
 
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
