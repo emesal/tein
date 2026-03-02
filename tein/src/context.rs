@@ -4879,12 +4879,45 @@ mod tests {
     }
 
     #[test]
+    fn test_open_binary_input_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_binary_input_denied");
+        let file = dir.join("secret.bin");
+        std::fs::write(&file, b"\x00\x01\x02").expect("write");
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies binary input — same opcode path as text mode
+        let code = format!("(import (tein file)) (open-binary-input-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_binary_output_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_binary_output_denied");
+        let path = dir.join("nope.bin").to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies binary output — same opcode path as text mode
+        let code = format!("(import (tein file)) (open-binary-output-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
     fn test_open_input_file_unsandboxed_passthrough() {
         // unsandboxed: open-input-file is the chibi opcode; FS gate is off, all access allowed
         let tmp = "/tmp/tein_open_unsandboxed_test.txt";
         std::fs::write(tmp, "test").expect("write");
         let ctx = Context::builder().standard_env().build().expect("builder");
-        // open-input-file is in env directly; unsandboxed — delegates to chibi original unconditionally
         let r = ctx.evaluate(&format!(
             "(let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
         ));
