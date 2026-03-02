@@ -32,8 +32,8 @@ is a first-class narrative in `tein-for-agents.md`.
 - [x] Task 9: docs/tein-for-agents.md (commit ec59b92)
 - [x] Task 10: docs/reference.md (commit 9d1b15b — Value::Unspecified displays as #<unspecified>; added Vector + Other variants; tein/process IS in Safe)
 - [x] Task 11: docs/guide.md rewrite as index (commit 09542f5)
-- [ ] Task 12: ARCHITECTURE.md update
-- [ ] Task 13: ROADMAP.md update
+- [x] Task 12: ARCHITECTURE.md update (commit bd8be05 — M8 complete, 7 eval.c patches, new src files, VFS shadow + exit flows, docs/ note, b'j' fix)
+- [x] Task 13: ROADMAP.md update (commit cd85f1b — M8 items to completed, open M8 work listed, scheme test harness marked shipped)
 - [ ] Task 14: final pass + PR
 
 ## corrections discovered during implementation
