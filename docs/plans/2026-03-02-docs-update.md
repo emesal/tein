@@ -34,7 +34,7 @@ is a first-class narrative in `tein-for-agents.md`.
 - [x] Task 11: docs/guide.md rewrite as index (commit 09542f5)
 - [x] Task 12: ARCHITECTURE.md update (commit bd8be05 — M8 complete, 7 eval.c patches, new src files, VFS shadow + exit flows, docs/ note, b'j' fix)
 - [x] Task 13: ROADMAP.md update (commit cd85f1b — M8 items to completed, open M8 work listed, scheme test harness marked shipped)
-- [ ] Task 14: final pass + PR
+- [x] Task 14: final pass + PR (PR #102)
 
 ## corrections discovered during implementation
 
