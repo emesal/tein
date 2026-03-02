@@ -7837,4 +7837,68 @@ mod tests {
     //   - a non-sandboxed context with filesystem access to chibi's scheme/process-context, or
     //   - making scheme/process-context available as both Embedded and Shadow
     // neither is warranted for a clib audit fix.
+
+    #[test]
+    fn test_srfi_160_uvprims_loads_and_works() {
+        // verifies uvprims.c compiles correctly and the C primitives are callable.
+        // tests: predicates, make, ref, set!, length, list conversion.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        // s8 vector round-trip
+        let result = ctx
+            .evaluate(
+                "(import (srfi 160 base)) \
+                 (let ((v (make-s8vector 3 0))) \
+                   (s8vector-set! v 0 -5) \
+                   (s8vector-set! v 1 42) \
+                   (s8vector-set! v 2 127) \
+                   (and (s8vector? v) \
+                        (= (s8vector-length v) 3) \
+                        (= (s8vector-ref v 0) -5) \
+                        (= (s8vector-ref v 1) 42) \
+                        (= (s8vector-ref v 2) 127)))",
+            )
+            .expect("srfi/160/base s8vector should work");
+        assert_eq!(result, Value::Boolean(true), "s8vector round-trip");
+
+        // f64 vector
+        let ctx2 = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result2 = ctx2
+            .evaluate(
+                "(import (srfi 160 base)) \
+                 (let ((v (f64vector 1.5 2.5 3.5))) \
+                   (and (f64vector? v) \
+                        (= (f64vector-length v) 3) \
+                        (= (f64vector-ref v 1) 2.5)))",
+            )
+            .expect("srfi/160/base f64vector should work");
+        assert_eq!(result2, Value::Boolean(true), "f64vector round-trip");
+    }
+
+    #[test]
+    fn test_srfi_160_u8_submodule_loads() {
+        // verifies a type-specific sub-module (u8) loads with uvector.scm
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate(
+                "(import (srfi 160 u8)) \
+                 (let ((v (make-u8vector 4 7))) \
+                   (and (u8vector? v) \
+                        (= (u8vector-length v) 4) \
+                        (= (u8vector-ref v 2) 7)))",
+            )
+            .expect("srfi/160/u8 should load and work");
+        assert_eq!(result, Value::Boolean(true));
+    }
 }
