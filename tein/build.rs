@@ -144,13 +144,16 @@ fn collect_include_files(source: &str, sld_dir: &str) -> Vec<String> {
             {
                 for arg in items.iter().skip(1) {
                     if let SexpKind::String(file) = &arg.kind {
-                        // resolve relative to sld_dir
-                        let resolved = if sld_dir.is_empty() {
+                        // resolve relative to sld_dir, then normalise away any ../
+                        // so that cross-directory includes (e.g. "../166/show.scm"
+                        // from lib/srfi/159/) produce canonical paths like
+                        // "lib/srfi/166/show.scm" that match VFS table keys.
+                        let joined = if sld_dir.is_empty() {
                             file.clone()
                         } else {
                             format!("{sld_dir}/{file}")
                         };
-                        out.push(resolved);
+                        out.push(normalise_path(&joined));
                     }
                 }
                 return; // don't recurse further into include args
@@ -167,6 +170,23 @@ fn collect_include_files(source: &str, sld_dir: &str) -> Vec<String> {
     }
 
     result
+}
+
+/// lexically normalise a `/`-separated path without touching the filesystem.
+/// collapses `foo/../bar` → `bar`, `./foo` → `foo`, repeated `/` → single `/`.
+fn normalise_path(path: &str) -> String {
+    use std::path::Component;
+    let mut parts: Vec<&str> = Vec::new();
+    for component in std::path::Path::new(path).components() {
+        match component {
+            Component::Normal(s) => parts.push(s.to_str().expect("non-utf8 path")),
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    parts.join("/")
 }
 
 /// check whether a cargo feature is enabled at build time (mirrors sandbox.rs)
