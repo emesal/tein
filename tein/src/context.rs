@@ -1311,6 +1311,17 @@ unsafe extern "C" fn command_line_trampoline(
 /// via `check_exit()` and returns `Ok(value)` to the rust caller.
 ///
 /// semantics: `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj
+///
+/// **r7rs deviation**: r7rs `exit` must run all `dynamic-wind` "after" thunks
+/// before handing control to the OS. tein's `exit` does **not** — it immediately
+/// aborts the VM by throwing an exception, which is `emergency-exit` semantics.
+/// tein has no unwind continuation established around each `evaluate()` call, so
+/// r7rs-compliant exit (with dynamic-wind cleanup) would require an architectural
+/// change. tracked in GH #101.
+///
+/// both `exit` and `emergency-exit` therefore have identical emergency-exit
+/// semantics today. a future standalone interpreter host can wrap `evaluate()` in
+/// a continuation and re-route `exit` through it to achieve correct cleanup.
 unsafe extern "C" fn exit_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1694,8 +1705,12 @@ impl ContextBuilder {
             }
 
             // set FsPolicy if file_read() or file_write() was configured.
-            // placed outside the sandbox block so it works for both sandboxed and
-            // unsandboxed contexts with file policy configured.
+            // note: file_read()/file_write() auto-activate sandboxed(Modules::Safe)
+            // when called without an explicit sandboxed() call, so FS_POLICY is always
+            // paired with IS_SANDBOXED=true in practice. the FS_GATE (C-level opcode
+            // enforcement) is only armed inside the sandbox block above — unsandboxed
+            // + FsPolicy is unreachable via the public API. FsPolicy is placed here
+            // (outside the sandbox block) as a pure data write; the C gate remains off.
             {
                 let file_read_prefixes = self.file_read_prefixes.take();
                 let file_write_prefixes = self.file_write_prefixes.take();
@@ -4409,6 +4424,31 @@ mod tests {
         ctx.evaluate("(import (tein process))").unwrap();
         let r = ctx.evaluate("(begin (exit \"done\") 999)").unwrap();
         assert_eq!(r, Value::String("done".to_string()));
+    }
+
+    #[test]
+    fn test_tein_process_exit_skips_dynamic_wind() {
+        // r7rs deviation (GH #101): tein's exit does NOT run dynamic-wind
+        // "after" thunks — it has emergency-exit semantics. this test asserts
+        // the *current* behaviour. update when GH #101 is fixed.
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        // in r7rs-compliant exit, the after thunk would run before returning.
+        // tein exits immediately, so we get the exit value directly.
+        let r = ctx
+            .evaluate(
+                "(dynamic-wind \
+                   (lambda () #f) \
+                   (lambda () (exit 42)) \
+                   (lambda () (error \"after thunk ran — unexpected\")))",
+            )
+            .unwrap();
+        // exits with 42; after thunk never runs (no error thrown)
+        assert_eq!(
+            r,
+            Value::Integer(42),
+            "exit bypasses dynamic-wind after thunk (GH #101)"
+        );
     }
 
     // --- phase 3: timeout context ---

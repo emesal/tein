@@ -617,7 +617,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     },
     // scheme/process-context: VFS shadow — re-exports from (tein process).
     // trampolines neuter env vars, command-line in sandboxed contexts.
-    // exit uses (tein process) eval escape hatch; emergency-exit aliases exit.
+    // exit + emergency-exit both use the (tein process) eval escape hatch:
+    // neither runs dynamic-wind "after" thunks (emergency-exit semantics).
+    // r7rs exit should run them; see GH #101 for the full situation.
     VfsEntry {
         path: "scheme/process-context",
         deps: &["tein/process"],
