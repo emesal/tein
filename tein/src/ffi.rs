@@ -203,6 +203,9 @@ unsafe extern "C" {
     // VFS module gate (for sandboxed standard env)
     pub fn tein_vfs_gate_set(level: c_int);
 
+    // FS policy gate (for sandboxed file IO)
+    pub fn tein_fs_policy_gate_set(level: c_int);
+
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
 
@@ -731,6 +734,16 @@ pub unsafe fn vfs_gate_set(level: i32) {
     unsafe { tein_vfs_gate_set(level as c_int) }
 }
 
+/// Set the C-level FS policy gate level.
+///
+/// 0 = off (all file access allowed), 1 = check via rust callback.
+/// # Safety
+/// Must be called from the same thread as the chibi context.
+#[inline]
+pub unsafe fn fs_policy_gate_set(level: i32) {
+    unsafe { tein_fs_policy_gate_set(level as c_int) }
+}
+
 /// called from C (`tein_shim.c`) when `tein_vfs_gate == 1`.
 /// checks the module path against the thread-local VFS allowlist.
 ///
@@ -774,6 +787,30 @@ extern "C" fn tein_vfs_gate_check(path: *const c_char) -> c_int {
             0
         }
     })
+}
+
+/// C→rust callback for FS policy enforcement.
+///
+/// Called from `tein_fs_check_access` in `tein_shim.c` when the FS policy
+/// gate is armed (sandboxed contexts). Delegates to `check_fs_access()`
+/// which checks `IS_SANDBOXED` + `FS_POLICY` thread-locals.
+///
+/// Returns 1 (allow) or 0 (deny).
+#[unsafe(no_mangle)]
+extern "C" fn tein_fs_policy_check(path: *const c_char, is_read: c_int) -> c_int {
+    use crate::context::{check_fs_access, FsAccess};
+
+    let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
+    let access = if is_read != 0 {
+        FsAccess::Read
+    } else {
+        FsAccess::Write
+    };
+    if check_fs_access(path_str, access) {
+        1
+    } else {
+        0
+    }
 }
 
 /// RAII guard that roots a `sexp` on chibi's global preservatives list.

@@ -1059,7 +1059,7 @@ unsafe fn extract_string_arg<'a>(
 }
 
 /// FsPolicy access direction for [`check_fs_access`].
-enum FsAccess {
+pub(crate) enum FsAccess {
     Read,
     Write,
 }
@@ -1069,7 +1069,7 @@ enum FsAccess {
 /// - unsandboxed (IS_SANDBOXED=false): allows unconditionally
 /// - sandboxed with matching FsPolicy: delegates to `check_read`/`check_write`
 /// - sandboxed without FsPolicy configured: denies
-fn check_fs_access(path: &str, access: FsAccess) -> bool {
+pub(crate) fn check_fs_access(path: &str, access: FsAccess) -> bool {
     let sandboxed = IS_SANDBOXED.with(|c| c.get());
     if !sandboxed {
         return true;
