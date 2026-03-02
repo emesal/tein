@@ -5108,6 +5108,30 @@ mod tests {
     }
 
     #[test]
+    fn test_fs_gate_cleared_on_drop() {
+        use crate::sandbox::{FS_GATE, FS_GATE_CHECK, FS_GATE_OFF, Modules};
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .sandboxed(Modules::only(&["scheme/base"]))
+                .build()
+                .expect("standard + sandboxed");
+
+            FS_GATE.with(|cell| {
+                assert_eq!(cell.get(), FS_GATE_CHECK);
+            });
+        }
+        // after drop, gate should reset
+        FS_GATE.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                FS_GATE_OFF,
+                "FS gate should reset to off after context drop"
+            );
+        });
+    }
+
+    #[test]
     fn test_vfs_gate_not_set_without_sandboxed() {
         // unsandboxed context without standard_env should NOT activate VFS gate
         use crate::sandbox::{GATE_OFF, VFS_GATE};
