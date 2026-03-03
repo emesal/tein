@@ -8020,6 +8020,106 @@ mod tests {
         assert_eq!(result, Value::Boolean(true));
     }
 
+    #[test]
+    fn test_shadow_stub_chibi_stty_raises_error() {
+        // chibi/stty is C-backed terminal control — shadow stub blocks all access.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/stty")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi stty)) (get-terminal-width)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/stty]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_term_edit_line_raises_error() {
+        // chibi/term/edit-line depends on stty — shadow stub blocks all access.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/term/edit-line")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi term edit-line)) (make-line-editor)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/term/edit-line]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_app_raises_error() {
+        // chibi/app is CLI framework depending on config + process-context.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/app")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi app)) (app-help '())");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/app]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_config_raises_error() {
+        // chibi/config is config file reader depending on scheme/file + chibi/filesystem.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/config")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi config)) (make-conf '())");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/config]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_log_raises_error() {
+        // chibi/log is logging with file locking + OS identity (PIDs, UIDs).
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/log")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi log)) (log-open \"test\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/log]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
     // NOTE: scheme/time has a deep dependency chain (scheme/process-context,
     // scheme/file, scheme/read, scheme/time/tai-to-utc-offset) and performs
     // file IO at load time (leap second list). it is default_safe: false.

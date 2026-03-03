@@ -201,7 +201,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 
 | module | status | notes |
 |--------|--------|-------|
-| `chibi/app` | ❌ | CLI app framework — reads env/args, needs shadow |
+| `chibi/app` | 🌑 | shadow stub — CLI framework; depends on config + process-context |
 | `chibi/apropos` | ❌ | reflects on env/module contents |
 | `chibi/assert` | ✅ | |
 | `chibi/ast` | ✅ | AST introspection; internal dep (srfi/18, chibi/io etc) |
@@ -215,7 +215,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/char-set/boundary` | ✅ | |
 | `chibi/char-set/extras` | ✅ | |
 | `chibi/char-set/full` | ✅ | |
-| `chibi/config` | ❌ | reads config files — file i/o |
+| `chibi/config` | 🌑 | shadow stub — config file reader; filesystem access (#105) |
 | `chibi/crypto/md5` | ✅ | pure hash |
 | `chibi/crypto/rsa` | ✅ | RSA crypto — pure scheme |
 | `chibi/crypto/sha2` | ✅ | pure hash; cond-expand takes srfi/151 + chibi/bytevector path |
@@ -238,7 +238,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/iset/iterators` | ✅ | |
 | `chibi/iset/optimize` | ✅ | integer set rebalancing + optimisation; pure scheme |
 | `chibi/json` | ❌ | use `tein/json` instead |
-| `chibi/log` | ❌ | logging — writes to stderr, file |
+| `chibi/log` | 🌑 | shadow stub — logging with file locking + OS identity (#105) |
 | `chibi/loop` | ✅ | loop macros |
 | `chibi/match` | ✅ | pattern matching |
 | `chibi/math/prime` | ✅ | prime factorisation |
@@ -278,14 +278,14 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/show/unicode` | ✅ | `alias-for (srfi 166 unicode)` |
 | `chibi/snow/*` | ❌ | snow package manager — file i/o + network ⚠️ |
 | `chibi/string` | ✅ | |
-| `chibi/stty` | ❌ | terminal control — OS ⚠️ |
+| `chibi/stty` | 🌑 | shadow stub — terminal ioctl, C-backed |
 | `chibi/sxml` | ✅ | SXML |
 | `chibi/syntax-case` | ✅ | syntax-case macros |
 | `chibi/system` | ✅ | sandbox stub (phase 1) — importable, all fns raise sandbox error |
 | `chibi/tar` | ❌ | tar format — file i/o ⚠️ |
 | `chibi/temp-file` | ✅ | sandbox stub (phase 1) — importable, fns raise sandbox error |
 | `chibi/term/ansi` | ✅ | ANSI terminal escape codes |
-| `chibi/term/edit-line` | ❌ | line editing — terminal i/o ⚠️ |
+| `chibi/term/edit-line` | 🌑 | shadow stub — line editor, depends on stty |
 | `chibi/text` | ✅ | text editor operations |
 | `chibi/text/base` | ✅ | (includes marks + movement) |
 | `chibi/text/marks` | ❌ | included in chibi/text/base |
@@ -344,9 +344,7 @@ tein's own modules — always in VFS.
 - `chibi/channel` (embedded, not a stub — but depends on srfi/18 / threads)
 
 **⚠️ still needs shadow/trampoline (not in VFS):**
-- `chibi/stty`, `chibi/term/edit-line` — terminal i/o
 - `chibi/tar` — file i/o
-- `chibi/app`, `chibi/config`, `chibi/log` — env/args/logging
 - `chibi/apropos`, `srfi/193` — env introspection / info leak
 - `scheme/load` — arbitrary file loading (already blocked; use `tein/load`)
 - `scheme/r5rs` — already blocked

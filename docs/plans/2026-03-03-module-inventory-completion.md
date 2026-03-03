@@ -281,7 +281,7 @@ chibi/memoize all ✅
 
 ## task 4: add shadow stubs — chibi/stty + chibi/term/edit-line
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY: 2 VfsEntry, SHADOW_STUBS: 2 ShadowStub)
@@ -415,7 +415,7 @@ both importable; all exports raise [sandbox:path] errors.
 
 ## task 5: add shadow stubs — chibi/log + chibi/app + chibi/config
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY: 3 VfsEntry, SHADOW_STUBS: 3 ShadowStub)
@@ -598,7 +598,7 @@ all importable in sandbox; all exports raise [sandbox:path] errors.
 
 ## task 6: batch 2 wrap-up
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `docs/module-inventory.md` (update 5 status markers)
@@ -1121,6 +1121,6 @@ update this section after each batch:
 | batch | tasks | status | notes |
 |-------|-------|--------|-------|
 | 1 | 1-3 | done | pure VFS: mime, binary-record, memoize |
-| 2 | 4-6 | pending | shadows: stty, edit-line, log, app, config |
+| 2 | 4-6 | done | shadows: stty, edit-line, log, app, config |
 | 3 | 7-8 | pending | shadows: tar, srfi/193, apropos |
 | 4 | 9-13 | pending | scheme/load shadow, docs, close #92, PR |
