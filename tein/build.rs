@@ -189,7 +189,11 @@ fn normalise_path(path: &str) -> String {
     parts.join("/")
 }
 
-/// check whether a cargo feature is enabled at build time (mirrors sandbox.rs)
+/// check whether a cargo feature is enabled at build time.
+///
+/// **keep in sync with `feature_enabled` in `src/sandbox.rs`** — both must be updated
+/// when adding or removing cargo features. they can't be merged because build.rs and
+/// sandbox.rs run in different compilation contexts (`cfg!` resolves differently).
 fn feature_enabled(feature: Option<&str>) -> bool {
     match feature {
         None => true,

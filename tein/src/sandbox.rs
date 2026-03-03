@@ -374,9 +374,11 @@ impl Modules {
     }
 }
 
-/// check whether a cargo feature gate is satisfied at runtime.
+/// check whether a cargo feature gate is satisfied at compile time.
 ///
-/// in sandbox.rs this is a compile-time check. build.rs uses the same check.
+/// **keep in sync with `feature_enabled` in `build.rs`** — both must be updated
+/// when adding or removing cargo features. they can't be merged because `cfg!` resolves
+/// differently in build script vs lib contexts.
 #[inline]
 fn feature_enabled(feature: Option<&str>) -> bool {
     match feature {
