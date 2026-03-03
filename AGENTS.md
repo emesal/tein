@@ -133,8 +133,6 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **load trampoline internal naming**: the VFS-restricted `load` function is registered globally as `tein-load-vfs-internal` (not `load`). chibi's built-in `load` is used by the module loader for `(include ...)` in `.sld` files — overriding it globally breaks all module imports. `(tein load)` exports it as `load` via `(export (rename tein-load-vfs-internal load))` in `load.sld`.
 
-**Modules::Safe excludes (tein process)**: `registry_safe_allowlist()` does not include `tein/process` because `command-line` leaks the host's argv. use `.sandboxed(Modules::Safe).allow_module("tein/process")` to enable it explicitly.
-
 **GC rooting in rust FFI**: chibi's conservative stack scanning is disabled — the GC does NOT see rust locals. any `sexp` held across an allocating FFI call can be freed. use `ffi::GcRoot::new(ctx, sexp)` (RAII, calls `sexp_preserve_object`/`sexp_release_object`). root across: list/pair/vector building loops, `evaluate()`'s read/eval loop, `call()`'s arg accumulator, `build()`'s source_env + null_env. allocating calls: `sexp_make_flonum`, `sexp_c_str`, `sexp_intern`, `sexp_cons`, `sexp_make_vector`, `sexp_open_input_string`, `sexp_read`, `sexp_evaluate`, `sexp_load_standard_env`, `sexp_make_null_env`, `sexp_env_define`, `env_copy_named`, `sexp_define_foreign_proc`, `sexp_preserve_object`. in C code use `sexp_gc_var`/`sexp_gc_preserve`/`sexp_gc_release`.
 
 **edition 2024:** `unsafe fn` bodies need inner `unsafe { }` blocks

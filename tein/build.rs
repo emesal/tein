@@ -189,7 +189,11 @@ fn normalise_path(path: &str) -> String {
     parts.join("/")
 }
 
-/// check whether a cargo feature is enabled at build time (mirrors sandbox.rs)
+/// check whether a cargo feature is enabled at build time.
+///
+/// **keep in sync with `feature_enabled` in `src/sandbox.rs`** — both must be updated
+/// when adding or removing cargo features. they can't be merged because build.rs and
+/// sandbox.rs run in different compilation contexts (`cfg!` resolves differently).
 fn feature_enabled(feature: Option<&str>) -> bool {
     match feature {
         None => true,
@@ -353,7 +357,13 @@ fn collect_exports_from_sexps(sexps: &[tein_sexp::Sexp]) -> Vec<String> {
                 }
             }
         } else {
-            // recurse into all list children (handles define-library, cond-expand, etc.)
+            // recurse into all list children: handles define-library, cond-expand, begin, etc.
+            // note: we recurse into ALL cond-expand branches, including (chicken ...) or
+            // implementation-specific arms that chibi won't execute. for chibi, the (else ...)
+            // branch always runs, so any (export ...) inside it is a real export — but
+            // implementation-specific branches (like chicken) will produce false positives.
+            // currently only chibi/binary-record's chicken branch is affected; its exports
+            // (defrec, define-auxiliary-syntax) appear in MODULE_EXPORTS but are harmless.
             for item in items {
                 walk(item, out);
             }
@@ -416,6 +426,10 @@ fn main() {
             .filter(|e| e.source == VfsSource::Embedded && feature_enabled(e.feature))
             .flat_map(|e| e.files.iter().copied()),
     );
+    // dedup: multiple entries may share the same .scm file (e.g. srfi/160/* all include uvector.scm).
+    // first-match semantics at VFS lookup time means order doesn't matter; just drop duplicates.
+    vfs_files.sort_unstable();
+    vfs_files.dedup();
 
     // validate that .sld files reference only files present in their entry's files list
     validate_sld_includes(&chibi_dir);

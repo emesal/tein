@@ -906,6 +906,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // scheme/mapping/hash: default_safe: false — depends on srfi/146/hash which pulls in
+    // hamt-map (a heavier, less-tested dependency). same reasoning as srfi/146/hash.
     VfsEntry {
         path: "scheme/mapping/hash",
         deps: &["srfi/146/hash"],
@@ -1960,6 +1962,10 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // chibi/channel: default_safe: true because the module itself has no OS-touching code.
+    // however, its dep srfi/18 (threads) is non-functional in tein (SEXP_USE_GREEN_THREADS=0),
+    // so importing chibi/channel succeeds in a sandbox but channel operations fail at runtime.
+    // this is intentional: allow the import, let the runtime error surface naturally.
     VfsEntry {
         path: "chibi/channel",
         deps: &["srfi/9", "srfi/18"],
@@ -2833,7 +2839,11 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             "lib/chibi/binary-record.sld",
             "lib/chibi/binary-types.scm",
             "lib/chibi/binary-record.scm",
-            "lib/chibi/binary-record-chicken.scm", // cond-expand else branch; not loaded by chibi
+            // chicken-compat alternative for define-binary-record-type. listed in the .sld's
+            // (cond-expand (chicken ...) (else ...)) block; chibi always takes the else branch
+            // so this file is never loaded. kept here only because validate_sld_includes
+            // recurses into all cond-expand branches and would panic if it were absent.
+            "lib/chibi/binary-record-chicken.scm",
         ],
         clib: None,
         default_safe: true,
