@@ -5,11 +5,8 @@ status of all chibi-scheme modules in tein's VFS registry.
 **legend:**
 - ✅ in VFS, safe (`default_safe: true`)
 - 🔒 in VFS, unsafe (`default_safe: false`) — available in `Modules::All` only
-- 🌑 shadow — VFS entry replaces native with sandboxed impl
-- ❌ not in VFS — blocked/inaccessible in sandboxed contexts
-- ➕ not in VFS — needs adding (pure/safe, no sandboxing needed)
-- ⚠️  not in VFS — needs shadow/trampoline before it can be added
-- 🔧 in VFS but needs review (fields tagged `?` or safety unclear)
+- 🌑 shadow — VFS entry replaces native with sandboxed stub or functional wrapper
+- ❌ intentionally excluded — see appendix B for rationale
 
 ---
 
@@ -326,32 +323,38 @@ tein's own modules — always in VFS.
 
 ## summary
 
-| category | ✅ safe | 🔒 unsafe | 🌑 shadow | ❌ not in VFS |
-|----------|---------|----------|----------|--------------|
-| scheme/* | 48 | 7 | 3 | 2 |
-| srfi/* | 101 | 3 | 1 | 1 |
-| chibi/* | 65 | 0 | 0 | 34 |
+| category | ✅ safe | 🔒 unsafe | 🌑 shadow | ❌ excluded |
+|----------|---------|----------|----------|-------------|
+| scheme/* | 48 | 7 | 4 | 1 |
+| srfi/* | 102 | 3 | 2 | 0 |
+| chibi/* | 68 | 0 | 7 | 24 |
 | tein/* | 12 | 0 | 0 | 0 |
-| **total** | **226** | **10** | **4** | **37** |
+| **total** | **230** | **10** | **13** | **25** |
 
-### priority queue
+### status
 
-**✅ shadow stubs done (phase 1 — error-on-call):**
-- `chibi/filesystem`, `chibi/process`, `chibi/system`
-- `chibi/shell`, `chibi/temp-file`
-- `chibi/net`, `chibi/net/http`, `chibi/net/server`, `chibi/net/http-server`,
+**✅ all modules resolved.** every chibi-scheme module is either in the VFS, intentionally excluded (appendix B), or tracked in a github issue.
+
+**phase-1 stubs (✅ in table — error-on-call): 11 modules**
+- OS filesystem: `chibi/filesystem`, `chibi/temp-file`
+- OS process/system: `chibi/process`, `chibi/system`
+- OS network: `chibi/net`, `chibi/net/http`, `chibi/net/server`, `chibi/net/http-server`,
   `chibi/net/server-util`, `chibi/net/servlet`
-- `chibi/channel` (embedded, not a stub — but depends on srfi/18 / threads)
+- shell execution: `chibi/shell`
 
-**⚠️ still blocked (no shadow):**
-- `scheme/r5rs` — tracked in #106 (blocked on #97)
+**shadow stubs (🌑 in table — error-on-call): 13 modules**
+- OS terminal: `chibi/stty`, `chibi/term/edit-line`
+- application: `chibi/app`, `chibi/config`, `chibi/log`, `chibi/tar`
+- info leak: `srfi/193`, `chibi/apropos`
+- scheme/file → `tein/file` (FsPolicy enforcement)
+- scheme/process-context → `tein/process` (neutered env/argv)
+- scheme/repl → neutered `interaction-environment`
+- scheme/load → `tein/load` (VFS-restricted)
+- srfi/98 → neutered env var stubs
 
-**phase 2 (selective gating — not started):**
-- selectively expose safe fns from stub modules with real FS/network policy checks
-- e.g. `chibi/filesystem` `file-exists?`, `file-size`; `chibi/process` `current-process-id`
-
-**intentionally excluded (not useful for embedding):**
-- see appendix B for rationale per module
+**tracked in issues:**
+- `scheme/r5rs` — #106 (blocked on #97, sandboxed eval)
+- phase 2 progressive gating — #105 (writable VFS compartment)
 
 ---
 
@@ -362,8 +365,6 @@ any exported function raises `[sandbox:module/path] fn-name not available`. this
 code that conditionally uses these modules load without crashing, while preventing
 actual OS access. see #105 for future progressive gating (selectively unshadowing
 safe operations with real implementations).
-
-### phase 1 stubs (already implemented)
 
 | module | why stubbed |
 |--------|-------------|
@@ -378,12 +379,7 @@ safe operations with real implementations).
 | `chibi/net/http-server` | HTTP server framework — network listener + filesystem serving |
 | `chibi/net/server-util` | server utilities (logging, connection handling) |
 | `chibi/net/servlet` | HTTP servlet framework — request/response handling with network + filesystem |
-
-### phase 2 stubs (planned)
-
-| module | why stubbed |
-|--------|-------------|
-| `chibi/stty` | terminal control: `stty`, `with-raw-io`, `get-terminal-width`. C-backed via `include-shared`; no pre-generated `.c` exists and the real impl is unsafe (raw ioctl) |
+| `chibi/stty` | terminal control: `stty`, `with-raw-io`, `get-terminal-width`. C-backed via `include-shared`; real impl is unsafe (raw ioctl) |
 | `chibi/term/edit-line` | interactive line editor depending on `chibi/stty` for terminal mode switching |
 | `chibi/log` | logging framework deeply coupled to OS: file locking (`file-lock`), process/user IDs for log prefixes, `open-output-file/append`. #105 could enable scoped log file writing |
 | `chibi/app` | CLI application framework depending on `chibi/config` (filesystem) and `scheme/process-context` (argv/env). stubs let libraries that optionally import it still load |
