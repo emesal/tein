@@ -261,6 +261,9 @@ pub(crate) fn register_vfs_shadows() {
         if entry.source != VfsSource::Shadow {
             continue;
         }
+        if !feature_enabled(entry.feature) {
+            continue;
+        }
         if let Some(sld) = entry.shadow_sld {
             // hand-written shadow (scheme/file, scheme/process-context, etc.)
             register_one(entry.path, sld);

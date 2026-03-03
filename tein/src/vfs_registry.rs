@@ -887,6 +887,11 @@ const VFS_REGISTRY: &[VfsEntry] = &[
 "),
     },
     // scheme/time: default_safe: false — depends on scheme/process-context + scheme/file
+    // the real chibi scheme/time.sld is embedded for reference but cannot be loaded in tein:
+    // it depends on scheme/time/tai-to-utc-offset which fails due to a runtime error during
+    // module init (update-cache! → raise propagates past module boundary → empty EvalError).
+    // the shadow below (VfsSource::Shadow, feature-gated on "time") overrides this in
+    // sandboxed and with_vfs_shadows contexts, re-exporting from (tein time) trampolines.
     VfsEntry {
         path: "scheme/time",
         deps: &["scheme/time/tai", "scheme/time/tai-to-utc-offset"],
@@ -901,6 +906,36 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
+    },
+    // scheme/time shadow — overrides the Embedded entry above in sandboxed / with_vfs_shadows
+    // contexts. implements current-second/current-jiffy/jiffies-per-second inline using
+    // (chibi time)'s get-time-of-day, avoiding the broken TAI-offset chain.
+    // registered by register_vfs_shadows(). no feature gate needed.
+    VfsEntry {
+        path: "scheme/time",
+        deps: &["chibi/time"],
+        files: &[],
+        clib: None,
+        default_safe: false,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some(concat!(
+            "(define-library (scheme time)\n",
+            "  (import (scheme base) (chibi time))\n",
+            "  (export current-second current-jiffy jiffies-per-second)\n",
+            "  (begin\n",
+            "    (define *jiffy-epoch* #f)\n",
+            "    (define (current-second)\n",
+            "      (let ((t (get-time-of-day)))\n",
+            "        (+ (car t) (/ (cdr t) 1000000.0))))\n",
+            "    (define (current-jiffy)\n",
+            "      (let* ((t (get-time-of-day))\n",
+            "             (ns (+ (* (car t) 1000000000) (* (cdr t) 1000))))\n",
+            "        (if *jiffy-epoch*\n",
+            "            (- ns *jiffy-epoch*)\n",
+            "            (begin (set! *jiffy-epoch* ns) 0))))\n",
+            "    (define (jiffies-per-second) 1000000000)))\n",
+        )),
     },
     VfsEntry {
         path: "scheme/time/tai",

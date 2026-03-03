@@ -12,13 +12,13 @@
 
 ---
 
-## execution status (as of 2026-03-03 context break)
+## execution status (as of 2026-03-03 context break 2)
 
 **completed:**
 - ✅ task 1: `(chibi test)` added to VFS registry (commit `220090a`)
 - ✅ task 2: `scheme/bytevector-test` + all `srfi/N/test` entries added (commit `a0ae862`)
 - ✅ task 3: all `chibi/X-test` entries added (commit `b7bba15`)
-- 🔴 task 4: `tests/vfs_module_tests.rs` created but blocked — `(chibi test)` fails to load; WIP commit `28f4898`
+- 🔴 task 4: still blocked — deeper root cause found, `scheme/time` shadow partially fixed
 
 **tasks 5–9:** pending
 
@@ -26,55 +26,115 @@
 
 ---
 
-## blocking issue: `(chibi test)` load fails — root cause & fix required
+## blocking issue: chibi/test load chain — root cause analysis (2026-03-03 cb2)
 
-### root cause
+### root cause found
 
-`(chibi test)` → `(scheme time)` → `(include-shared "time")` (clib) raises `EvalError("")` in any context tein can construct. additionally, `(chibi test)` → `(scheme process-context)` shadow previously failed because shadow SLDs used `(import (tein X))` inside library body — fixed in WIP commit but `scheme/time` is the remaining blocker.
+**`define_fn_variadic` globals are NOT visible in chibi library `.scm` scope.**
 
-**chain:**
-1. `(chibi test)` → `(scheme process-context)` [shadow, fixed] → `(scheme time)` [clib, broken]
-2. `scheme/time.sld` does `(include-shared "time")` → calls `sexp_init_lib_scheme_time` → raises empty exception in tein context
+chibi's library compiler sees only the library env chain. `define_fn_variadic` puts bindings in the context env (program env). library `.scm` files are compiled with a different env chain that does NOT include the context env. result: any `.scm` that references `get-environment-variable`, `file-exists?`, etc. (registered via define_fn_variadic) gets `"reference to undefined variable"` at compile time and `"undefined variable"` at runtime.
 
-### what was tried
-- `Context::new_standard()` — no shadows registered, `scheme/process-context` not found
-- `Context::builder().standard_env().sandboxed(Modules::All)` — shadows registered, but `(tein process)` library export problem in null env; then `scheme/time` clib fails
-- `Context::builder().standard_env().with_vfs_shadows()` (new builder option added in WIP) — shadows registered, `scheme/process-context` shadow fixed, but `scheme/time` still raises empty EvalError
-- shadow SLD fix: replaced `(import (tein process))` / `(import (tein file))` in shadow bodies with `(import (scheme base))` + `(define x x)` captures. fixes the process-context shadow but doesn't help scheme/time
+additionally, `(define x x)` in a library `begin` body uses `letrec*` semantics — chibi pre-binds all names to `#<unspecified>` before evaluating any RHS. so `(define get-environment-variable get-environment-variable)` evaluates the RHS to `#<unspecified>` (seeing the library's pre-bound version, not the global), then overwrites the imported binding when the library is imported. this is the bug in ALL existing shadow SLDs that use `(define x x)`.
 
-### what was added in WIP
-- `ContextBuilder::with_vfs_shadows()` field + method in `context.rs` — registers VFS shadows without sandboxing
-- `vfs_registry.rs` shadow SLD fixes:
-  - `scheme/process-context`: replaced `(import (tein process))` with `(import (scheme base))` + explicit `(define exit exit)` etc.
-  - `scheme/file`: same pattern — `(import (scheme base))` + `(define file-exists? file-exists?)` etc.
-- `tests/vfs_module_tests.rs` created with RAISING_APPLIER + all 63 test functions
+### chain of failures
+1. `(import (chibi test))` → loads `chibi/test.sld`
+2. `chibi/test.sld` → `(import (scheme time))` → fails
+   - `scheme/time.sld` → `(import (scheme time tai-to-utc-offset))` → `EvalError("")` (leap second module init fails in certain contexts)
+   - **fix**: added `scheme/time` Shadow entry in `vfs_registry.rs` using `(chibi time)` inline implementations — THIS WORKS
+3. `(import (chibi term ansi))` → `chibi/term/ansi.scm` calls `(get-environment-variable ...)` without importing it → compile error in library scope
+   - root cause: `chibi/term/ansi.sld` imports only `(scheme base)`, but `get-environment-variable` is not in `scheme/base` and not in the library env chain
+   - **fix needed**: shadow `chibi/term/ansi` with a version that imports `(srfi 98)` and wraps the ansi.scm code properly
+4. `(import (chibi diff))` → depends on `chibi/term/ansi` → fails for same reason
+5. `(import (scheme process-context))` → shadow's `(define x x)` overwrites globals with `#<unspecified>`
+   - `get-environment-variable` etc. become `#<unspecified>` after import
+   - `chibi/term/ansi.scm`'s `(get-environment-variable ...)` call fails
+   - **fix needed**: rewrite `scheme/process-context` shadow to import from `(srfi 98)` (which HAS a proper C-backed or stubbed library) and inline `command-line`/`exit`/`emergency-exit`
 
-### next step for task 4
+### key insight: use srfi/98 for env vars
 
-investigate why `(scheme time)` clib raises `EvalError("")` in a `new_standard()` + `with_vfs_shadows()` context. specifically:
+`(srfi 98)` has TWO VFS entries:
+- Embedded: C clib, provides real `get-environment-variable` as proper library export
+- Shadow: returns `#f`/`()` stubs (used in sandboxed contexts)
 
-1. check `scheme/time.c` `sexp_init_lib_scheme_time` — does it call `(get-environment-variable ...)` or read files at init time?
-2. check if `scheme/time` needs the actual leap second list file from the filesystem
-3. consider: `scheme/time` may simply not be needed for `(chibi test)` applier functionality — the relevant exports are `current-test-applier`, `current-test-comparator`, etc. which don't depend on time. so: can we skip `(scheme time)` entirely by pre-loading it from `(tein time)` which IS available?
+in `with_vfs_shadows` context, the SHADOW is registered. importing `(srfi 98)` gives the stub. importing `(srfi 98)` from within a library body WORKS because `srfi/98` has real scheme-level definitions (from the shadow or the clib) that the library can see.
 
-**proposed fix**: before `(import (chibi test))`, pre-import `(tein time)` which provides `current-second`, `current-jiffy`, `jiffies-per-second` (the same things `scheme/time` provides). then register a stub `scheme/time` VFS shadow that just re-exports from tein/time. add to `vfs_registry.rs`:
+`scheme/process-context` shadow should import from `(srfi 98)` + define `command-line`/`exit`/`emergency-exit` as inline lambdas.
 
-```rust
-// scheme/time shadow for chibi/test context — re-exports tein/time trampolines
-// avoids loading scheme/time.c which has filesystem deps at init time
-VfsEntry {
-    path: "scheme/time",
-    // ... but wait: scheme/time is already VfsSource::Embedded (not Shadow)
-    // cannot have two entries with same path
+### what was done in this session
+- diagnosed `scheme/time` failure chain: `scheme/time/tai-to-utc-offset` raises `EvalError("")` during `update-cache!` (the exception propagates from a `with-exception-handler` that uses `raise` as handler, escaping the module boundary)
+- added `scheme/time` Shadow VFS entry using `(chibi time)` inline implementations (current-second via `get-time-of-day`, current-jiffy monotonic, jiffies-per-second = 1000000000)
+- added feature-check to `register_vfs_shadows()` — skips shadow entries where `feature_enabled()` is false
+- diagnosed `scheme/process-context` shadow bug — `(define x x)` letrec* issue
+- diagnosed `chibi/term/ansi` bug — `get-environment-variable` not visible in library scope
+- removed diagnostic test code from context.rs
+
+### what's still in WIP commit (28f4898)
+- broken `scheme/process-context` shadow (using `(define x x)` pattern) — needs rewrite
+- broken `scheme/file` shadow (same pattern) — needs rewrite
+- `tests/vfs_module_tests.rs` with all 63 test functions — needs `run_chibi_test` to work
+
+### required fixes for task 4 (in order)
+
+**fix A: rewrite `scheme/process-context` shadow** (in `vfs_registry.rs`)
+
+replace current shadow_sld with one that imports from `(srfi 98)` and inlines stubs:
+```scheme
+(define-library (scheme process-context)
+  (import (srfi 98))
+  (export get-environment-variable get-environment-variables
+          command-line exit emergency-exit)
+  (begin
+    (define (command-line) '("tein"))
+    (define (exit . args) #f)
+    (define (emergency-exit . args) #f)))
 ```
 
-actually this won't work — `scheme/time` already has an Embedded entry with a clib. adding a Shadow entry would conflict.
+note: tein's real `exit` trampoline won't work in library scope. for the test harness, stub exits are fine — chibi/test only calls `(exit)` in `test-exit` which we don't use.
 
-**alternative**: look at the actual `sexp_init_lib_scheme_time` to understand what fails, then fix it OR pre-import `(scheme time)` differently. the `scheme/time` clib `sexp_init_lib_scheme_time` is compiled from `lib/scheme/time.c`. check that file for what it does at init — if it only exports C functions and doesn't call into scheme at init, the failure is elsewhere.
+**fix B: rewrite `scheme/file` shadow** (in `vfs_registry.rs`)
 
-**most likely diagnosis**: `scheme/time.sld` does `(import (scheme process-context))` then uses `get-environment-variable`. after our shadow fix, `scheme/process-context` works. but `scheme/time` also does `(import (chibi))` — in `new_standard()` non-sandboxed context, `(chibi)` resolves to the eval env and provides various chibi-specific procs. the clib `(include-shared "time")` provides `current-clock-second` and `jiffies-per-second` from C. if the clib init itself fails (empty EvalError), maybe it's a GC issue during clib loading. try running with `cargo test --features debug-chibi` to get GC instrumentation output.
+the shadow currently uses `(define x x)`. needs real implementations. check if `(tein file)` functions are available in library scope... but they're also define_fn_variadic. solution: define all file functions inline using chibi's built-in opcodes (`open-input-file` etc. are chibi opcodes available globally):
 
-**simplest working alternative**: use `(tein time)` to provide time procs, and avoid loading `(scheme time)` in the harness. need to check if `(chibi test)` actually USES any time function or just needs the import to succeed at module load time. if scheme/time is only used by chibi/test's `test-exit` (which calls `(exit)`) and not by the applier we install, we could pre-define `current-jiffy` and `jiffies-per-second` from tein/time and skip the real scheme/time.
+actually `open-input-file` IS a chibi opcode (available in base env). `file-exists?` and `delete-file` are define_fn_variadic (tein trampolines). chibi/test does NOT use `scheme/file` directly — check if the scheme/file shadow can be simplified to stubs or removed from the deps that matter.
+
+wait — `scheme/file` is NOT a direct dep of `chibi/test` (chibi/test deps are: scheme/base, scheme/case-lambda, scheme/write, scheme/complex, scheme/process-context, scheme/time, chibi/diff, chibi/term/ansi, chibi/optional). so the scheme/file shadow bug doesn't affect chibi/test loading directly. skip for now.
+
+**fix C: add shadow for `chibi/term/ansi`** (in `vfs_registry.rs`)
+
+`chibi/term/ansi.sld` only imports `(scheme base)` but `ansi.scm` calls `get-environment-variable`. add a Shadow entry that wraps the real ansi.scm but also imports `(srfi 98)` for env var access:
+
+```scheme
+(define-library (chibi term ansi)
+  (import (scheme base) (srfi 98))
+  ... same exports as real chibi/term/ansi ...
+  (include "ansi.scm"))
+```
+
+but the include needs the actual `ansi.scm` file... the VFS-embedded `chibi/term/ansi.scm` is accessible. but shadow_sld can't include files inline without a .scm helper.
+
+**alternative for fix C**: instead of shadowing the whole library, shadow only `get-environment-variable` by making it available in library scope differently.
+
+actually the cleanest fix: add `(import (srfi 98))` to the REAL embedded `chibi/term/ansi.sld` in the fork (emesal/chibi-scheme, branch emesal-tein). this makes get-environment-variable properly available. push to fork → rebuild.
+
+this is the most architecturally correct fix: fix the real file instead of shadowing it.
+
+**step plan for task 4:**
+
+1. push fix to chibi-scheme fork: add `(import (srfi 98))` to `lib/chibi/term/ansi.sld`
+2. verify `chibi/term/ansi` loads after fix
+3. rewrite `scheme/process-context` shadow in `vfs_registry.rs` (fix A above)
+4. verify chibi/test loads in `with_vfs_shadows` context
+5. run the first few tests to confirm `run_chibi_test` works
+6. commit (squashing WIP)
+
+### also fix: pre-existing test failures (3 failing lib tests)
+
+the 3 pre-existing failing tests use the broken `(define x x)` shadow:
+- `test_scheme_file_shadow_importable_in_sandbox` — scheme/file shadow broken
+- `test_shadow_stubs_not_registered_in_unsandboxed_context` — PoisonError (unrelated?)
+- `test_srfi_166_columnar_from_file_with_policy` — PoisonError (unrelated?)
+
+the PoisonError tests may be from a panic in one test polluting the mutex. check after fixing the shadow issues.
 
 ---
 
