@@ -67,9 +67,24 @@
     - `test_shadow_stub_chibi_shell_macro_raises_error` — macro stub triggers sandbox error
     - `test_chibi_channel_in_vfs` — channel not sandbox-blocked (thread err, not gate err)
 
+### session 5 — small pure-scheme additions
+20. added `chibi/iset/optimize` (commit pending)
+    - integer set rebalancing (`iset-balance`, `iset-optimize`) and `iset->code`
+    - pure scheme, all deps already in VFS (iset/base, iset/iterators, iset/constructors, srfi/151)
+21. added `chibi/show/color`, `chibi/show/column`, `chibi/show/pretty`, `chibi/show/unicode` (commit pending)
+    - all four are `alias-for` wrappers pointing at the corresponding `srfi/166/*` modules
+    - require sandboxed context (transitively depend on `scheme/repl` shadow via srfi/166/base)
+22. added `srfi/227/definition` (commit pending)
+    - re-exports `define-optionals` and `define-optionals*` from `chibi/optional`
+    - trivial alias, pure scheme, no extra deps
+23. added 3 integration tests (commit pending)
+    - `test_chibi_iset_optimize_loads` — iset-optimize works in sandbox
+    - `test_chibi_show_aliases_load` — all 4 chibi/show aliases importable in sandbox
+    - `test_srfi_227_definition_loads` — define-optionals works via the sub-module
+
 ## current state
 
-**728 tests pass. branch: `dev`.**
+**731 tests pass. branch: `dev`.**
 
 ## what remains
 
@@ -88,12 +103,21 @@ implementations wrapped with sandbox/FS policy checks.
 
 ### 2. ➕ remaining pure-scheme modules
 
-`docs/module-inventory.md` has the full checklist. look for any `❌` entries
-that might now have deps satisfied. as of session 4 the major gaps
-(srfi/159, srfi/160, srfi/179, srfi/231, scheme/vector/*, chibi/crypto/*,
-chibi/highlight, chibi/show/base, scheme/small, scheme/red) are all done.
-remaining ❌ entries are mostly intentionally excluded or genuinely need
-shadow/trampoline work. lower priority — most useful modules are already in.
+`docs/module-inventory.md` has the full checklist. as of session 5 the remaining
+37 `❌` entries are nearly all intentionally excluded or need shadow/trampoline work:
+- intentionally excluded: `chibi/disasm`, `chibi/heap-stats`, `chibi/modules`,
+  `chibi/optimize/*`, `chibi/reload`, `chibi/repl`, `chibi/trace`, `chibi/type-inference`,
+  `chibi/snow/*`, `chibi/emscripten`, `chibi/win32/*`, `chibi/doc`, `chibi/scribble`,
+  `chibi/json`, `chibi/pty`, `chibi/show` (use srfi/166), `chibi/show/c`
+- need shadow/trampoline: `chibi/memoize`, `chibi/mime`, `chibi/stty`,
+  `chibi/term/edit-line`, `chibi/tar`, `chibi/app`, `chibi/log`,
+  `scheme/load`, `scheme/r5rs`, `srfi/193`
+- internal/non-applicable: `chibi/binary-record`, `chibi/config`, `chibi/apropos`,
+  `chibi/regexp/pcre`, `chibi/zlib`, `chibi/text/marks`, `chibi/text/movement`
+  (last two are included in chibi/text/base)
+- `chibi/ieee-754`: not found in lib/; probably dead
+
+lower priority — most useful modules are already in.
 
 ## key files
 

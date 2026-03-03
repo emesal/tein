@@ -188,7 +188,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/211/variable-transformer` | ✅ | |
 | `srfi/219` | ✅ | define higher-order lambda |
 | `srfi/227` | ✅ | optional arguments |
-| `srfi/227/definition` | ❌ | sub-module not added |
+| `srfi/227/definition` | ✅ | re-exports `define-optionals` from `chibi/optional` |
 | `srfi/229` | ✅ | tagged procedures |
 | `srfi/231` | ✅ | revised intervals and generalized arrays (successor to srfi/179) |
 | `srfi/231/base` | ✅ | |
@@ -236,7 +236,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/iset/base` | ✅ | |
 | `chibi/iset/constructors` | ✅ | |
 | `chibi/iset/iterators` | ✅ | |
-| `chibi/iset/optimize` | ❌ | not in VFS |
+| `chibi/iset/optimize` | ✅ | integer set rebalancing + optimisation; pure scheme |
 | `chibi/json` | ❌ | use `tein/json` instead |
 | `chibi/log` | ❌ | logging — writes to stderr, file |
 | `chibi/loop` | ✅ | loop macros |
@@ -271,11 +271,11 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/show` | ❌ | not in VFS — use `srfi/166` instead |
 | `chibi/show/base` | ✅ | thin alias to `srfi/166/base` |
 | `chibi/show/c` | ❌ | C pretty printer |
-| `chibi/show/color` | ❌ | not in VFS |
-| `chibi/show/column` | ❌ | not in VFS |
-| `chibi/show/pretty` | ❌ | not in VFS |
+| `chibi/show/color` | ✅ | `alias-for (srfi 166 color)` |
+| `chibi/show/column` | ✅ | `alias-for (srfi 166 columnar)` |
+| `chibi/show/pretty` | ✅ | `alias-for (srfi 166 pretty)` |
 | `chibi/show/shared` | ✅ | internal dep only |
-| `chibi/show/unicode` | ❌ | not in VFS |
+| `chibi/show/unicode` | ✅ | `alias-for (srfi 166 unicode)` |
 | `chibi/snow/*` | ❌ | snow package manager — file i/o + network ⚠️ |
 | `chibi/string` | ✅ | |
 | `chibi/stty` | ❌ | terminal control — OS ⚠️ |
@@ -329,10 +329,10 @@ tein's own modules — always in VFS.
 | category | ✅ safe | 🔒 unsafe | 🌑 shadow | ❌ not in VFS |
 |----------|---------|----------|----------|--------------|
 | scheme/* | 48 | 7 | 3 | 2 |
-| srfi/* | 100 | 3 | 1 | 2 |
-| chibi/* | 60 | 0 | 0 | 39 |
+| srfi/* | 101 | 3 | 1 | 1 |
+| chibi/* | 65 | 0 | 0 | 34 |
 | tein/* | 12 | 0 | 0 | 0 |
-| **total** | **220** | **10** | **4** | **43** |
+| **total** | **226** | **10** | **4** | **37** |
 
 ### priority queue
 
