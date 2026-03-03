@@ -2979,6 +2979,7 @@ struct ShadowStub {
     macro_exports: &'static [&'static str],
 }
 
+#[allow(dead_code)]
 const SHADOW_STUBS: &[ShadowStub] = &[
     // --- C-backed OS modules ---
     ShadowStub {
