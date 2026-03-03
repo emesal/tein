@@ -88,9 +88,12 @@ implementations wrapped with sandbox/FS policy checks.
 
 ### 2. ➕ remaining pure-scheme modules
 
-`docs/module-inventory.md` has the full checklist. look for entries marked `➕`
-(ready to add) or re-evaluate any `❌` that might now have deps satisfied.
-this is lower priority — most useful modules are already in.
+`docs/module-inventory.md` has the full checklist. look for any `❌` entries
+that might now have deps satisfied. as of session 4 the major gaps
+(srfi/159, srfi/160, srfi/179, srfi/231, scheme/vector/*, chibi/crypto/*,
+chibi/highlight, chibi/show/base, scheme/small, scheme/red) are all done.
+remaining ❌ entries are mostly intentionally excluded or genuinely need
+shadow/trampoline work. lower priority — most useful modules are already in.
 
 ## key files
 

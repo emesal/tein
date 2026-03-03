@@ -50,13 +50,13 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `scheme/process-context` | 🌑 | shadow → `tein/process` (neutered env/argv) |
 | `scheme/r5rs` | ❌ | re-exports scheme/file+load+process-context; blocked |
 | `scheme/read` | ✅ | |
-| `scheme/red` | ❌ | mega re-export bundle — causes stub collision; needs dedup fix first |
+| `scheme/red` | 🔒 | r7rs red standard — pulls `scheme/eval + scheme/load`; use `.allow_module("scheme/red")` to enable |
 | `scheme/regex` | ✅ | |
 | `scheme/repl` | 🌑 | shadow → neutered `interaction-environment` |
 | `scheme/rlist` | ✅ | |
 | `scheme/set` | ✅ | |
 | `scheme/show` | ✅ | |
-| `scheme/small` | ❌ | mega re-export bundle — causes stub collision; needs dedup fix first |
+| `scheme/small` | 🔒 | r7rs small standard — pulls `scheme/eval + scheme/load`; use `.allow_module("scheme/small")` to enable |
 | `scheme/sort` | ✅ | |
 | `scheme/stream` | ✅ | |
 | `scheme/text` | ✅ | |
@@ -64,19 +64,19 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `scheme/time/tai` | 🔒 | needs external TAI data; unsafe by default |
 | `scheme/time/tai-to-utc-offset` | 🔒 | same |
 | `scheme/vector` | ✅ | |
-| `scheme/vector/base` | ❌ | not in VFS (sub-module of vector) |
-| `scheme/vector/c128` | ❌ | not in VFS |
-| `scheme/vector/c64` | ❌ | not in VFS |
-| `scheme/vector/f32` | ❌ | not in VFS |
-| `scheme/vector/f64` | ❌ | not in VFS |
-| `scheme/vector/s8` | ❌ | not in VFS |
-| `scheme/vector/s16` | ❌ | not in VFS |
-| `scheme/vector/s32` | ❌ | not in VFS |
-| `scheme/vector/s64` | ❌ | not in VFS |
-| `scheme/vector/u8` | ❌ | not in VFS |
-| `scheme/vector/u16` | ❌ | not in VFS |
-| `scheme/vector/u32` | ❌ | not in VFS |
-| `scheme/vector/u64` | ❌ | not in VFS |
+| `scheme/vector/base` | ✅ | r7rs alias to `srfi/160/base` |
+| `scheme/vector/c128` | ✅ | r7rs alias to `srfi/160/c128` |
+| `scheme/vector/c64` | ✅ | r7rs alias to `srfi/160/c64` |
+| `scheme/vector/f32` | ✅ | r7rs alias to `srfi/160/f32` |
+| `scheme/vector/f64` | ✅ | r7rs alias to `srfi/160/f64` |
+| `scheme/vector/s8` | ✅ | r7rs alias to `srfi/160/s8` |
+| `scheme/vector/s16` | ✅ | r7rs alias to `srfi/160/s16` |
+| `scheme/vector/s32` | ✅ | r7rs alias to `srfi/160/s32` |
+| `scheme/vector/s64` | ✅ | r7rs alias to `srfi/160/s64` |
+| `scheme/vector/u8` | ✅ | r7rs alias to `srfi/160/u8` |
+| `scheme/vector/u16` | ✅ | r7rs alias to `srfi/160/u16` |
+| `scheme/vector/u32` | ✅ | r7rs alias to `srfi/160/u32` |
+| `scheme/vector/u64` | ✅ | r7rs alias to `srfi/160/u64` |
 | `scheme/write` | ✅ | |
 | `scheme/char/normalization` | ✅ | |
 
@@ -150,29 +150,29 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/151` | ✅ | bitwise ops |
 | `srfi/154` | ✅ | first-class dynamic extents |
 | `srfi/158` | ✅ | generators and accumulators |
-| `srfi/159` | ❌ | show — not in VFS (same as srfi/166?) |
-| `srfi/159/base` | ❌ | |
-| `srfi/159/color` | ❌ | |
-| `srfi/159/columnar` | ❌ | |
-| `srfi/159/unicode` | ❌ | |
-| `srfi/160/base` | ❌ | homogeneous numeric vectors — not in VFS |
-| `srfi/160/c128` | ❌ | |
-| `srfi/160/c64` | ❌ | |
-| `srfi/160/f8` | ❌ | |
-| `srfi/160/f16` | ❌ | |
-| `srfi/160/f32` | ❌ | |
-| `srfi/160/f64` | ❌ | |
-| `srfi/160/mini` | ❌ | |
-| `srfi/160/prims` | ❌ | |
-| `srfi/160/s8` | ❌ | |
-| `srfi/160/s16` | ❌ | |
-| `srfi/160/s32` | ❌ | |
-| `srfi/160/s64` | ❌ | |
-| `srfi/160/u8` | ❌ | |
-| `srfi/160/u16` | ❌ | |
-| `srfi/160/u32` | ❌ | |
-| `srfi/160/u64` | ❌ | |
-| `srfi/160/uvector` | ❌ | |
+| `srfi/159` | ✅ | show (earlier version of srfi/166); shares .scm files via `../166/` relative includes |
+| `srfi/159/base` | ✅ | |
+| `srfi/159/color` | ✅ | |
+| `srfi/159/columnar` | ✅ | |
+| `srfi/159/unicode` | ✅ | |
+| `srfi/160/base` | ✅ | homogeneous numeric vectors |
+| `srfi/160/c128` | ✅ | |
+| `srfi/160/c64` | ✅ | |
+| `srfi/160/f8` | ✅ | |
+| `srfi/160/f16` | ✅ | |
+| `srfi/160/f32` | ✅ | |
+| `srfi/160/f64` | ✅ | |
+| `srfi/160/mini` | ✅ | |
+| `srfi/160/prims` | ✅ | C-backed via hand-written `uvprims.c` in chibi fork |
+| `srfi/160/s8` | ✅ | |
+| `srfi/160/s16` | ✅ | |
+| `srfi/160/s32` | ✅ | |
+| `srfi/160/s64` | ✅ | |
+| `srfi/160/u8` | ✅ | |
+| `srfi/160/u16` | ✅ | |
+| `srfi/160/u32` | ✅ | |
+| `srfi/160/u64` | ✅ | |
+| `srfi/160/uvector` | ✅ | |
 | `srfi/165` | ✅ | the environment monad |
 | `srfi/166` | ✅ | monadic formatting |
 | `srfi/166/base` | ✅ | |
@@ -180,8 +180,8 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/166/columnar` | ✅ | |
 | `srfi/166/pretty` | ✅ | |
 | `srfi/166/unicode` | ✅ | |
-| `srfi/179` | ❌ | nonempty intervals + generalized arrays — not in VFS |
-| `srfi/179/base` | ❌ | |
+| `srfi/179` | ✅ | nonempty intervals + generalized arrays |
+| `srfi/179/base` | ✅ | |
 | `srfi/188` | ✅ | splicing binding constructs |
 | `srfi/193` | ❌ | command channel — not in VFS |
 | `srfi/211/identifier-syntax` | ✅ | |
@@ -190,8 +190,8 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/227` | ✅ | optional arguments |
 | `srfi/227/definition` | ❌ | sub-module not added |
 | `srfi/229` | ✅ | tagged procedures |
-| `srfi/231` | ❌ | intervals and generalized arrays — not in VFS |
-| `srfi/231/base` | ❌ | |
+| `srfi/231` | ✅ | revised intervals and generalized arrays (successor to srfi/179) |
+| `srfi/231/base` | ✅ | |
 
 ---
 
@@ -216,9 +216,9 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/char-set/extras` | ✅ | |
 | `chibi/char-set/full` | ✅ | |
 | `chibi/config` | ❌ | reads config files — file i/o |
-| `chibi/crypto/md5` | ❌ | pure hash — safe ➕ |
-| `chibi/crypto/rsa` | ❌ | RSA crypto — pure, safe ➕ |
-| `chibi/crypto/sha2` | ❌ | pure hash — safe ➕ |
+| `chibi/crypto/md5` | ✅ | pure hash |
+| `chibi/crypto/rsa` | ✅ | RSA crypto — pure scheme |
+| `chibi/crypto/sha2` | ✅ | pure hash; cond-expand takes srfi/151 + chibi/bytevector path |
 | `chibi/csv` | ✅ | CSV parser |
 | `chibi/diff` | ✅ | diff algorithm |
 | `chibi/disasm` | ❌ | chibi bytecode disassembler — exposes internals |
@@ -229,7 +229,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/filesystem` | ✅ | sandbox stub (phase 1) — importable, all fns raise `[sandbox:chibi/filesystem]` error |
 | `chibi/generic` | ✅ | generic functions |
 | `chibi/heap-stats` | ❌ | GC heap introspection — internal |
-| `chibi/highlight` | ❌ | syntax highlighting — probably safe ➕ |
+| `chibi/highlight` | ✅ | syntax highlighting — pure scheme |
 | `chibi/ieee-754` | ❌ | not in lib? (listed in original inventory but no .sld found) |
 | `chibi/io` | ✅ | string/port i/o helpers; internal dep |
 | `chibi/iset` | ✅ | |
@@ -268,8 +268,8 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/repl` | ❌ | interactive REPL — use tein/reader |
 | `chibi/scribble` | ❌ | scribble doc format — file i/o |
 | `chibi/shell` | ✅ | sandbox stub (phase 1) — fns + macros all stubbed |
-| `chibi/show` | ❌ | not in VFS (only `chibi/show/shared` is) |
-| `chibi/show/base` | ❌ | not in VFS |
+| `chibi/show` | ❌ | not in VFS — use `srfi/166` instead |
+| `chibi/show/base` | ✅ | thin alias to `srfi/166/base` |
 | `chibi/show/c` | ❌ | C pretty printer |
 | `chibi/show/color` | ❌ | not in VFS |
 | `chibi/show/column` | ❌ | not in VFS |
@@ -328,25 +328,13 @@ tein's own modules — always in VFS.
 
 | category | ✅ safe | 🔒 unsafe | 🌑 shadow | ❌ not in VFS |
 |----------|---------|----------|----------|--------------|
-| scheme/* | 30 | 5 | 3 | 15 |
-| srfi/* | 56 | 3 | 1 | 31 |
-| chibi/* | 37 | 0 | 0 | 42 |
+| scheme/* | 48 | 7 | 3 | 2 |
+| srfi/* | 100 | 3 | 1 | 2 |
+| chibi/* | 60 | 0 | 0 | 39 |
 | tein/* | 12 | 0 | 0 | 0 |
-| **total** | **135** | **8** | **4** | **88** |
+| **total** | **220** | **10** | **4** | **43** |
 
 ### priority queue
-
-**➕ safe to add (no sandboxing needed):**
-- `chibi/crypto/md5`, `chibi/crypto/rsa`, `chibi/crypto/sha2` — pure hash/crypto
-- `srfi/159` (and sub-modules) — same as srfi/166 but older version
-- `srfi/160` (and sub-modules) — homogeneous vectors; needs C stub compilation step
-- `srfi/179`, `srfi/231` — depend on srfi/160 (blocked until srfi/160 works)
-- `scheme/vector/*` sub-modules — all alias to srfi/160 (blocked until srfi/160 works)
-
-**architectural fix needed:**
-- `scheme/small`, `scheme/red` — mega re-export bundles that duplicate hundreds of
-  bindings; `unexported_stubs()` needs dedup by name (skip names already provided by
-  an allowed module) before these can be safely added.
 
 **✅ shadow stubs done (phase 1 — error-on-call):**
 - `chibi/filesystem`, `chibi/process`, `chibi/system`
@@ -372,7 +360,6 @@ tein's own modules — always in VFS.
 - `chibi/reload`, `chibi/repl`, `chibi/trace`, `chibi/type-inference`
 - `chibi/snow/*` (package manager)
 - `chibi/emscripten`, `chibi/win32/*`
-- `chibi/highlight` (chibi-specific doc tool)
 - `chibi/doc`, `chibi/scribble` (doc generation tools)
 - `chibi/zlib` (depends on native zlib; potential future clib feature)
 - `chibi/pty` (pseudo-terminal; not useful for embedded)

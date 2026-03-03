@@ -1,6 +1,6 @@
 # shadow module stubs — implementation plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **status: complete** — all 8 tasks done across session 4 (2026-03-03). see `docs/handoff-module-inventory.md` for summary.
 
 **Goal:** make all OS-touching chibi modules importable in sandboxed contexts with clear error-on-call stubs, plus add chibi/channel as a normal embedded module.
 
