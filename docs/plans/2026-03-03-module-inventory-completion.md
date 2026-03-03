@@ -4,7 +4,7 @@
 
 **goal:** close out the module inventory — every chibi-scheme module either in VFS, intentionally excluded, or tracked in a github issue. closes #92.
 
-**architecture:** 3 pure VFS additions, 8 new shadow stubs (generated), 1 hand-written shadow (scheme/load → tein/load). all changes in `tein/src/vfs_registry.rs` (registry + SHADOW_STUBS), `tein/src/context.rs` (tests), and `docs/module-inventory.md` (status updates).
+**architecture:** 3 pure VFS additions, 9 new shadow stubs (generated), 1 hand-written shadow (scheme/load → tein/load). all changes in `tein/src/vfs_registry.rs` (registry + SHADOW_STUBS), `tein/src/context.rs` (tests), and `docs/module-inventory.md` (status updates).
 
 **tech stack:** rust, scheme (`.sld` module definitions), build.rs shadow stub generator
 
@@ -12,14 +12,40 @@
 
 ---
 
+## ⚡ bootstrap for next context (batch 4 only remains)
+
+**branch:** `feature/module-inventory-completion-2603`
+
+**state:** batches 1–3 fully committed. only batch 4 remains (tasks 10–13).
+
+**what was done:**
+- batch 1: `chibi/mime`, `chibi/binary-record`, `chibi/memoize` added to VFS (pure scheme, no OS deps)
+  - gotcha: `binary-record.sld` references `binary-record-chicken.scm` via cond-expand — must be in `files` array too
+  - gotcha: memoize's `(memoize +)` fails in sandbox (procedure-arity of variadic builtins); test uses `make-lru-cache` instead
+- batch 2: `chibi/stty`, `chibi/term/edit-line`, `chibi/app`, `chibi/config`, `chibi/log` shadow stubs
+- batch 3: `chibi/tar`, `srfi/193`, `chibi/apropos` shadow stubs + `scheme/load` hand-written shadow
+  - gotcha: `(procedure? load)` fails after `(import (scheme load))` — chibi's load is a builtin opcode with weird lookup semantics when replaced by user procedure. test verifies import succeeds + non-VFS rejection instead
+  - shadow test pattern: use `match result { Err(e) => assert!(e.to_string().contains("[sandbox:...")), Ok(v) => panic!(...) }` not `result.unwrap()`
+
+**tasks 11 (scheme/load row) and 13 (PR branch creation) are already partially done:**
+- scheme/load row in module-inventory.md is already updated to 🌑
+- branch already exists: `feature/module-inventory-completion-2603`
+
+**what remains in batch 4:**
+- task 10: update summary table counts + replace priority queue section in `docs/module-inventory.md`
+- task 12: update `docs/handoff-module-inventory.md` + close GH issue #92
+- task 13: push branch + create PR against `dev`
+
+---
+
 ## batch structure
 
 the work is split into 4 batches. after each batch: lint, update this plan, commit, halt for context clearing.
 
-- **batch 1** (tasks 1-3): pure VFS additions — chibi/mime, chibi/binary-record, chibi/memoize
-- **batch 2** (tasks 4-6): shadow stubs part 1 — chibi/stty, chibi/term/edit-line, chibi/log, chibi/app, chibi/config
-- **batch 3** (tasks 7-9): shadow stubs part 2 — chibi/tar, srfi/193, chibi/apropos
-- **batch 4** (tasks 10-13): hand-written scheme/load shadow, docs finalisation, close #92
+- **batch 1** (tasks 1-3): pure VFS additions — chibi/mime, chibi/binary-record, chibi/memoize ✅
+- **batch 2** (tasks 4-6): shadow stubs part 1 — chibi/stty, chibi/term/edit-line, chibi/log, chibi/app, chibi/config ✅
+- **batch 3** (tasks 7-9): shadow stubs part 2 — chibi/tar, srfi/193, chibi/apropos + scheme/load shadow ✅
+- **batch 4** (tasks 10-13): docs finalisation, close #92, PR
 
 ---
 
@@ -980,18 +1006,7 @@ docs: finalise module inventory summary — all modules resolved
 
 ## task 11: update docs/module-inventory.md — scheme/load entry in table
 
-**status:** pending
-
-**files:**
-- modify: `docs/module-inventory.md` (scheme/* table row for scheme/load)
-
-**step 1: update scheme/load row**
-
-| old | new |
-|-----|-----|
-| `scheme/load` ❌ `blocked; use tein/load instead` | `scheme/load` 🌑 `shadow → re-exports from (tein load) (VFS-restricted)` |
-
-**step 2: commit** (fold into task 10 commit if same session)
+**status:** done (already applied in batch 3 commit)
 
 ---
 
