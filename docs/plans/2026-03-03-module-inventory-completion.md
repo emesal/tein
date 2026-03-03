@@ -639,7 +639,7 @@ all now shadow stubs (🌑) in VFS.
 
 ## task 7: add shadow stubs — chibi/tar + srfi/193 + chibi/apropos
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY: 3 VfsEntry, SHADOW_STUBS: 3 ShadowStub)
@@ -805,7 +805,7 @@ apropos: env introspection exposes internal module structure
 
 ## task 8: batch 3 wrap-up
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `docs/module-inventory.md` (update 3 status markers)
@@ -841,7 +841,7 @@ chibi/tar, srfi/193, chibi/apropos now shadow stubs (🌑) in VFS.
 
 ## task 9: add scheme/load hand-written shadow
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY: 1 VfsEntry with `shadow_sld: Some(...)`)
@@ -1122,5 +1122,5 @@ update this section after each batch:
 |-------|-------|--------|-------|
 | 1 | 1-3 | done | pure VFS: mime, binary-record, memoize |
 | 2 | 4-6 | done | shadows: stty, edit-line, log, app, config |
-| 3 | 7-8 | pending | shadows: tar, srfi/193, apropos |
-| 4 | 9-13 | pending | scheme/load shadow, docs, close #92, PR |
+| 3 | 7-8 | done | shadows: tar, srfi/193, apropos |
+| 4 | 9-13 | in progress | scheme/load shadow done; docs, close #92, PR remaining |

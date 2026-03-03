@@ -43,7 +43,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `scheme/lazy` | ✅ | |
 | `scheme/list` | ✅ | |
 | `scheme/list-queue` | ✅ | |
-| `scheme/load` | ❌ | blocked; use `tein/load` instead |
+| `scheme/load` | 🌑 | shadow → re-exports from `(tein load)` (VFS-restricted) |
 | `scheme/lseq` | ✅ | |
 | `scheme/mapping` | ✅ | |
 | `scheme/mapping/hash` | 🔒 | hash-backed mappings; pulls in `srfi/146/hash` (unsafe) |
@@ -183,7 +183,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/179` | ✅ | nonempty intervals + generalized arrays |
 | `srfi/179/base` | ✅ | |
 | `srfi/188` | ✅ | splicing binding constructs |
-| `srfi/193` | ❌ | command channel — not in VFS |
+| `srfi/193` | 🌑 | shadow stub — leaks argv + script path |
 | `srfi/211/identifier-syntax` | ✅ | |
 | `srfi/211/variable-transformer` | ✅ | |
 | `srfi/219` | ✅ | define higher-order lambda |
@@ -202,7 +202,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | module | status | notes |
 |--------|--------|-------|
 | `chibi/app` | 🌑 | shadow stub — CLI framework; depends on config + process-context |
-| `chibi/apropos` | ❌ | reflects on env/module contents |
+| `chibi/apropos` | 🌑 | shadow stub — env introspection, info leak |
 | `chibi/assert` | ✅ | |
 | `chibi/ast` | ✅ | AST introspection; internal dep (srfi/18, chibi/io etc) |
 | `chibi/base64` | ✅ | pure encoder/decoder |
@@ -282,7 +282,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/sxml` | ✅ | SXML |
 | `chibi/syntax-case` | ✅ | syntax-case macros |
 | `chibi/system` | ✅ | sandbox stub (phase 1) — importable, all fns raise sandbox error |
-| `chibi/tar` | ❌ | tar format — file i/o ⚠️ |
+| `chibi/tar` | 🌑 | shadow stub — tar archives, hard-wired to filesystem (#105) |
 | `chibi/temp-file` | ✅ | sandbox stub (phase 1) — importable, fns raise sandbox error |
 | `chibi/term/ansi` | ✅ | ANSI terminal escape codes |
 | `chibi/term/edit-line` | 🌑 | shadow stub — line editor, depends on stty |
@@ -343,11 +343,8 @@ tein's own modules — always in VFS.
   `chibi/net/server-util`, `chibi/net/servlet`
 - `chibi/channel` (embedded, not a stub — but depends on srfi/18 / threads)
 
-**⚠️ still needs shadow/trampoline (not in VFS):**
-- `chibi/tar` — file i/o
-- `chibi/apropos`, `srfi/193` — env introspection / info leak
-- `scheme/load` — arbitrary file loading (already blocked; use `tein/load`)
-- `scheme/r5rs` — already blocked
+**⚠️ still blocked (no shadow):**
+- `scheme/r5rs` — tracked in #106 (blocked on #97)
 
 **phase 2 (selective gating — not started):**
 - selectively expose safe fns from stub modules with real FS/network policy checks

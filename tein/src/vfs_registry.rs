@@ -432,6 +432,22 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // scheme/load: VFS shadow — re-exports VFS-restricted load from (tein load).
+    // chibi's native (scheme load) exposes unrestricted file loading.
+    // this shadow provides safe load semantics via tein-load-vfs-internal.
+    // see also: tein/load.sld exports load as (rename tein-load-vfs-internal load).
+    VfsEntry {
+        path: "scheme/load",
+        deps: &["tein/load"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some(
+            "(define-library (scheme load)\n  (import (tein load))\n  (export load))\n",
+        ),
+    },
     VfsEntry {
         path: "scheme/list",
         deps: &["srfi/1"],
@@ -2056,6 +2072,36 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None, // generated from SHADOW_STUBS by build.rs
     },
     VfsEntry {
+        path: "chibi/apropos",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/tar",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "srfi/193",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
         path: "chibi/net",
         deps: &["scheme/base"],
         files: &[],
@@ -3393,6 +3439,44 @@ const SHADOW_STUBS: &[ShadowStub] = &[
             "conf-specialize", "read-from-file",
             "conf-source", "conf-head", "conf-parent",
             "assoc-get", "assoc-get-list",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- environment introspection ---
+    ShadowStub {
+        path: "chibi/apropos",
+        fn_exports: &["apropos", "apropos-list"],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- tar archives ---
+    ShadowStub {
+        path: "chibi/tar",
+        fn_exports: &[
+            "tar", "make-tar", "tar?", "read-tar", "write-tar",
+            "tar-safe?", "tar-files", "tar-fold",
+            "tar-extract", "tar-extract-file", "tar-create",
+            "tar-path", "tar-path-prefix", "tar-mode",
+            "tar-uid", "tar-gid", "tar-owner", "tar-group",
+            "tar-size", "tar-time", "tar-type", "tar-link-name",
+            "tar-path-set!", "tar-mode-set!", "tar-uid-set!",
+            "tar-gid-set!", "tar-owner-set!", "tar-group-set!",
+            "tar-size-set!", "tar-time-set!", "tar-type-set!",
+            "tar-link-name-set!",
+            "tar-device-major", "tar-device-major-set!",
+            "tar-device-minor", "tar-device-minor-set!",
+            "tar-ustar", "tar-ustar-set!",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- SRFI-193 command-line ---
+    ShadowStub {
+        path: "srfi/193",
+        fn_exports: &[
+            "command-line", "command-name", "command-args",
+            "script-file", "script-directory",
         ],
         const_exports: &[],
         macro_exports: &[],
