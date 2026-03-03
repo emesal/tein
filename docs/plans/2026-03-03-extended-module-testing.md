@@ -12,6 +12,72 @@
 
 ---
 
+## execution status (as of 2026-03-03 context break)
+
+**completed:**
+- ✅ task 1: `(chibi test)` added to VFS registry (commit `220090a`)
+- ✅ task 2: `scheme/bytevector-test` + all `srfi/N/test` entries added (commit `a0ae862`)
+- ✅ task 3: all `chibi/X-test` entries added (commit `b7bba15`)
+- 🔴 task 4: `tests/vfs_module_tests.rs` created but blocked — `(chibi test)` fails to load; WIP commit `28f4898`
+
+**tasks 5–9:** pending
+
+**branch:** `feature/extended-module-testing-2603`
+
+---
+
+## blocking issue: `(chibi test)` load fails — root cause & fix required
+
+### root cause
+
+`(chibi test)` → `(scheme time)` → `(include-shared "time")` (clib) raises `EvalError("")` in any context tein can construct. additionally, `(chibi test)` → `(scheme process-context)` shadow previously failed because shadow SLDs used `(import (tein X))` inside library body — fixed in WIP commit but `scheme/time` is the remaining blocker.
+
+**chain:**
+1. `(chibi test)` → `(scheme process-context)` [shadow, fixed] → `(scheme time)` [clib, broken]
+2. `scheme/time.sld` does `(include-shared "time")` → calls `sexp_init_lib_scheme_time` → raises empty exception in tein context
+
+### what was tried
+- `Context::new_standard()` — no shadows registered, `scheme/process-context` not found
+- `Context::builder().standard_env().sandboxed(Modules::All)` — shadows registered, but `(tein process)` library export problem in null env; then `scheme/time` clib fails
+- `Context::builder().standard_env().with_vfs_shadows()` (new builder option added in WIP) — shadows registered, `scheme/process-context` shadow fixed, but `scheme/time` still raises empty EvalError
+- shadow SLD fix: replaced `(import (tein process))` / `(import (tein file))` in shadow bodies with `(import (scheme base))` + `(define x x)` captures. fixes the process-context shadow but doesn't help scheme/time
+
+### what was added in WIP
+- `ContextBuilder::with_vfs_shadows()` field + method in `context.rs` — registers VFS shadows without sandboxing
+- `vfs_registry.rs` shadow SLD fixes:
+  - `scheme/process-context`: replaced `(import (tein process))` with `(import (scheme base))` + explicit `(define exit exit)` etc.
+  - `scheme/file`: same pattern — `(import (scheme base))` + `(define file-exists? file-exists?)` etc.
+- `tests/vfs_module_tests.rs` created with RAISING_APPLIER + all 63 test functions
+
+### next step for task 4
+
+investigate why `(scheme time)` clib raises `EvalError("")` in a `new_standard()` + `with_vfs_shadows()` context. specifically:
+
+1. check `scheme/time.c` `sexp_init_lib_scheme_time` — does it call `(get-environment-variable ...)` or read files at init time?
+2. check if `scheme/time` needs the actual leap second list file from the filesystem
+3. consider: `scheme/time` may simply not be needed for `(chibi test)` applier functionality — the relevant exports are `current-test-applier`, `current-test-comparator`, etc. which don't depend on time. so: can we skip `(scheme time)` entirely by pre-loading it from `(tein time)` which IS available?
+
+**proposed fix**: before `(import (chibi test))`, pre-import `(tein time)` which provides `current-second`, `current-jiffy`, `jiffies-per-second` (the same things `scheme/time` provides). then register a stub `scheme/time` VFS shadow that just re-exports from tein/time. add to `vfs_registry.rs`:
+
+```rust
+// scheme/time shadow for chibi/test context — re-exports tein/time trampolines
+// avoids loading scheme/time.c which has filesystem deps at init time
+VfsEntry {
+    path: "scheme/time",
+    // ... but wait: scheme/time is already VfsSource::Embedded (not Shadow)
+    // cannot have two entries with same path
+```
+
+actually this won't work — `scheme/time` already has an Embedded entry with a clib. adding a Shadow entry would conflict.
+
+**alternative**: look at the actual `sexp_init_lib_scheme_time` to understand what fails, then fix it OR pre-import `(scheme time)` differently. the `scheme/time` clib `sexp_init_lib_scheme_time` is compiled from `lib/scheme/time.c`. check that file for what it does at init — if it only exports C functions and doesn't call into scheme at init, the failure is elsewhere.
+
+**most likely diagnosis**: `scheme/time.sld` does `(import (scheme process-context))` then uses `get-environment-variable`. after our shadow fix, `scheme/process-context` works. but `scheme/time` also does `(import (chibi))` — in `new_standard()` non-sandboxed context, `(chibi)` resolves to the eval env and provides various chibi-specific procs. the clib `(include-shared "time")` provides `current-clock-second` and `jiffies-per-second` from C. if the clib init itself fails (empty EvalError), maybe it's a GC issue during clib loading. try running with `cargo test --features debug-chibi` to get GC instrumentation output.
+
+**simplest working alternative**: use `(tein time)` to provide time procs, and avoid loading `(scheme time)` in the harness. need to check if `(chibi test)` actually USES any time function or just needs the import to succeed at module load time. if scheme/time is only used by chibi/test's `test-exit` (which calls `(exit)`) and not by the applier we install, we could pre-define `current-jiffy` and `jiffies-per-second` from tein/time and skip the real scheme/time.
+
+---
+
 ## reference: VfsEntry pattern
 
 every entry in `VFS_REGISTRY` looks like this (copy from any existing entry):
@@ -836,7 +902,62 @@ git commit -m "feat: add chibi/X-test suites to VFS registry"
 
 ---
 
-## task 4: create `tests/vfs_module_tests.rs` — srfi tests
+## task 4: fix `(chibi test)` load + verify test harness [PARTIALLY DONE — BLOCKED]
+
+**status:** `tests/vfs_module_tests.rs` exists with all 63 test functions (WIP commit `28f4898`). `run_chibi_test` uses `Context::builder().standard_env().with_vfs_shadows().build()`. blocked on `(scheme time)` load failure.
+
+**files:**
+- modify: `tein/tests/vfs_module_tests.rs` (update `run_chibi_test` once fixed)
+- possibly modify: `tein/src/vfs_registry.rs` (scheme/time shadow or tein/time dep fix)
+- possibly modify: `tein/src/context.rs` (if with_vfs_shadows needs adjustment)
+
+**step 1:** diagnose `(scheme time)` failure. run:
+
+```bash
+cd ~/projects/tein
+# check what sexp_init_lib_scheme_time does at init vs. what chibi test actually uses from scheme/time
+grep -n "current-jiffy\|jiffies-per-second\|current-second\|get-environment-variable" \
+    target/chibi-scheme/lib/scheme/time.c | head -30
+# check if (tein time) feature provides the same exports
+cargo test --lib -- --nocapture test_scheme_time 2>&1 | head -20
+```
+
+**step 2:** if `scheme/time` at init time calls `get-environment-variable` from C (not scheme):
+check if this is the actual crash — pre-evaluating `(import (tein time))` before `(import (chibi test))` may make `current-jiffy` / `jiffies-per-second` available so `scheme/time` doesn't need to fully init. try adding to `run_chibi_test`:
+
+```rust
+ctx.evaluate("(import (tein time))").expect("tein/time pre-load");
+```
+
+**step 3:** if that doesn't work, check `scheme/time.c`'s `sexp_init_lib_scheme_time` — specifically whether it reads the leap second list file. if yes, run tests with filesystem access or provide a stub file.
+
+**step 4:** alternative — if `(chibi test)` doesn't actually CALL any scheme/time proc during our test (only at `test-exit` time), we can pre-define stubs:
+
+```rust
+// before (import (chibi test)), define time stubs from tein/time
+ctx.evaluate("(import (tein time))").ok();
+// register scheme/time as a thin wrapper around tein/time
+ctx.evaluate("(define current-second (tein-current-second))").ok(); // or similar
+```
+
+**step 5:** once `(import (chibi test))` succeeds, run the full test file:
+
+```bash
+cd ~/projects/tein && cargo test -p tein --test vfs_module_tests 2>&1 | tail -30
+```
+
+fix any individual test failures (likely dep issues in specific srfi entries).
+
+**step 6:** commit (squashing WIP):
+
+```bash
+git add tein/tests/vfs_module_tests.rs tein/src/vfs_registry.rs tein/src/context.rs
+git commit -m "feat: vfs_module_tests harness + (chibi test) load fix + srfi test suite integration"
+```
+
+---
+
+## task 4 ORIGINAL (preserved for reference): create `tests/vfs_module_tests.rs` — srfi tests
 
 **files:**
 - create: `tein/tests/vfs_module_tests.rs`
