@@ -1387,7 +1387,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         clib: Some(ClibEntry {
             source: "lib/srfi/144/math.c",
             init_suffix: "srfi_144_math",
-            vfs_key: "/vfs/lib/srfi/144",
+            vfs_key: "/vfs/lib/srfi/144/math",
             posix_only: false,
         }),
         default_safe: true,
