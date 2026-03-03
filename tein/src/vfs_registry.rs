@@ -814,12 +814,23 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (scheme file)
-  (import (tein file))
+  (import (scheme base))
   (export file-exists? delete-file
           open-input-file open-binary-input-file
           open-output-file open-binary-output-file
           call-with-input-file call-with-output-file
-          with-input-from-file with-output-to-file))
+          with-input-from-file with-output-to-file)
+  (begin
+    (define file-exists? file-exists?)
+    (define delete-file delete-file)
+    (define open-input-file open-input-file)
+    (define open-binary-input-file open-binary-input-file)
+    (define open-output-file open-output-file)
+    (define open-binary-output-file open-binary-output-file)
+    (define call-with-input-file call-with-input-file)
+    (define call-with-output-file call-with-output-file)
+    (define with-input-from-file with-input-from-file)
+    (define with-output-to-file with-output-to-file)))
 "),
     },
     // scheme/repl: VFS shadow — sandboxed contexts get neutered interaction-environment.
@@ -841,11 +852,19 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     (define (interaction-environment) (current-environment))))
 "),
     },
-    // scheme/process-context: VFS shadow — re-exports from (tein process).
+    // scheme/process-context: VFS shadow — wraps (tein process) trampolines.
     // trampolines neuter env vars, command-line in sandboxed contexts.
     // exit + emergency-exit both use the (tein process) eval escape hatch:
     // neither runs dynamic-wind "after" thunks (emergency-exit semantics).
     // r7rs exit should run them; see GH #101 for the full situation.
+    //
+    // IMPORTANT: does NOT use `(import (tein process))` — tein/process exports
+    // its bindings via define_fn_variadic into the global env, not the library
+    // env. in sandboxed null-env contexts, a library-level `(import (tein process))`
+    // cannot see those global bindings and fails with an empty EvalError. instead,
+    // we capture the trampolines directly from the current env using `define`.
+    // the trampolines are always present in the eval context before this shadow
+    // is loaded (registered by Context::register_process_module() during build).
     VfsEntry {
         path: "scheme/process-context",
         deps: &["tein/process"],
@@ -856,10 +875,14 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (scheme process-context)
-  (import (tein process))
+  (import (scheme base))
   (export get-environment-variable get-environment-variables
           command-line exit emergency-exit)
   (begin
+    (define get-environment-variable get-environment-variable)
+    (define get-environment-variables get-environment-variables)
+    (define command-line command-line)
+    (define exit exit)
     (define emergency-exit exit)))
 "),
     },
