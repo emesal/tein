@@ -120,6 +120,93 @@ fn validate_sld_includes(chibi_dir: &str) {
     }
 }
 
+/// validate that every VFS entry whose .sld contains `(include-shared ...)` has a
+/// `ClibEntry` in the registry. panics at build time with an actionable message if not.
+///
+/// `include-shared` embeds a C static library; without a `ClibEntry`, the module loads
+/// but its C-backed bindings are silently absent. this validator catches that drift.
+///
+/// **keep this in sync with `collect_include_files`** — both parse .sld files.
+fn validate_include_shared(chibi_dir: &str) {
+    for entry in VFS_REGISTRY
+        .iter()
+        .filter(|e| e.source == VfsSource::Embedded)
+    {
+        let sld_rel = match entry.files.iter().find(|f| f.ends_with(".sld")) {
+            Some(f) => *f,
+            None => continue,
+        };
+
+        let sld_path = format!("{chibi_dir}/{sld_rel}");
+        let source = match fs::read_to_string(&sld_path) {
+            Ok(s) => s,
+            Err(e) => panic!("failed to read {sld_path}: {e}"),
+        };
+
+        let stems = collect_include_shared_stems(&source);
+        if stems.is_empty() {
+            continue;
+        }
+
+        if entry.clib.is_none() {
+            panic!(
+                "registry validation failed for '{}':\n  \
+                 .sld contains (include-shared {:?}) but clib is None.\n  \
+                 run chibi-ffi on the corresponding .stub file and add a ClibEntry \
+                 to the entry in vfs_registry.rs.",
+                entry.path, stems,
+            );
+        }
+    }
+}
+
+/// extract bare stems from `(include-shared "stem")` directives in a .sld source string.
+///
+/// `include-shared` takes a stem without extension: `(include-shared "144/math")`.
+/// returns the list of stems found. empty list means no C backing required.
+fn collect_include_shared_stems(source: &str) -> Vec<String> {
+    use tein_sexp::{SexpKind, parser};
+
+    let mut result = Vec::new();
+
+    let sexps = match parser::parse_all(source) {
+        Ok(s) => s,
+        Err(_) => return result,
+    };
+
+    fn walk(sexp: &tein_sexp::Sexp, out: &mut Vec<String>) {
+        if let SexpKind::List(items) = &sexp.kind {
+            if let Some(first) = items.first()
+                && let SexpKind::Symbol(name) = &first.kind
+            {
+                if name == "include-shared" {
+                    for arg in items.iter().skip(1) {
+                        if let SexpKind::String(stem) = &arg.kind {
+                            out.push(stem.clone());
+                        }
+                    }
+                    return;
+                }
+                // skip cond-expand entirely — include-shared inside cond-expand
+                // may be dialect-specific (e.g. chibi-only) and tein may take a
+                // different branch. conditional C backing must be handled manually.
+                if name == "cond-expand" {
+                    return;
+                }
+            }
+            for item in items {
+                walk(item, out);
+            }
+        }
+    }
+
+    for sexp in &sexps {
+        walk(sexp, &mut result);
+    }
+
+    result
+}
+
 /// extract file paths from `(include ...)` and `(include-ci ...)` directives.
 ///
 /// only handles the `.scm` include form (not `include-shared`, which embeds C `.so`).
@@ -433,6 +520,8 @@ fn main() {
 
     // validate that .sld files reference only files present in their entry's files list
     validate_sld_includes(&chibi_dir);
+    // validate that .sld files with include-shared have a ClibEntry in the registry
+    validate_include_shared(&chibi_dir);
 
     // generate install.h (with VFS module path) into OUT_DIR/chibi/
     generate_install_h(&out_dir);
@@ -528,6 +617,7 @@ fn main() {
 
     // rerun triggers
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/vfs_registry.rs");
     println!("cargo:rerun-if-changed={include_dir}/chibi/sexp.h");
     println!("cargo:rerun-if-changed={include_dir}/chibi/features.h");
     for src in &sources {

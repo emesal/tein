@@ -7933,15 +7933,12 @@ mod tests {
     #[test]
     fn test_chibi_channel_in_vfs() {
         // chibi/channel is registered in the VFS (pure-scheme, not OS-touching).
-        // its dependency srfi/18 (threads) requires thread support; since tein
-        // compiles with SEXP_USE_GREEN_THREADS=0, full channel usage is not
-        // available. we verify: (1) it is NOT blocked as a SandboxViolation, and
-        // (2) it is importable in a non-sandboxed standard context where its VFS
-        // registration is exercised.
+        // its dependency srfi/18 uses SEXP_USE_GREEN_THREADS — enabled on posix,
+        // disabled on windows. on posix, with chibi/time's ClibEntry wired up,
+        // (import (chibi channel)) fully succeeds. on windows, it errors (thread
+        // support absent) but must NOT be a SandboxViolation (not blocked by gate).
         use crate::sandbox::Modules;
 
-        // in sandbox, importing chibi/channel should fail with an eval error
-        // (thread support absent) not a SandboxViolation (not blocked by gate).
         let ctx_sandbox = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
@@ -7949,14 +7946,17 @@ mod tests {
             .allow_module("srfi/18")
             .build()
             .unwrap();
-        let err = ctx_sandbox
-            .evaluate("(import (chibi channel))")
-            .unwrap_err();
-        assert!(
-            !matches!(err, Error::SandboxViolation(_)),
-            "chibi/channel should not be a sandbox violation, got: {:?}",
-            err
-        );
+        let result = ctx_sandbox.evaluate("(import (chibi channel))");
+        match result {
+            // posix: green threads enabled + chibi/time wired → import succeeds
+            Ok(_) => {}
+            // windows (or any other failure): must not be a sandbox gate violation
+            Err(err) => assert!(
+                !matches!(err, Error::SandboxViolation(_)),
+                "chibi/channel should not be a sandbox violation, got: {:?}",
+                err
+            ),
+        }
     }
 
     #[test]
@@ -8320,6 +8320,59 @@ mod tests {
                         (= (u8vector-ref v 2) 7)))",
             )
             .expect("srfi/160/u8 should load and work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_srfi_144_flonum_constants() {
+        // srfi/144 requires a C-backed static library (math.c generated from math.stub).
+        // fl-pi should be approximately π — a C constant, not pure scheme.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (srfi 144)) fl-pi")
+            .expect("fl-pi should be defined");
+        match result {
+            Value::Float(f) => assert!((f - std::f64::consts::PI).abs() < 1e-10),
+            other => panic!("expected float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scheme_bytevector_endian() {
+        // scheme/bytevector requires a C-backed static library (bytevector.c from bytevector.stub).
+        // bytevector-u16-ref with little-endian on bytes [1, 0] should give 1.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate(
+                "(import (scheme bytevector)) \
+                 (let ((bv (make-bytevector 2 0))) \
+                   (bytevector-u8-set! bv 0 1) \
+                   (bytevector-u16-ref bv 0 'little))",
+            )
+            .expect("bytevector-u16-ref should work");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_chibi_time_import() {
+        // chibi/time requires a C-backed static library (time.c from time.stub).
+        // get-time-of-day is a C procedure — procedure? verifies it loaded.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (chibi time)) (procedure? get-time-of-day)")
+            .expect("chibi/time should load");
         assert_eq!(result, Value::Boolean(true));
     }
 }
