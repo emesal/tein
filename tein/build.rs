@@ -416,6 +416,10 @@ fn main() {
             .filter(|e| e.source == VfsSource::Embedded && feature_enabled(e.feature))
             .flat_map(|e| e.files.iter().copied()),
     );
+    // dedup: multiple entries may share the same .scm file (e.g. srfi/160/* all include uvector.scm).
+    // first-match semantics at VFS lookup time means order doesn't matter; just drop duplicates.
+    vfs_files.sort_unstable();
+    vfs_files.dedup();
 
     // validate that .sld files reference only files present in their entry's files list
     validate_sld_includes(&chibi_dir);
