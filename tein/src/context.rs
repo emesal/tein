@@ -1521,6 +1521,10 @@ impl ContextBuilder {
     /// resolved automatically from the registry — callers never need to think about
     /// transitive imports.
     ///
+    /// note: dep resolution happens at [`ContextBuilder::build`] time, not here.
+    /// `allow_module` only appends to the list; `build()` calls `registry_resolve_deps`
+    /// on the final `Modules::Only(list)` to expand transitive deps before arming the gate.
+    ///
     /// # examples
     ///
     /// ```
