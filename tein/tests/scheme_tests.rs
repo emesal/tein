@@ -298,3 +298,23 @@ fn test_scheme_ext_module() {
     ctx.evaluate(include_str!("scheme/ext_module.scm"))
         .expect("scheme ext module test failed");
 }
+
+#[test]
+fn test_scheme_char() {
+    run_scheme_test(include_str!("scheme/scheme_char.scm"));
+}
+
+#[test]
+fn test_scheme_division() {
+    run_scheme_test(include_str!("scheme/scheme_division.scm"));
+}
+
+#[test]
+fn test_scheme_fixnum() {
+    run_scheme_test(include_str!("scheme/scheme_fixnum.scm"));
+}
+
+#[test]
+fn test_scheme_bitwise() {
+    run_scheme_test(include_str!("scheme/scheme_bitwise.scm"));
+}
