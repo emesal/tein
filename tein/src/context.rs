@@ -7708,8 +7708,7 @@ mod tests {
             .sandboxed(Modules::Safe)
             .build()
             .expect("sandboxed context");
-        let stub_err = sandboxed
-            .evaluate("(import (chibi filesystem)) (directory-files \".\")");
+        let stub_err = sandboxed.evaluate("(import (chibi filesystem)) (directory-files \".\")");
         let err_msg = format!("{:?}", stub_err.unwrap_err());
         assert!(
             err_msg.contains("sandbox") || err_msg.contains("not available"),
