@@ -7827,6 +7827,91 @@ mod tests {
         assert_eq!(result, Value::Boolean(true));
     }
 
+    #[test]
+    fn test_shadow_stub_chibi_filesystem_raises_error() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/filesystem")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate(
+            "(import (chibi filesystem)) (create-directory \"/tmp/test\")"
+        );
+        // stub raises an error containing the sandbox marker
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/filesystem]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_constants_are_zero() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/filesystem")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate(
+            "(import (chibi filesystem)) open/read"
+        ).unwrap();
+        assert_eq!(result, Value::Integer(0));
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_shell_macro_raises_error() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/shell")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate(
+            "(import (chibi shell)) (shell \"echo hello\")"
+        );
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/shell]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_chibi_channel_in_vfs() {
+        // chibi/channel is registered in the VFS (pure-scheme, not OS-touching).
+        // its dependency srfi/18 (threads) requires thread support; since tein
+        // compiles with SEXP_USE_GREEN_THREADS=0, full channel usage is not
+        // available. we verify: (1) it is NOT blocked as a SandboxViolation, and
+        // (2) it is importable in a non-sandboxed standard context where its VFS
+        // registration is exercised.
+        use crate::sandbox::Modules;
+
+        // in sandbox, importing chibi/channel should fail with an eval error
+        // (thread support absent) not a SandboxViolation (not blocked by gate).
+        let ctx_sandbox = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/channel")
+            .allow_module("srfi/18")
+            .build()
+            .unwrap();
+        let err = ctx_sandbox.evaluate("(import (chibi channel))").unwrap_err();
+        assert!(
+            !matches!(err, Error::SandboxViolation(_)),
+            "chibi/channel should not be a sandbox violation, got: {:?}",
+            err
+        );
+    }
+
     // NOTE: scheme/time has a deep dependency chain (scheme/process-context,
     // scheme/file, scheme/read, scheme/time/tai-to-utc-offset) and performs
     // file IO at load time (leap second list). it is default_safe: false.
