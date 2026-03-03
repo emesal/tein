@@ -3180,6 +3180,28 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // ── test suites ───────────────────────────────────────────────────────────
+    VfsEntry {
+        path: "chibi/test",
+        deps: &[
+            "scheme/base",
+            "scheme/case-lambda",
+            "scheme/write",
+            "scheme/complex",
+            "scheme/process-context",
+            "scheme/time",
+            "chibi/diff",
+            "chibi/term/ansi",
+            "chibi/optional",
+            "srfi/130", // string-contains fallback
+        ],
+        files: &["lib/chibi/test.sld", "lib/chibi/test.scm"],
+        clib: None,
+        default_safe: false,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
 ];
 
 // =============================================================================
