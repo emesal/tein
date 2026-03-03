@@ -7933,15 +7933,12 @@ mod tests {
     #[test]
     fn test_chibi_channel_in_vfs() {
         // chibi/channel is registered in the VFS (pure-scheme, not OS-touching).
-        // its dependency srfi/18 (threads) requires thread support; since tein
-        // compiles with SEXP_USE_GREEN_THREADS=0, full channel usage is not
-        // available. we verify: (1) it is NOT blocked as a SandboxViolation, and
-        // (2) it is importable in a non-sandboxed standard context where its VFS
-        // registration is exercised.
+        // its dependency srfi/18 uses SEXP_USE_GREEN_THREADS — enabled on posix,
+        // disabled on windows. on posix, with chibi/time's ClibEntry wired up,
+        // (import (chibi channel)) fully succeeds. on windows, it errors (thread
+        // support absent) but must NOT be a SandboxViolation (not blocked by gate).
         use crate::sandbox::Modules;
 
-        // in sandbox, importing chibi/channel should fail with an eval error
-        // (thread support absent) not a SandboxViolation (not blocked by gate).
         let ctx_sandbox = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
@@ -7949,14 +7946,17 @@ mod tests {
             .allow_module("srfi/18")
             .build()
             .unwrap();
-        let err = ctx_sandbox
-            .evaluate("(import (chibi channel))")
-            .unwrap_err();
-        assert!(
-            !matches!(err, Error::SandboxViolation(_)),
-            "chibi/channel should not be a sandbox violation, got: {:?}",
-            err
-        );
+        let result = ctx_sandbox.evaluate("(import (chibi channel))");
+        match result {
+            // posix: green threads enabled + chibi/time wired → import succeeds
+            Ok(_) => {}
+            // windows (or any other failure): must not be a sandbox gate violation
+            Err(err) => assert!(
+                !matches!(err, Error::SandboxViolation(_)),
+                "chibi/channel should not be a sandbox violation, got: {:?}",
+                err
+            ),
+        }
     }
 
     #[test]
