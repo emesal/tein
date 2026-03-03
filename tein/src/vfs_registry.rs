@@ -906,6 +906,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // scheme/mapping/hash: default_safe: false — depends on srfi/146/hash which pulls in
+    // hamt-map (a heavier, less-tested dependency). same reasoning as srfi/146/hash.
     VfsEntry {
         path: "scheme/mapping/hash",
         deps: &["srfi/146/hash"],
@@ -1960,6 +1962,10 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // chibi/channel: default_safe: true because the module itself has no OS-touching code.
+    // however, its dep srfi/18 (threads) is non-functional in tein (SEXP_USE_GREEN_THREADS=0),
+    // so importing chibi/channel succeeds in a sandbox but channel operations fail at runtime.
+    // this is intentional: allow the import, let the runtime error surface naturally.
     VfsEntry {
         path: "chibi/channel",
         deps: &["srfi/9", "srfi/18"],
