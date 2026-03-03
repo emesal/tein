@@ -7690,6 +7690,50 @@ mod tests {
     }
 
     #[test]
+    fn test_shadow_stubs_not_registered_in_unsandboxed_context() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        // shadow stubs are only injected during sandboxed context build (via register_vfs_shadows).
+        // unsandboxed contexts must NOT set IS_SANDBOXED=true — verify by checking that:
+        // 1. a sandboxed context raises a stub error when calling chibi/filesystem procs
+        // 2. an unsandboxed context runs with IS_SANDBOXED=false: real file ops work freely
+        //
+        // note: VFS is process-global — stubs registered by earlier sandbox tests persist
+        // in the binary's VFS table for the lifetime of the process. the invariant being tested
+        // is IS_SANDBOXED=false (no policy gate, no stub-via-FS-gate), not VFS isolation.
+
+        // sandboxed: stub proc raises a scheme error (not available in sandbox)
+        let sandboxed = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("sandboxed context");
+        let stub_err = sandboxed
+            .evaluate("(import (chibi filesystem)) (directory-files \".\")");
+        let err_msg = format!("{:?}", stub_err.unwrap_err());
+        assert!(
+            err_msg.contains("sandbox") || err_msg.contains("not available"),
+            "sandboxed chibi/filesystem call should raise stub error: {err_msg}"
+        );
+        // drop sandboxed context before building unsandboxed — restores IS_SANDBOXED=false
+        // and clears the FS gate. both are RAII thread-locals scoped to the context.
+        drop(sandboxed);
+
+        // unsandboxed: IS_SANDBOXED=false — real file ops work, no policy gate fires
+        let unsandboxed = Context::builder()
+            .standard_env()
+            .build()
+            .expect("unsandboxed context");
+        let file_ok = unsandboxed
+            .evaluate("(import (scheme base) (tein file)) (file-exists? \"/etc/passwd\")");
+        assert_eq!(
+            file_ok.expect("unsandboxed file-exists? should work"),
+            Value::Boolean(true),
+            "file access must work in unsandboxed context (IS_SANDBOXED=false)"
+        );
+    }
+
+    #[test]
     fn test_scheme_repl_shadow_returns_environment() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
