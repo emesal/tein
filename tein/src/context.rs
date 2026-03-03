@@ -8402,4 +8402,20 @@ mod tests {
         assert_eq!(result, Value::Boolean(true));
     }
 
+    #[test]
+    fn test_chibi_test_loads_with_vfs_shadows() {
+        // chibi/test requires scheme/time, scheme/process-context, chibi/term/ansi, chibi/diff.
+        // all of these must load successfully in a with_vfs_shadows non-sandboxed context.
+        let ctx = Context::builder()
+            .standard_env()
+            .with_vfs_shadows()
+            .build()
+            .expect("build");
+        ctx.evaluate("(import (chibi test))").expect("import chibi/test");
+        // verify test infrastructure works
+        ctx.evaluate("(test-begin \"basic\") (test 1 1) (test-end)").expect("basic test");
+        let failures = ctx.evaluate("(test-failure-count)").expect("failure count");
+        assert_eq!(failures, Value::Integer(0), "no chibi test failures expected");
+    }
+
 }

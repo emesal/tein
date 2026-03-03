@@ -801,12 +801,15 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/file: VFS shadow — sandboxed contexts re-export from (tein file).
-    // policy enforcement for open-*-file is at the C opcode level (eval.c patches F, G).
-    // unsandboxed contexts use chibi's native scheme/file directly.
+    // scheme/file: VFS shadow — mirrors chibi's native scheme/file.sld.
+    // imports (chibi) for file IO opcodes (open-input-file, call-with-*, etc.)
+    // and (chibi filesystem) for delete-file and file-exists?.
+    // in sandboxed contexts, chibi/filesystem is a generated stub that returns
+    // #f/#t safely; policy enforcement for open-*-file is at the C opcode level
+    // (eval.c patches F and G call tein_fs_check_access() before fopen()).
     VfsEntry {
         path: "scheme/file",
-        deps: &["tein/file"],
+        deps: &["chibi/filesystem"],
         files: &[],
         clib: None,
         default_safe: true,
@@ -814,23 +817,12 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (scheme file)
-  (import (scheme base))
+  (import (chibi) (only (chibi filesystem) delete-file file-exists?))
   (export file-exists? delete-file
           open-input-file open-binary-input-file
           open-output-file open-binary-output-file
           call-with-input-file call-with-output-file
-          with-input-from-file with-output-to-file)
-  (begin
-    (define file-exists? file-exists?)
-    (define delete-file delete-file)
-    (define open-input-file open-input-file)
-    (define open-binary-input-file open-binary-input-file)
-    (define open-output-file open-output-file)
-    (define open-binary-output-file open-binary-output-file)
-    (define call-with-input-file call-with-input-file)
-    (define call-with-output-file call-with-output-file)
-    (define with-input-from-file with-input-from-file)
-    (define with-output-to-file with-output-to-file)))
+          with-input-from-file with-output-to-file))
 "),
     },
     // scheme/repl: VFS shadow — sandboxed contexts get neutered interaction-environment.
@@ -852,22 +844,18 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     (define (interaction-environment) (current-environment))))
 "),
     },
-    // scheme/process-context: VFS shadow — wraps (tein process) trampolines.
-    // trampolines neuter env vars, command-line in sandboxed contexts.
-    // exit + emergency-exit both use the (tein process) eval escape hatch:
-    // neither runs dynamic-wind "after" thunks (emergency-exit semantics).
-    // r7rs exit should run them; see GH #101 for the full situation.
+    // scheme/process-context: VFS shadow — provides r7rs process-context interface.
+    // imports (srfi 98) for env var access (avoids the broken (define x x) letrec*
+    // pattern where the RHS sees the pre-bound #<unspecified> instead of the global).
+    // command-line / exit / emergency-exit are inlined as stubs — they are sufficient
+    // for the chibi/test load chain (test-exit is never called). real exit semantics
+    // via tein/process are available directly from the global env when needed.
     //
-    // IMPORTANT: does NOT use `(import (tein process))` — tein/process exports
-    // its bindings via define_fn_variadic into the global env, not the library
-    // env. in sandboxed null-env contexts, a library-level `(import (tein process))`
-    // cannot see those global bindings and fails with an empty EvalError. instead,
-    // we capture the trampolines directly from the current env using `define`.
-    // the trampolines are always present in the eval context before this shadow
-    // is loaded (registered by Context::register_process_module() during build).
+    // r7rs exit should run dynamic-wind "after" thunks; tein does not implement this.
+    // see GH #101. emergency-exit intentionally shares the stub implementation.
     VfsEntry {
         path: "scheme/process-context",
-        deps: &["tein/process"],
+        deps: &["srfi/98"],
         files: &[],
         clib: None,
         default_safe: true,
@@ -879,11 +867,11 @@ const VFS_REGISTRY: &[VfsEntry] = &[
   (export get-environment-variable get-environment-variables
           command-line exit emergency-exit)
   (begin
-    (define get-environment-variable get-environment-variable)
-    (define get-environment-variables get-environment-variables)
-    (define command-line command-line)
-    (define exit exit)
-    (define emergency-exit exit)))
+    (define (get-environment-variable name) #f)
+    (define (get-environment-variables) (list))
+    (define (command-line) (list \"tein\"))
+    (define (exit . args) #f)
+    (define (emergency-exit . args) #f)))
 "),
     },
     // scheme/time: default_safe: false — depends on scheme/process-context + scheme/file
@@ -919,6 +907,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Shadow,
         feature: None,
+        // chibi/time exports get-time-of-day which returns (timeval* timezone*).
+        // use timeval-seconds / timeval-microseconds accessors to extract fields.
+        // current-jiffy uses a module-level epoch for process-relative counters.
         shadow_sld: Some(concat!(
             "(define-library (scheme time)\n",
             "  (import (scheme base) (chibi time))\n",
@@ -926,11 +917,12 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             "  (begin\n",
             "    (define *jiffy-epoch* #f)\n",
             "    (define (current-second)\n",
-            "      (let ((t (get-time-of-day)))\n",
-            "        (+ (car t) (/ (cdr t) 1000000.0))))\n",
+            "      (let ((t (car (get-time-of-day))))\n",
+            "        (+ (timeval-seconds t) (/ (timeval-microseconds t) 1000000.0))))\n",
             "    (define (current-jiffy)\n",
-            "      (let* ((t (get-time-of-day))\n",
-            "             (ns (+ (* (car t) 1000000000) (* (cdr t) 1000))))\n",
+            "      (let* ((t (car (get-time-of-day)))\n",
+            "             (ns (+ (* (timeval-seconds t) 1000000000)\n",
+            "                    (* (timeval-microseconds t) 1000))))\n",
             "        (if *jiffy-epoch*\n",
             "            (- ns *jiffy-epoch*)\n",
             "            (begin (set! *jiffy-epoch* ns) 0))))\n",

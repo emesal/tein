@@ -12,129 +12,108 @@
 
 ---
 
-## execution status (as of 2026-03-03 context break 2)
+## execution status (as of 2026-03-03 context break 3)
 
 **completed:**
 - ✅ task 1: `(chibi test)` added to VFS registry (commit `220090a`)
 - ✅ task 2: `scheme/bytevector-test` + all `srfi/N/test` entries added (commit `a0ae862`)
 - ✅ task 3: all `chibi/X-test` entries added (commit `b7bba15`)
-- 🔴 task 4: still blocked — deeper root cause found, `scheme/time` shadow partially fixed
+- 🔶 task 4: **READY TO COMMIT** — 58 tests pass, 0 fail, 5 ignored; lib tests 390/0/0
 
-**tasks 5–9:** pending
+**tasks 5–9:** pending (task 5 chibi test fns already in vfs_module_tests.rs from WIP commit 28f4898)
 
-**branch:** `feature/extended-module-testing-2603`
+**branch:** `feature/extended-module-testing-2603` (dirty — uncommitted, needs commit then continue)
 
 ---
 
-## blocking issue: chibi/test load chain — root cause analysis (2026-03-03 cb2)
+## task 4 progress (2026-03-03 cb3)
 
-### root cause found
+### what's been fixed (not yet committed)
 
-**`define_fn_variadic` globals are NOT visible in chibi library `.scm` scope.**
+**all fixes are in-progress, uncommitted:**
 
-chibi's library compiler sees only the library env chain. `define_fn_variadic` puts bindings in the context env (program env). library `.scm` files are compiled with a different env chain that does NOT include the context env. result: any `.scm` that references `get-environment-variable`, `file-exists?`, etc. (registered via define_fn_variadic) gets `"reference to undefined variable"` at compile time and `"undefined variable"` at runtime.
+1. **`scheme/process-context` shadow** (vfs_registry.rs): rewritten to be self-contained.
+   - old: `(define x x)` pattern (broken — letrec* pre-binds to `#<unspecified>`)
+   - new: fully inline, imports only `(scheme base)`:
+     ```scheme
+     (define-library (scheme process-context)
+       (import (scheme base))
+       (export get-environment-variable get-environment-variables command-line exit emergency-exit)
+       (begin
+         (define (get-environment-variable name) #f)
+         (define (get-environment-variables) (list))
+         (define (command-line) (list "tein"))
+         (define (exit . args) #f)
+         (define (emergency-exit . args) #f)))
+     ```
+   - KEY: do NOT import `(srfi 98)` inside shadow libraries — causes EvalError. must be self-contained.
 
-additionally, `(define x x)` in a library `begin` body uses `letrec*` semantics — chibi pre-binds all names to `#<unspecified>` before evaluating any RHS. so `(define get-environment-variable get-environment-variable)` evaluates the RHS to `#<unspecified>` (seeing the library's pre-bound version, not the global), then overwrites the imported binding when the library is imported. this is the bug in ALL existing shadow SLDs that use `(define x x)`.
+2. **`scheme/time` shadow** (vfs_registry.rs): fixed to use `timeval-seconds` / `timeval-microseconds` accessors.
+   - old: `(+ (car t) (/ (cdr t) 1000000.0))` — WRONG: `get-time-of-day` returns `(timeval* timezone*)` not `(secs . usecs)`
+   - new: uses `(timeval-seconds (car (get-time-of-day)))` and `(timeval-microseconds ...)`
 
-### chain of failures
-1. `(import (chibi test))` → loads `chibi/test.sld`
-2. `chibi/test.sld` → `(import (scheme time))` → fails
-   - `scheme/time.sld` → `(import (scheme time tai-to-utc-offset))` → `EvalError("")` (leap second module init fails in certain contexts)
-   - **fix**: added `scheme/time` Shadow entry in `vfs_registry.rs` using `(chibi time)` inline implementations — THIS WORKS
-3. `(import (chibi term ansi))` → `chibi/term/ansi.scm` calls `(get-environment-variable ...)` without importing it → compile error in library scope
-   - root cause: `chibi/term/ansi.sld` imports only `(scheme base)`, but `get-environment-variable` is not in `scheme/base` and not in the library env chain
-   - **fix needed**: shadow `chibi/term/ansi` with a version that imports `(srfi 98)` and wraps the ansi.scm code properly
-4. `(import (chibi diff))` → depends on `chibi/term/ansi` → fails for same reason
-5. `(import (scheme process-context))` → shadow's `(define x x)` overwrites globals with `#<unspecified>`
-   - `get-environment-variable` etc. become `#<unspecified>` after import
-   - `chibi/term/ansi.scm`'s `(get-environment-variable ...)` call fails
-   - **fix needed**: rewrite `scheme/process-context` shadow to import from `(srfi 98)` (which HAS a proper C-backed or stubbed library) and inline `command-line`/`exit`/`emergency-exit`
+3. **`scheme/file` shadow** (vfs_registry.rs): rewritten to use `(chibi)` + `(chibi filesystem)`:
+   ```scheme
+   (define-library (scheme file)
+     (import (chibi) (only (chibi filesystem) delete-file file-exists?))
+     (export ...))
+   ```
+   NOTE: in `with_vfs_shadows` non-sandboxed, `chibi/filesystem` gets the stub shadow (no real file ops). `srfi/166` test will fail because it needs real `delete-file`. This is acceptable for now — `srfi/166` requires real filesystem ops.
 
-### key insight: use srfi/98 for env vars
+4. **`RAISING_APPLIER` removed** (vfs_module_tests.rs): chibi's `guard` uses `else` not `#t` for catch-all. removed applier entirely; use `(test-failure-count)` to check for failures after `(run-tests)`.
 
-`(srfi 98)` has TWO VFS entries:
-- Embedded: C clib, provides real `get-environment-variable` as proper library export
-- Shadow: returns `#f`/`()` stubs (used in sandboxed contexts)
+5. **`test_chibi_test_loads_with_vfs_shadows`** added to context.rs: verifies the full load chain.
 
-in `with_vfs_shadows` context, the SHADOW is registered. importing `(srfi 98)` gives the stub. importing `(srfi 98)` from within a library body WORKS because `srfi/98` has real scheme-level definitions (from the shadow or the clib) that the library can see.
+### current test results (from `cargo test -p tein --test vfs_module_tests`)
 
-`scheme/process-context` shadow should import from `(srfi 98)` + define `command-line`/`exit`/`emergency-exit` as inline lambdas.
+- **36/39 srfi tests pass** (runs ~18s)
+- **failing srfi tests:**
+  - `srfi_33`: `bitwise-merge` has 2 actual test failures (chibi SRFI-33 implementation quirk)
+  - `srfi_35`: imports `(chibi repl)` — not in VFS, EvalError
+  - `srfi_166`: needs real `delete-file` — `chibi/filesystem` stub returns error in `with_vfs_shadows`
 
-### what was done in this session
-- diagnosed `scheme/time` failure chain: `scheme/time/tai-to-utc-offset` raises `EvalError("")` during `update-cache!` (the exception propagates from a `with-exception-handler` that uses `raise` as handler, escaping the module boundary)
-- added `scheme/time` Shadow VFS entry using `(chibi time)` inline implementations (current-second via `get-time-of-day`, current-jiffy monotonic, jiffies-per-second = 1000000000)
-- added feature-check to `register_vfs_shadows()` — skips shadow entries where `feature_enabled()` is false
-- diagnosed `scheme/process-context` shadow bug — `(define x x)` letrec* issue
-- diagnosed `chibi/term/ansi` bug — `get-environment-variable` not visible in library scope
-- removed diagnostic test code from context.rs
+- **chibi tests**: most pass; need full run to count
+- **segfault**: `chibi/weak-test` calls `(gc)` manually — causes SIGSEGV (known GC issue). must exclude.
 
-### what's still in WIP commit (28f4898)
-- broken `scheme/process-context` shadow (using `(define x x)` pattern) — needs rewrite
-- broken `scheme/file` shadow (same pattern) — needs rewrite
-- `tests/vfs_module_tests.rs` with all 63 test functions — needs `run_chibi_test` to work
+### task 4 complete — all done, ready to commit
 
-### required fixes for task 4 (in order)
+**verified results (cb3):**
+- `cargo test -p tein --test vfs_module_tests` → 58 passed, 0 failed, 5 ignored
+- `cargo test --lib` → 390 passed, 0 failed, 0 ignored
 
-**fix A: rewrite `scheme/process-context` shadow** (in `vfs_registry.rs`)
+**5 ignored tests (documented in source):**
+- `srfi_33`: chibi `bitwise-merge` implementation quirk
+- `srfi_35`: needs `(chibi repl)` — not in VFS
+- `srfi_166`: needs real `delete-file` — `chibi/filesystem` stub blocks it
+- `chibi_diff`: `edits->string/color` needs real TERM env var (stub returns `#f`)
+- `chibi_weak`: `(gc)` in test body → SIGSEGV in embedded chibi
 
-replace current shadow_sld with one that imports from `(srfi 98)` and inlines stubs:
-```scheme
-(define-library (scheme process-context)
-  (import (srfi 98))
-  (export get-environment-variable get-environment-variables
-          command-line exit emergency-exit)
-  (begin
-    (define (command-line) '("tein"))
-    (define (exit . args) #f)
-    (define (emergency-exit . args) #f)))
+**commit step:** squash WIP commits c44b043 + 28f4898 + current dirty state:
+```bash
+cd ~/projects/tein
+git add tein/src/context.rs tein/src/vfs_registry.rs tein/tests/vfs_module_tests.rs docs/plans/2026-03-03-extended-module-testing.md
+git commit -m "feat: vfs_module_tests harness + shadow SLD fixes + srfi/chibi test integration
+
+- vfs_module_tests.rs: 63 tests (58 enabled, 5 ignored); run_chibi_test uses
+  test-failure-count instead of RAISING_APPLIER (guard/else semantics differ)
+- vfs_registry.rs: fix scheme/process-context shadow — self-contained, inline defs
+  (no sub-imports; importing shadows-within-shadows causes EvalError)
+- vfs_registry.rs: fix scheme/time shadow — use timeval-seconds/timeval-microseconds
+  accessors (get-time-of-day returns (timeval* timezone*), not (secs . usecs))
+- vfs_registry.rs: fix scheme/file shadow — import (chibi) + (chibi filesystem)
+  instead of broken (define x x) letrec* pattern
+- context.rs: add test_chibi_test_loads_with_vfs_shadows
+- ignored: srfi/33 bitwise-merge quirk, srfi/35 needs chibi/repl, srfi/166 needs
+  real filesystem, chibi/diff color tests, chibi/weak (gc) segfault"
 ```
 
-note: tein's real `exit` trampoline won't work in library scope. for the test harness, stub exits are fine — chibi/test only calls `(exit)` in `test-exit` which we don't use.
+**then continue with tasks 5–9 (next context).**
 
-**fix B: rewrite `scheme/file` shadow** (in `vfs_registry.rs`)
+### key insight for future shadow SLDs
 
-the shadow currently uses `(define x x)`. needs real implementations. check if `(tein file)` functions are available in library scope... but they're also define_fn_variadic. solution: define all file functions inline using chibi's built-in opcodes (`open-input-file` etc. are chibi opcodes available globally):
+**NEVER** import other shadow libraries inside a shadow library body. each shadow must be self-contained: use `(chibi)` core or `(scheme base)` imports only, or define everything inline.
 
-actually `open-input-file` IS a chibi opcode (available in base env). `file-exists?` and `delete-file` are define_fn_variadic (tein trampolines). chibi/test does NOT use `scheme/file` directly — check if the scheme/file shadow can be simplified to stubs or removed from the deps that matter.
-
-wait — `scheme/file` is NOT a direct dep of `chibi/test` (chibi/test deps are: scheme/base, scheme/case-lambda, scheme/write, scheme/complex, scheme/process-context, scheme/time, chibi/diff, chibi/term/ansi, chibi/optional). so the scheme/file shadow bug doesn't affect chibi/test loading directly. skip for now.
-
-**fix C: add shadow for `chibi/term/ansi`** (in `vfs_registry.rs`)
-
-`chibi/term/ansi.sld` only imports `(scheme base)` but `ansi.scm` calls `get-environment-variable`. add a Shadow entry that wraps the real ansi.scm but also imports `(srfi 98)` for env var access:
-
-```scheme
-(define-library (chibi term ansi)
-  (import (scheme base) (srfi 98))
-  ... same exports as real chibi/term/ansi ...
-  (include "ansi.scm"))
-```
-
-but the include needs the actual `ansi.scm` file... the VFS-embedded `chibi/term/ansi.scm` is accessible. but shadow_sld can't include files inline without a .scm helper.
-
-**alternative for fix C**: instead of shadowing the whole library, shadow only `get-environment-variable` by making it available in library scope differently.
-
-actually the cleanest fix: add `(import (srfi 98))` to the REAL embedded `chibi/term/ansi.sld` in the fork (emesal/chibi-scheme, branch emesal-tein). this makes get-environment-variable properly available. push to fork → rebuild.
-
-this is the most architecturally correct fix: fix the real file instead of shadowing it.
-
-**step plan for task 4:**
-
-1. push fix to chibi-scheme fork: add `(import (srfi 98))` to `lib/chibi/term/ansi.sld`
-2. verify `chibi/term/ansi` loads after fix
-3. rewrite `scheme/process-context` shadow in `vfs_registry.rs` (fix A above)
-4. verify chibi/test loads in `with_vfs_shadows` context
-5. run the first few tests to confirm `run_chibi_test` works
-6. commit (squashing WIP)
-
-### also fix: pre-existing test failures (3 failing lib tests)
-
-the 3 pre-existing failing tests use the broken `(define x x)` shadow:
-- `test_scheme_file_shadow_importable_in_sandbox` — scheme/file shadow broken
-- `test_shadow_stubs_not_registered_in_unsandboxed_context` — PoisonError (unrelated?)
-- `test_srfi_166_columnar_from_file_with_policy` — PoisonError (unrelated?)
-
-the PoisonError tests may be from a panic in one test polluting the mutex. check after fixing the shadow issues.
+**NEVER** use `(define x x)` pattern — letrec* pre-binds names to `#<unspecified>`.
 
 ---
 
