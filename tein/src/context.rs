@@ -8322,4 +8322,57 @@ mod tests {
             .expect("srfi/160/u8 should load and work");
         assert_eq!(result, Value::Boolean(true));
     }
+
+    #[test]
+    fn test_srfi_144_flonum_constants() {
+        // srfi/144 requires a C-backed static library (math.c generated from math.stub).
+        // fl-pi should be approximately π — a C constant, not pure scheme.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (srfi 144)) fl-pi")
+            .expect("fl-pi should be defined");
+        match result {
+            Value::Float(f) => assert!((f - std::f64::consts::PI).abs() < 1e-10),
+            other => panic!("expected float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scheme_bytevector_endian() {
+        // scheme/bytevector requires a C-backed static library (bytevector.c from bytevector.stub).
+        // bytevector-u16-ref with little-endian on bytes [1, 0] should give 1.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate(
+                "(import (scheme bytevector)) \
+                 (let ((bv (make-bytevector 2 0))) \
+                   (bytevector-u8-set! bv 0 1) \
+                   (bytevector-u16-ref bv 0 'little))",
+            )
+            .expect("bytevector-u16-ref should work");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_chibi_time_import() {
+        // chibi/time requires a C-backed static library (time.c from time.stub).
+        // get-time-of-day is a C procedure — procedure? verifies it loaded.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (chibi time)) (procedure? get-time-of-day)")
+            .expect("chibi/time should load");
+        assert_eq!(result, Value::Boolean(true));
+    }
 }
