@@ -2833,7 +2833,11 @@ const VFS_REGISTRY: &[VfsEntry] = &[
             "lib/chibi/binary-record.sld",
             "lib/chibi/binary-types.scm",
             "lib/chibi/binary-record.scm",
-            "lib/chibi/binary-record-chicken.scm", // cond-expand else branch; not loaded by chibi
+            // chicken-compat alternative for define-binary-record-type. listed in the .sld's
+            // (cond-expand (chicken ...) (else ...)) block; chibi always takes the else branch
+            // so this file is never loaded. kept here only because validate_sld_includes
+            // recurses into all cond-expand branches and would panic if it were absent.
+            "lib/chibi/binary-record-chicken.scm",
         ],
         clib: None,
         default_safe: true,
