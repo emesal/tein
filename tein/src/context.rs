@@ -7910,6 +7910,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_chibi_iset_optimize_loads() {
+        // chibi/iset/optimize is pure scheme; all deps (iset/base, iset/iterators,
+        // iset/constructors, srfi/151) are in VFS and safe.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate(
+            "(import (chibi iset) (chibi iset optimize)) \
+             (iset-optimize (iset 1 2 3))",
+        )
+        .expect("chibi/iset/optimize should load and iset-optimize should work");
+    }
+
+    #[test]
+    fn test_chibi_show_aliases_load() {
+        // chibi/show/color|column|pretty|unicode are alias-for srfi/166 sub-modules.
+        // these transitively depend on srfi/166/base → scheme/repl (shadow), so
+        // a sandboxed context is required.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate(
+            "(import (chibi show color) (chibi show column) \
+             (chibi show pretty) (chibi show unicode))",
+        )
+        .expect("chibi/show alias modules should all load");
+    }
+
+    #[test]
+    fn test_srfi_227_definition_loads() {
+        // srfi/227/definition re-exports define-optionals from chibi/optional.
+        let ctx = Context::builder().standard_env().build().unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (srfi 227 definition)) \
+                 (define-optionals (f x (y 10)) (+ x y)) \
+                 (f 1)",
+            )
+            .expect("srfi/227/definition should load and define-optionals should work");
+        assert_eq!(result, Value::Integer(11));
+    }
+
     // NOTE: scheme/time has a deep dependency chain (scheme/process-context,
     // scheme/file, scheme/read, scheme/time/tai-to-utc-offset) and performs
     // file IO at load time (leap second list). it is default_safe: false.
