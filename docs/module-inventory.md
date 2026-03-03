@@ -208,7 +208,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/base64` | ✅ | pure encoder/decoder |
 | `chibi/binary-record` | ❌ | binary i/o record types — needs review |
 | `chibi/bytevector` | ✅ | bytevector extras (IEEE-754 floats) |
-| `chibi/channel` | ❌ | OS channels (pipes/sockets?) — needs review ⚠️ |
+| `chibi/channel` | ✅ | pure-scheme FIFO channel; embedded. depends on srfi/18 (threads, disabled) — in VFS but channel ops unavailable without thread support |
 | `chibi/char-set` | ✅ | |
 | `chibi/char-set/ascii` | ✅ | |
 | `chibi/char-set/base` | ✅ | |
@@ -226,7 +226,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/edit-distance` | ✅ | edit distance algorithm |
 | `chibi/emscripten` | ❌ | browser/JS interop — not applicable |
 | `chibi/equiv` | ✅ | |
-| `chibi/filesystem` | ❌ | OS filesystem ops (stat, mkdir, etc.) — needs shadow ⚠️ |
+| `chibi/filesystem` | ✅ | sandbox stub (phase 1) — importable, all fns raise `[sandbox:chibi/filesystem]` error |
 | `chibi/generic` | ✅ | generic functions |
 | `chibi/heap-stats` | ❌ | GC heap introspection — internal |
 | `chibi/highlight` | ❌ | syntax highlighting — probably safe ➕ |
@@ -246,12 +246,12 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/mime` | ❌ | MIME parsing — needs file i/o ⚠️ |
 | `chibi/modules` | ❌ | module reflection — exposes module internals |
 | `chibi/monad/environment` | ✅ | environment monad |
-| `chibi/net` | ❌ | networking — needs shadow/blocking ⚠️ |
-| `chibi/net/http` | ❌ | HTTP client — network ⚠️ |
-| `chibi/net/http-server` | ❌ | HTTP server — network ⚠️ |
-| `chibi/net/server` | ❌ | TCP server — network ⚠️ |
-| `chibi/net/server-util` | ❌ | |
-| `chibi/net/servlet` | ❌ | |
+| `chibi/net` | ✅ | sandbox stub (phase 1) — importable, all fns/consts stubbed |
+| `chibi/net/http` | ✅ | sandbox stub (phase 1) |
+| `chibi/net/http-server` | ✅ | sandbox stub (phase 1) |
+| `chibi/net/server` | ✅ | sandbox stub (phase 1) |
+| `chibi/net/server-util` | ✅ | sandbox stub (phase 1) |
+| `chibi/net/servlet` | ✅ | sandbox stub (phase 1) |
 | `chibi/optimize` | ❌ | compiler optimiser internals |
 | `chibi/optimize/profile` | ❌ | |
 | `chibi/optimize/rest` | ❌ | |
@@ -259,7 +259,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/parse` | ✅ | PEG parser |
 | `chibi/parse/common` | ✅ | |
 | `chibi/pathname` | ✅ | path manipulation |
-| `chibi/process` | ❌ | spawn processes — dangerous ⚠️ |
+| `chibi/process` | ✅ | sandbox stub (phase 1) — importable, all fns/consts stubbed (note: fn `exit` overlaps with tein/process) |
 | `chibi/pty` | ❌ | pseudo-terminals — dangerous ⚠️ |
 | `chibi/quoted-printable` | ✅ | MIME quoted-printable encoding |
 | `chibi/regexp` | ✅ | |
@@ -267,7 +267,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/reload` | ❌ | module reloading — file i/o |
 | `chibi/repl` | ❌ | interactive REPL — use tein/reader |
 | `chibi/scribble` | ❌ | scribble doc format — file i/o |
-| `chibi/shell` | ❌ | shell execution — very dangerous ⚠️ |
+| `chibi/shell` | ✅ | sandbox stub (phase 1) — fns + macros all stubbed |
 | `chibi/show` | ❌ | not in VFS (only `chibi/show/shared` is) |
 | `chibi/show/base` | ❌ | not in VFS |
 | `chibi/show/c` | ❌ | C pretty printer |
@@ -281,9 +281,9 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/stty` | ❌ | terminal control — OS ⚠️ |
 | `chibi/sxml` | ✅ | SXML |
 | `chibi/syntax-case` | ✅ | syntax-case macros |
-| `chibi/system` | ❌ | OS: hostname, user info, etc. — needs shadow ⚠️ |
+| `chibi/system` | ✅ | sandbox stub (phase 1) — importable, all fns raise sandbox error |
 | `chibi/tar` | ❌ | tar format — file i/o ⚠️ |
-| `chibi/temp-file` | ❌ | temp file creation — file i/o ⚠️ |
+| `chibi/temp-file` | ✅ | sandbox stub (phase 1) — importable, fns raise sandbox error |
 | `chibi/term/ansi` | ✅ | ANSI terminal escape codes |
 | `chibi/term/edit-line` | ❌ | line editing — terminal i/o ⚠️ |
 | `chibi/text` | ✅ | text editor operations |
@@ -348,20 +348,24 @@ tein's own modules — always in VFS.
   bindings; `unexported_stubs()` needs dedup by name (skip names already provided by
   an allowed module) before these can be safely added.
 
-**⚠️ needs shadow/trampoline:**
-- `chibi/filesystem` — stat/mkdir/readdir etc
-- `chibi/process` — exec/spawn
-- `chibi/shell` — shell execution
-- `chibi/system` — hostname, user info
-- `chibi/channel` — pipes/sockets
+**✅ shadow stubs done (phase 1 — error-on-call):**
+- `chibi/filesystem`, `chibi/process`, `chibi/system`
+- `chibi/shell`, `chibi/temp-file`
+- `chibi/net`, `chibi/net/http`, `chibi/net/server`, `chibi/net/http-server`,
+  `chibi/net/server-util`, `chibi/net/servlet`
+- `chibi/channel` (embedded, not a stub — but depends on srfi/18 / threads)
+
+**⚠️ still needs shadow/trampoline (not in VFS):**
 - `chibi/mime` — file-backed MIME
-- `chibi/net/*` — all network modules
 - `chibi/stty`, `chibi/term/edit-line` — terminal i/o
 - `chibi/tar` — file i/o
-- `chibi/temp-file` — temp file creation
 - `chibi/app` — env/args
 - `scheme/load` — arbitrary file loading (already blocked; use `tein/load`)
 - `scheme/r5rs` — already blocked
+
+**phase 2 (selective gating — not started):**
+- selectively expose safe fns from stub modules with real FS/network policy checks
+- e.g. `chibi/filesystem` `file-exists?`, `file-size`; `chibi/process` `current-process-id`
 
 **intentionally excluded (not useful for embedding):**
 - `chibi/disasm`, `chibi/heap-stats`, `chibi/modules`, `chibi/optimize/*`

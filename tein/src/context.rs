@@ -7836,9 +7836,7 @@ mod tests {
             .allow_module("chibi/filesystem")
             .build()
             .unwrap();
-        let result = ctx.evaluate(
-            "(import (chibi filesystem)) (create-directory \"/tmp/test\")"
-        );
+        let result = ctx.evaluate("(import (chibi filesystem)) (create-directory \"/tmp/test\")");
         // stub raises an error containing the sandbox marker
         match result {
             Err(e) => assert!(
@@ -7858,9 +7856,9 @@ mod tests {
             .allow_module("chibi/filesystem")
             .build()
             .unwrap();
-        let result = ctx.evaluate(
-            "(import (chibi filesystem)) open/read"
-        ).unwrap();
+        let result = ctx
+            .evaluate("(import (chibi filesystem)) open/read")
+            .unwrap();
         assert_eq!(result, Value::Integer(0));
     }
 
@@ -7873,9 +7871,7 @@ mod tests {
             .allow_module("chibi/shell")
             .build()
             .unwrap();
-        let result = ctx.evaluate(
-            "(import (chibi shell)) (shell \"echo hello\")"
-        );
+        let result = ctx.evaluate("(import (chibi shell)) (shell \"echo hello\")");
         match result {
             Err(e) => assert!(
                 e.to_string().contains("[sandbox:chibi/shell]"),
@@ -7904,7 +7900,9 @@ mod tests {
             .allow_module("srfi/18")
             .build()
             .unwrap();
-        let err = ctx_sandbox.evaluate("(import (chibi channel))").unwrap_err();
+        let err = ctx_sandbox
+            .evaluate("(import (chibi channel))")
+            .unwrap_err();
         assert!(
             !matches!(err, Error::SandboxViolation(_)),
             "chibi/channel should not be a sandbox violation, got: {:?}",
