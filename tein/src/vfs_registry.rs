@@ -2731,6 +2731,21 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
+        path: "chibi/binary-record",
+        deps: &["scheme/base", "srfi/1", "srfi/151", "srfi/130"],
+        files: &[
+            "lib/chibi/binary-record.sld",
+            "lib/chibi/binary-types.scm",
+            "lib/chibi/binary-record.scm",
+            "lib/chibi/binary-record-chicken.scm", // cond-expand else branch; not loaded by chibi
+        ],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
         path: "chibi/bytevector",
         deps: &["scheme/base", "scheme/inexact"],
         // ieee-754.scm is included inside a cond-expand else branch
@@ -2819,6 +2834,21 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         path: "chibi/math/prime",
         deps: &["scheme/base", "scheme/inexact", "chibi/optional", "srfi/1", "srfi/27"],
         files: &["lib/chibi/math/prime.sld", "lib/chibi/math/prime.scm"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        path: "chibi/memoize",
+        deps: &[
+            "scheme/base", "scheme/char", "scheme/file",
+            "chibi/optional", "chibi/pathname", "chibi/string",
+            "chibi/ast", "chibi/system", "chibi/filesystem",
+            "srfi/9", "srfi/38", "srfi/69", "srfi/98",
+        ],
+        files: &["lib/chibi/memoize.sld", "lib/chibi/memoize.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -3000,6 +3030,19 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         path: "chibi/text",
         deps: &["scheme/base", "chibi/text/base", "chibi/text/search", "chibi/text/types"],
         files: &["lib/chibi/text.sld"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        path: "chibi/mime",
+        deps: &[
+            "scheme/base", "scheme/char", "scheme/write",
+            "chibi/base64", "chibi/quoted-printable", "chibi/string",
+        ],
+        files: &["lib/chibi/mime.sld", "lib/chibi/mime.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,

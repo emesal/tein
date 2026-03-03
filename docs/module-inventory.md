@@ -206,7 +206,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/assert` | ✅ | |
 | `chibi/ast` | ✅ | AST introspection; internal dep (srfi/18, chibi/io etc) |
 | `chibi/base64` | ✅ | pure encoder/decoder |
-| `chibi/binary-record` | ❌ | binary i/o record types — needs review |
+| `chibi/binary-record` | ✅ | binary record type macros — pure scheme |
 | `chibi/bytevector` | ✅ | bytevector extras (IEEE-754 floats) |
 | `chibi/channel` | ✅ | pure-scheme FIFO channel; embedded. depends on srfi/18 (threads, disabled) — in VFS but channel ops unavailable without thread support |
 | `chibi/char-set` | ✅ | |
@@ -242,8 +242,8 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/loop` | ✅ | loop macros |
 | `chibi/match` | ✅ | pattern matching |
 | `chibi/math/prime` | ✅ | prime factorisation |
-| `chibi/memoize` | ❌ | memoization — cond-expand uses chibi/system + chibi/filesystem ⚠️ |
-| `chibi/mime` | ❌ | MIME parsing — needs file i/o ⚠️ |
+| `chibi/memoize` | ✅ | in-memory LRU cache works; file-backed errors via shadowed deps (#105) |
+| `chibi/mime` | ✅ | pure MIME parsing — base64, content-type, message folding |
 | `chibi/modules` | ❌ | module reflection — exposes module internals |
 | `chibi/monad/environment` | ✅ | environment monad |
 | `chibi/net` | ✅ | sandbox stub (phase 1) — importable, all fns/consts stubbed |
@@ -344,10 +344,10 @@ tein's own modules — always in VFS.
 - `chibi/channel` (embedded, not a stub — but depends on srfi/18 / threads)
 
 **⚠️ still needs shadow/trampoline (not in VFS):**
-- `chibi/mime` — file-backed MIME
 - `chibi/stty`, `chibi/term/edit-line` — terminal i/o
 - `chibi/tar` — file i/o
-- `chibi/app` — env/args
+- `chibi/app`, `chibi/config`, `chibi/log` — env/args/logging
+- `chibi/apropos`, `srfi/193` — env introspection / info leak
 - `scheme/load` — arbitrary file loading (already blocked; use `tein/load`)
 - `scheme/r5rs` — already blocked
 

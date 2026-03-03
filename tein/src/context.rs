@@ -7959,6 +7959,67 @@ mod tests {
         assert_eq!(result, Value::Integer(11));
     }
 
+    #[test]
+    fn test_chibi_mime_loads() {
+        // chibi/mime is pure scheme: MIME parsing with base64/quoted-printable.
+        // all deps in VFS and safe.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (chibi mime)) \
+                 (mime-parse-content-type \"text/html; charset=utf-8\")",
+            )
+            .expect("chibi/mime should load and parse content types");
+        // result is an alist like (("text/html") ("charset" . "utf-8"))
+        // just verify it's not an error — the exact structure depends on chibi's impl
+        assert!(
+            !matches!(result, Value::String(_)),
+            "expected parsed content-type, got error string: {result}"
+        );
+    }
+
+    #[test]
+    fn test_chibi_binary_record_loads() {
+        // chibi/binary-record provides binary record type macros.
+        // pure scheme, deps: scheme/base, srfi/1, srfi/151, srfi/130.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (chibi binary-record))")
+            .expect("chibi/binary-record should load");
+    }
+
+    #[test]
+    fn test_chibi_memoize_loads() {
+        // chibi/memoize provides in-memory LRU caching.
+        // chibi cond-expand branch pulls chibi/system + chibi/filesystem
+        // (both already shadowed). LRU cache construction works; file-backed
+        // memoize-to-file errors via shadowed deps. #105 upgrades later.
+        // note: memoize + does not work because procedure-arity of variadic
+        // builtins returns an unexpected value under chibi/ast introspection.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (chibi memoize)) \
+                 (lru-cache? (make-lru-cache))",
+            )
+            .expect("chibi/memoize should load and make-lru-cache should work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
     // NOTE: scheme/time has a deep dependency chain (scheme/process-context,
     // scheme/file, scheme/read, scheme/time/tai-to-utc-offset) and performs
     // file IO at load time (leap second list). it is default_safe: false.

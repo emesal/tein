@@ -25,7 +25,7 @@ the work is split into 4 batches. after each batch: lint, update this plan, comm
 
 ## task 1: add chibi/mime to VFS
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY, insert before `chibi/uri` at ~line 3009)
@@ -102,7 +102,7 @@ content-type parsing, MIME message folding. all deps already in VFS.
 
 ## task 2: add chibi/binary-record to VFS
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY, insert alphabetically among `chibi/*`)
@@ -180,7 +180,7 @@ pure scheme, no OS deps.
 
 ## task 3: add chibi/memoize to VFS + batch 1 wrap-up
 
-**status:** pending
+**status:** done
 
 **files:**
 - modify: `tein/src/vfs_registry.rs` (VFS_REGISTRY, insert alphabetically among `chibi/*`)
@@ -1120,7 +1120,7 @@ update this section after each batch:
 
 | batch | tasks | status | notes |
 |-------|-------|--------|-------|
-| 1 | 1-3 | pending | pure VFS: mime, binary-record, memoize |
+| 1 | 1-3 | done | pure VFS: mime, binary-record, memoize |
 | 2 | 4-6 | pending | shadows: stty, edit-line, log, app, config |
 | 3 | 7-8 | pending | shadows: tar, srfi/193, apropos |
 | 4 | 9-13 | pending | scheme/load shadow, docs, close #92, PR |
