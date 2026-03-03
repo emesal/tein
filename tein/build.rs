@@ -357,7 +357,13 @@ fn collect_exports_from_sexps(sexps: &[tein_sexp::Sexp]) -> Vec<String> {
                 }
             }
         } else {
-            // recurse into all list children (handles define-library, cond-expand, etc.)
+            // recurse into all list children: handles define-library, cond-expand, begin, etc.
+            // note: we recurse into ALL cond-expand branches, including (chicken ...) or
+            // implementation-specific arms that chibi won't execute. for chibi, the (else ...)
+            // branch always runs, so any (export ...) inside it is a real export — but
+            // implementation-specific branches (like chicken) will produce false positives.
+            // currently only chibi/binary-record's chicken branch is affected; its exports
+            // (defrec, define-auxiliary-syntax) appear in MODULE_EXPORTS but are harmless.
             for item in items {
                 walk(item, out);
             }
