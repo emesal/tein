@@ -5240,8 +5240,8 @@ mod tests {
             r.err()
         );
 
-        // filesystem import should fail — (chibi process) is not in VFS
-        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        // filesystem import should fail — (chibi app) is not in VFS
+        let err = ctx.evaluate("(import (chibi app))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "expected SandboxViolation for blocked import, got: {:?}",
@@ -5331,8 +5331,8 @@ mod tests {
             r.err()
         );
 
-        // non-VFS filesystem module should still fail (not in the registry)
-        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        // a module not in the VFS registry should still fail (not in the registry)
+        let err = ctx.evaluate("(import (chibi app))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "non-VFS import should fail under Modules::All: {:?}",
@@ -5707,8 +5707,8 @@ mod tests {
         let r = ctx.evaluate("(import (scheme write))");
         assert!(r.is_ok(), "(scheme write) should work: {:?}", r.err());
 
-        // filesystem import should fail as SandboxViolation
-        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        // a module not in the VFS registry should fail as SandboxViolation
+        let err = ctx.evaluate("(import (chibi app))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "expected SandboxViolation, got: {:?}",
