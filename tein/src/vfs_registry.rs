@@ -1889,6 +1889,127 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    VfsEntry {
+        path: "chibi/channel",
+        deps: &["srfi/9", "srfi/18"],
+        files: &["lib/chibi/channel.sld", "lib/chibi/channel.scm"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    // --- OS-touching modules: sandboxed via generated stub shadows ---
+    VfsEntry {
+        path: "chibi/filesystem",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/process",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/system",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/shell",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/temp-file",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/net",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/net/http",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/net/server",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/net/http-server",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/net/server-util",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/net/servlet",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
     // -------------------------------------------------------------------------
     // scheme standard library sub-modules
     // -------------------------------------------------------------------------
@@ -2829,5 +2950,241 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
+    },
+];
+
+// =============================================================================
+// shadow stub definitions — read by build.rs to generate tein_shadow_stubs.rs
+// =============================================================================
+
+/// A shadow module whose exports are stubbed with sandbox-denial errors.
+///
+/// `build.rs` reads this array and generates scheme `.sld` source strings
+/// at build time. `register_vfs_shadows()` registers them into the dynamic
+/// VFS for sandboxed contexts.
+///
+/// Function exports become `(define (name . args) (error "[sandbox:path] name not available"))`.
+/// Constant exports become `(define name 0)`.
+/// Macro exports become `(define-syntax name (syntax-rules () ((_ . args) (error ...))))`.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct ShadowStub {
+    /// module path, e.g. "chibi/filesystem"
+    path: &'static str,
+    /// function exports — stubbed with variadic error-raising definitions
+    fn_exports: &'static [&'static str],
+    /// constant exports — stubbed as `(define name 0)`
+    const_exports: &'static [&'static str],
+    /// macro exports — stubbed with `define-syntax` error-raising rules
+    macro_exports: &'static [&'static str],
+}
+
+const SHADOW_STUBS: &[ShadowStub] = &[
+    // --- C-backed OS modules ---
+    ShadowStub {
+        path: "chibi/filesystem",
+        fn_exports: &[
+            "duplicate-file-descriptor", "duplicate-file-descriptor-to",
+            "close-file-descriptor", "renumber-file-descriptor",
+            "open-input-file-descriptor", "open-output-file-descriptor",
+            "delete-file", "link-file", "symbolic-link-file", "rename-file",
+            "directory-files", "directory-fold", "directory-fold-tree",
+            "delete-file-hierarchy", "delete-directory",
+            "create-directory", "create-directory*",
+            "current-directory", "change-directory", "with-directory",
+            "open", "open-pipe", "make-fifo", "open-output-file/append",
+            "read-link",
+            "file-status", "file-link-status",
+            "file-device", "file-inode", "file-mode", "file-num-links",
+            "file-owner", "file-group", "file-represented-device",
+            "file-size", "file-block-size", "file-num-blocks",
+            "file-access-time", "file-change-time",
+            "file-modification-time", "file-modification-time/safe",
+            "file-regular?", "file-directory?", "file-character?",
+            "file-block?", "file-fifo?", "file-link?", "file-socket?",
+            "file-exists?",
+            "get-file-descriptor-flags", "set-file-descriptor-flags!",
+            "get-file-descriptor-status", "set-file-descriptor-status!",
+            "file-lock", "file-truncate",
+            "file-is-readable?", "file-is-writable?", "file-is-executable?",
+            "chmod", "chown", "is-a-tty?",
+        ],
+        const_exports: &[
+            "open/read", "open/write", "open/read-write",
+            "open/create", "open/exclusive", "open/truncate",
+            "open/append", "open/non-block",
+            "lock/shared", "lock/exclusive", "lock/non-blocking", "lock/unlock",
+        ],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/process",
+        fn_exports: &[
+            "exit", "emergency-exit", "sleep", "alarm",
+            "%fork", "fork", "kill", "execute",
+            "waitpid", "system", "system?",
+            "process-command-line", "process-running?",
+            "set-signal-action!",
+            "make-signal-set", "signal-set?", "signal-set-contains?",
+            "signal-set-fill!", "signal-set-add!", "signal-set-delete!",
+            "current-signal-mask", "current-process-id", "parent-process-id",
+            "signal-mask-block!", "signal-mask-unblock!", "signal-mask-set!",
+            "call-with-process-io",
+            "process->bytevector", "process->string", "process->sexp",
+            "process->string-list",
+            "process->output+error", "process->output+error+status",
+        ],
+        const_exports: &[
+            "signal/hang-up", "signal/interrupt", "signal/quit",
+            "signal/illegal", "signal/abort", "signal/fpe",
+            "signal/kill", "signal/segv", "signal/pipe",
+            "signal/alarm", "signal/term",
+            "signal/user1", "signal/user2",
+            "signal/child", "signal/continue", "signal/stop",
+            "signal/tty-stop", "signal/tty-input", "signal/tty-output",
+            "wait/no-hang",
+        ],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/system",
+        fn_exports: &[
+            "get-host-name",
+            "user?", "user-name", "user-password", "user-id",
+            "user-group-id", "user-gecos", "user-home", "user-shell",
+            "user-information",
+            "group?", "group-name", "group-password", "group-id",
+            "group-information",
+            "current-user-id", "current-group-id",
+            "current-effective-user-id", "current-effective-group-id",
+            "set-current-user-id!", "set-current-effective-user-id!",
+            "set-current-group-id!", "set-current-effective-group-id!",
+            "current-session-id", "create-session", "set-root-directory!",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/net",
+        fn_exports: &[
+            "sockaddr?", "address-info?",
+            "get-address-info", "make-address-info",
+            "socket", "connect", "bind", "accept", "listen",
+            "open-socket-pair", "get-peer-name",
+            "sockaddr-name", "sockaddr-port", "make-sockaddr",
+            "with-net-io", "open-net-io", "make-listener-socket",
+            "send", "receive!", "receive",
+            "send/non-blocking", "receive!/non-blocking", "receive/non-blocking",
+            "address-info-family", "address-info-socket-type",
+            "address-info-protocol", "address-info-flags",
+            "address-info-address", "address-info-address-length",
+            "address-info-canonname", "address-info-next",
+            "get-socket-option", "set-socket-option!",
+        ],
+        const_exports: &[
+            "address-family/unix", "address-family/inet",
+            "address-family/inet6", "address-family/unspecified",
+            "socket-type/stream", "socket-type/datagram", "socket-type/raw",
+            "ip-proto/ip", "ip-proto/icmp", "ip-proto/tcp", "ip-proto/udp",
+            "ai/passive", "ai/canonname", "ai/numeric-host",
+            "level/socket",
+            "socket-opt/debug", "socket-opt/broadcast",
+            "socket-opt/reuseaddr", "socket-opt/keepalive",
+            "socket-opt/oobinline", "socket-opt/sndbuf", "socket-opt/rcvbuf",
+            "socket-opt/dontroute", "socket-opt/rcvlowat", "socket-opt/sndlowat",
+        ],
+        macro_exports: &[],
+    },
+    // --- pure scheme wrappers ---
+    ShadowStub {
+        path: "chibi/shell",
+        fn_exports: &[
+            "shell-command", "shell-pipe", "call-with-shell-io",
+            "shell-if", "shell-and", "shell-or", "shell-do",
+            "in<", "out>", "err>", "out>>", "err>>",
+        ],
+        const_exports: &[],
+        macro_exports: &[
+            "shell", "shell&",
+            "shell->string", "shell->string-list",
+            "shell->sexp", "shell->sexp-list",
+            "shell->output&error",
+            "><", ">>", "<<",
+        ],
+    },
+    ShadowStub {
+        path: "chibi/temp-file",
+        fn_exports: &["call-with-temp-file", "call-with-temp-dir"],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/net/http",
+        fn_exports: &[
+            "http-get", "http-get/headers", "http-get-to-file",
+            "http-head", "http-post", "http-put", "http-delete",
+            "call-with-input-url", "call-with-input-url/headers",
+            "with-input-from-url",
+            "http-parse-request", "http-parse-form",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/net/server",
+        fn_exports: &["run-net-server", "make-listener-thunk"],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/net/http-server",
+        fn_exports: &[
+            "run-http-server",
+            "http-chain-servlets", "http-default-servlet",
+            "http-wrap-default", "http-file-servlet",
+            "http-procedure-servlet", "http-ext-servlet",
+            "http-regexp-servlet", "http-path-regexp-servlet",
+            "http-uri-regexp-servlet", "http-host-regexp-servlet",
+            "http-redirect-servlet", "http-rewrite-servlet",
+            "http-cgi-bin-dir-servlet", "http-scheme-script-dir-servlet",
+            "http-send-file",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/net/server-util",
+        fn_exports: &[
+            "line-handler", "command-handler", "parse-command",
+            "get-host", "file-mime-type",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/net/servlet",
+        fn_exports: &[
+            "upload?", "upload-name", "upload-filename", "upload-headers",
+            "upload->string", "upload-input-port", "upload-save",
+            "upload->bytevector", "upload->sexp", "upload-binary-input-port",
+            "request?", "request-method", "request-host", "request-uploads",
+            "request-uri", "request-version", "request-headers",
+            "request-body", "request-params", "request-in", "request-out",
+            "request-sock", "request-addr",
+            "request-param", "request-param-list",
+            "request-upload", "request-upload-list",
+            "request-uri-string", "request-with-uri", "request-path",
+            "request-method-set!", "request-host-set!", "request-uri-set!",
+            "request-version-set!", "request-headers-set!",
+            "request-body-set!", "request-params-set!",
+            "request-in-set!", "request-out-set!",
+            "request-sock-set!", "request-addr-set!",
+            "copy-request", "make-request", "make-cgi-request",
+            "servlet-write", "servlet-write-status", "servlet-respond",
+            "servlet-parse-body!", "make-status-servlet",
+            "servlet-handler", "servlet-run", "servlet-bad-request",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
     },
 ];
