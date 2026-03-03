@@ -5240,8 +5240,8 @@ mod tests {
             r.err()
         );
 
-        // filesystem import should fail — (chibi app) is not in VFS
-        let err = ctx.evaluate("(import (chibi app))").unwrap_err();
+        // non-VFS import should fail — chibi/disasm is intentionally excluded
+        let err = ctx.evaluate("(import (chibi disasm))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "expected SandboxViolation for blocked import, got: {:?}",
@@ -5331,8 +5331,9 @@ mod tests {
             r.err()
         );
 
-        // a module not in the VFS registry should still fail (not in the registry)
-        let err = ctx.evaluate("(import (chibi app))").unwrap_err();
+        // a module not in the VFS registry should still fail (not in the registry).
+        // chibi/disasm is intentionally excluded (exposes VM internals) — always absent.
+        let err = ctx.evaluate("(import (chibi disasm))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "non-VFS import should fail under Modules::All: {:?}",
@@ -5707,8 +5708,9 @@ mod tests {
         let r = ctx.evaluate("(import (scheme write))");
         assert!(r.is_ok(), "(scheme write) should work: {:?}", r.err());
 
-        // a module not in the VFS registry should fail as SandboxViolation
-        let err = ctx.evaluate("(import (chibi app))").unwrap_err();
+        // a module not in the VFS registry should fail as SandboxViolation.
+        // chibi/disasm is intentionally excluded (exposes VM internals) — always absent.
+        let err = ctx.evaluate("(import (chibi disasm))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "expected SandboxViolation, got: {:?}",
@@ -7957,6 +7959,246 @@ mod tests {
             )
             .expect("srfi/227/definition should load and define-optionals should work");
         assert_eq!(result, Value::Integer(11));
+    }
+
+    #[test]
+    fn test_chibi_mime_loads() {
+        // chibi/mime is pure scheme: MIME parsing with base64/quoted-printable.
+        // all deps in VFS and safe.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (chibi mime)) \
+                 (mime-parse-content-type \"text/html; charset=utf-8\")",
+            )
+            .expect("chibi/mime should load and parse content types");
+        // result is an alist like (("text/html") ("charset" . "utf-8"))
+        // just verify it's not an error — the exact structure depends on chibi's impl
+        assert!(
+            !matches!(result, Value::String(_)),
+            "expected parsed content-type, got error string: {result}"
+        );
+    }
+
+    #[test]
+    fn test_chibi_binary_record_loads() {
+        // chibi/binary-record provides binary record type macros.
+        // pure scheme, deps: scheme/base, srfi/1, srfi/151, srfi/130.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (chibi binary-record))")
+            .expect("chibi/binary-record should load");
+    }
+
+    #[test]
+    fn test_chibi_memoize_loads() {
+        // chibi/memoize provides in-memory LRU caching.
+        // chibi cond-expand branch pulls chibi/system + chibi/filesystem
+        // (both already shadowed). LRU cache construction works; file-backed
+        // memoize-to-file errors via shadowed deps. #105 upgrades later.
+        // note: memoize + does not work because procedure-arity of variadic
+        // builtins returns an unexpected value under chibi/ast introspection.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (chibi memoize)) \
+                 (lru-cache? (make-lru-cache))",
+            )
+            .expect("chibi/memoize should load and make-lru-cache should work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_stty_raises_error() {
+        // chibi/stty is C-backed terminal control — shadow stub blocks all access.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/stty")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi stty)) (get-terminal-width)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/stty]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_term_edit_line_raises_error() {
+        // chibi/term/edit-line depends on stty — shadow stub blocks all access.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/term/edit-line")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi term edit-line)) (make-line-editor)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/term/edit-line]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_app_raises_error() {
+        // chibi/app is CLI framework depending on config + process-context.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/app")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi app)) (app-help '())");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/app]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_config_raises_error() {
+        // chibi/config is config file reader depending on scheme/file + chibi/filesystem.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/config")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi config)) (make-conf '())");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/config]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_log_raises_error() {
+        // chibi/log is logging with file locking + OS identity (PIDs, UIDs).
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/log")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi log)) (log-open \"test\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/log]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_tar_raises_error() {
+        // chibi/tar: archive handling hard-wired to chibi/filesystem (#105).
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/tar")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi tar)) (tar-files \"test.tar\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/tar]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_srfi_193_raises_error() {
+        // srfi/193: command-line args + script path leak in sandbox.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("srfi/193")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (srfi 193)) (script-file)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:srfi/193]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_apropos_raises_error() {
+        // chibi/apropos: env introspection exposes internal module structure.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/apropos")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi apropos)) (apropos \"test\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/apropos]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scheme_load_shadow_uses_tein_load() {
+        // scheme/load shadow re-exports from (tein load) — VFS-restricted load.
+        // (scheme load) has a shadow_sld that imports (tein load) and re-exports load.
+        // verify: import succeeds, and the load binding rejects non-VFS paths.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        // import should succeed — shadow registered in sandboxed context
+        ctx.evaluate("(import (scheme load))")
+            .expect("(scheme load) shadow should import via (tein load)");
+        // a non-VFS path should be rejected by the VFS-restricted load
+        let r = ctx.evaluate("(load \"/etc/passwd\")");
+        assert!(r.is_err(), "expected non-VFS load to fail, got: {r:?}");
     }
 
     // NOTE: scheme/time has a deep dependency chain (scheme/process-context,

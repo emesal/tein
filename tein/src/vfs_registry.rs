@@ -432,6 +432,22 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // scheme/load: VFS shadow — re-exports VFS-restricted load from (tein load).
+    // chibi's native (scheme load) exposes unrestricted file loading.
+    // this shadow provides safe load semantics via tein-load-vfs-internal.
+    // see also: tein/load.sld exports load as (rename tein-load-vfs-internal load).
+    VfsEntry {
+        path: "scheme/load",
+        deps: &["tein/load"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some(
+            "(define-library (scheme load)\n  (import (tein load))\n  (export load))\n",
+        ),
+    },
     VfsEntry {
         path: "scheme/list",
         deps: &["srfi/1"],
@@ -2006,6 +2022,86 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None, // generated from SHADOW_STUBS by build.rs
     },
     VfsEntry {
+        path: "chibi/stty",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/term/edit-line",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/app",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/config",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/log",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/apropos",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "chibi/tar",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
+        path: "srfi/193",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+    },
+    VfsEntry {
         path: "chibi/net",
         deps: &["scheme/base"],
         files: &[],
@@ -2731,6 +2827,21 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
+        path: "chibi/binary-record",
+        deps: &["scheme/base", "srfi/1", "srfi/151", "srfi/130"],
+        files: &[
+            "lib/chibi/binary-record.sld",
+            "lib/chibi/binary-types.scm",
+            "lib/chibi/binary-record.scm",
+            "lib/chibi/binary-record-chicken.scm", // cond-expand else branch; not loaded by chibi
+        ],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
         path: "chibi/bytevector",
         deps: &["scheme/base", "scheme/inexact"],
         // ieee-754.scm is included inside a cond-expand else branch
@@ -2819,6 +2930,21 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         path: "chibi/math/prime",
         deps: &["scheme/base", "scheme/inexact", "chibi/optional", "srfi/1", "srfi/27"],
         files: &["lib/chibi/math/prime.sld", "lib/chibi/math/prime.scm"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        path: "chibi/memoize",
+        deps: &[
+            "scheme/base", "scheme/char", "scheme/file",
+            "chibi/optional", "chibi/pathname", "chibi/string",
+            "chibi/ast", "chibi/system", "chibi/filesystem",
+            "srfi/9", "srfi/38", "srfi/69", "srfi/98",
+        ],
+        files: &["lib/chibi/memoize.sld", "lib/chibi/memoize.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -3000,6 +3126,19 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         path: "chibi/text",
         deps: &["scheme/base", "chibi/text/base", "chibi/text/search", "chibi/text/types"],
         files: &["lib/chibi/text.sld"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        path: "chibi/mime",
+        deps: &[
+            "scheme/base", "scheme/char", "scheme/write",
+            "chibi/base64", "chibi/quoted-printable", "chibi/string",
+        ],
+        files: &["lib/chibi/mime.sld", "lib/chibi/mime.scm"],
         clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
@@ -3252,5 +3391,119 @@ const SHADOW_STUBS: &[ShadowStub] = &[
         ],
         const_exports: &[],
         macro_exports: &[],
+    },
+    // --- terminal control ---
+    ShadowStub {
+        path: "chibi/stty",
+        fn_exports: &[
+            "stty", "with-stty", "with-raw-io",
+            "get-terminal-width", "get-terminal-dimensions",
+            // record types stubbed as fns
+            "winsize", "winsize?", "make-winsize", "winsize-row", "winsize-col",
+            "termios", "term-attrs?",
+        ],
+        const_exports: &["TCSANOW", "TCSADRAIN", "TCSAFLUSH"],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/term/edit-line",
+        fn_exports: &[
+            "make-line-editor", "edit-line", "edit-line-repl",
+            "make-history", "history-insert!", "history-reset!",
+            "history-commit!", "history->list", "list->history",
+            "buffer->string", "make-buffer", "buffer-make-completer",
+            "buffer-clear", "buffer-refresh", "buffer-draw",
+            "buffer-row", "buffer-col",
+            "make-keymap", "make-standard-keymap",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- application framework ---
+    ShadowStub {
+        path: "chibi/app",
+        fn_exports: &[
+            "parse-option", "parse-options", "parse-app",
+            "run-application", "app-help", "app-help-command",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    ShadowStub {
+        path: "chibi/config",
+        fn_exports: &[
+            "make-conf", "conf?", "conf-load", "conf-load-in-path",
+            "conf-load-cascaded", "conf-verify", "conf-extend",
+            "conf-append", "conf-set", "conf-unfold-key",
+            "conf-get", "conf-get-list", "conf-get-cdr", "conf-get-multi",
+            "conf-specialize", "read-from-file",
+            "conf-source", "conf-head", "conf-parent",
+            "assoc-get", "assoc-get-list",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- environment introspection ---
+    ShadowStub {
+        path: "chibi/apropos",
+        fn_exports: &["apropos", "apropos-list"],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- tar archives ---
+    ShadowStub {
+        path: "chibi/tar",
+        fn_exports: &[
+            "tar", "make-tar", "tar?", "read-tar", "write-tar",
+            "tar-safe?", "tar-files", "tar-fold",
+            "tar-extract", "tar-extract-file", "tar-create",
+            "tar-path", "tar-path-prefix", "tar-mode",
+            "tar-uid", "tar-gid", "tar-owner", "tar-group",
+            "tar-size", "tar-time", "tar-type", "tar-link-name",
+            "tar-path-set!", "tar-mode-set!", "tar-uid-set!",
+            "tar-gid-set!", "tar-owner-set!", "tar-group-set!",
+            "tar-size-set!", "tar-time-set!", "tar-type-set!",
+            "tar-link-name-set!",
+            "tar-device-major", "tar-device-major-set!",
+            "tar-device-minor", "tar-device-minor-set!",
+            "tar-ustar", "tar-ustar-set!",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- SRFI-193 command-line ---
+    ShadowStub {
+        path: "srfi/193",
+        fn_exports: &[
+            "command-line", "command-name", "command-args",
+            "script-file", "script-directory",
+        ],
+        const_exports: &[],
+        macro_exports: &[],
+    },
+    // --- logging ---
+    ShadowStub {
+        path: "chibi/log",
+        fn_exports: &[
+            "Logger", "logger?",
+            "logger-levels", "logger-levels-set!",
+            "logger-level-abbrevs", "logger-level-abbrevs-set!",
+            "logger-current-level", "logger-current-level-set!",
+            "logger-prefix", "logger-prefix-set!",
+            "logger-counts", "logger-counts-set!",
+            "logger-file", "logger-file-set!",
+            "logger-port", "logger-port-set!",
+            "logger-locked?", "logger-locked?-set!",
+            "logger-zipped?", "logger-zipped?-set!",
+            "log-open", "log-close", "log-show", "log-show-every-n",
+            "log-compile-prefix",
+            "log-level-index", "log-level-name", "log-level-abbrev",
+            "log-emergency", "log-alert", "log-critical",
+            "log-error", "log-warn", "log-notice",
+            "log-info", "log-debug", "log-trace",
+            "default-logger",
+        ],
+        const_exports: &[],
+        macro_exports: &["define-logger", "with-logged-errors", "with-logged-and-reraised-errors"],
     },
 ];

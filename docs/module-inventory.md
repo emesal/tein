@@ -5,11 +5,8 @@ status of all chibi-scheme modules in tein's VFS registry.
 **legend:**
 - ✅ in VFS, safe (`default_safe: true`)
 - 🔒 in VFS, unsafe (`default_safe: false`) — available in `Modules::All` only
-- 🌑 shadow — VFS entry replaces native with sandboxed impl
-- ❌ not in VFS — blocked/inaccessible in sandboxed contexts
-- ➕ not in VFS — needs adding (pure/safe, no sandboxing needed)
-- ⚠️  not in VFS — needs shadow/trampoline before it can be added
-- 🔧 in VFS but needs review (fields tagged `?` or safety unclear)
+- 🌑 shadow — VFS entry replaces native with sandboxed stub or functional wrapper
+- ❌ intentionally excluded — see appendix B for rationale
 
 ---
 
@@ -43,7 +40,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `scheme/lazy` | ✅ | |
 | `scheme/list` | ✅ | |
 | `scheme/list-queue` | ✅ | |
-| `scheme/load` | ❌ | blocked; use `tein/load` instead |
+| `scheme/load` | 🌑 | shadow → re-exports from `(tein load)` (VFS-restricted) |
 | `scheme/lseq` | ✅ | |
 | `scheme/mapping` | ✅ | |
 | `scheme/mapping/hash` | 🔒 | hash-backed mappings; pulls in `srfi/146/hash` (unsafe) |
@@ -183,7 +180,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/179` | ✅ | nonempty intervals + generalized arrays |
 | `srfi/179/base` | ✅ | |
 | `srfi/188` | ✅ | splicing binding constructs |
-| `srfi/193` | ❌ | command channel — not in VFS |
+| `srfi/193` | 🌑 | shadow stub — leaks argv + script path |
 | `srfi/211/identifier-syntax` | ✅ | |
 | `srfi/211/variable-transformer` | ✅ | |
 | `srfi/219` | ✅ | define higher-order lambda |
@@ -201,12 +198,12 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 
 | module | status | notes |
 |--------|--------|-------|
-| `chibi/app` | ❌ | CLI app framework — reads env/args, needs shadow |
-| `chibi/apropos` | ❌ | reflects on env/module contents |
+| `chibi/app` | 🌑 | shadow stub — CLI framework; depends on config + process-context |
+| `chibi/apropos` | 🌑 | shadow stub — env introspection, info leak |
 | `chibi/assert` | ✅ | |
 | `chibi/ast` | ✅ | AST introspection; internal dep (srfi/18, chibi/io etc) |
 | `chibi/base64` | ✅ | pure encoder/decoder |
-| `chibi/binary-record` | ❌ | binary i/o record types — needs review |
+| `chibi/binary-record` | ✅ | binary record type macros — pure scheme |
 | `chibi/bytevector` | ✅ | bytevector extras (IEEE-754 floats) |
 | `chibi/channel` | ✅ | pure-scheme FIFO channel; embedded. depends on srfi/18 (threads, disabled) — in VFS but channel ops unavailable without thread support |
 | `chibi/char-set` | ✅ | |
@@ -215,7 +212,7 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/char-set/boundary` | ✅ | |
 | `chibi/char-set/extras` | ✅ | |
 | `chibi/char-set/full` | ✅ | |
-| `chibi/config` | ❌ | reads config files — file i/o |
+| `chibi/config` | 🌑 | shadow stub — config file reader; filesystem access (#105) |
 | `chibi/crypto/md5` | ✅ | pure hash |
 | `chibi/crypto/rsa` | ✅ | RSA crypto — pure scheme |
 | `chibi/crypto/sha2` | ✅ | pure hash; cond-expand takes srfi/151 + chibi/bytevector path |
@@ -238,12 +235,12 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/iset/iterators` | ✅ | |
 | `chibi/iset/optimize` | ✅ | integer set rebalancing + optimisation; pure scheme |
 | `chibi/json` | ❌ | use `tein/json` instead |
-| `chibi/log` | ❌ | logging — writes to stderr, file |
+| `chibi/log` | 🌑 | shadow stub — logging with file locking + OS identity (#105) |
 | `chibi/loop` | ✅ | loop macros |
 | `chibi/match` | ✅ | pattern matching |
 | `chibi/math/prime` | ✅ | prime factorisation |
-| `chibi/memoize` | ❌ | memoization — cond-expand uses chibi/system + chibi/filesystem ⚠️ |
-| `chibi/mime` | ❌ | MIME parsing — needs file i/o ⚠️ |
+| `chibi/memoize` | ✅ | in-memory LRU cache works; file-backed errors via shadowed deps (#105) |
+| `chibi/mime` | ✅ | pure MIME parsing — base64, content-type, message folding |
 | `chibi/modules` | ❌ | module reflection — exposes module internals |
 | `chibi/monad/environment` | ✅ | environment monad |
 | `chibi/net` | ✅ | sandbox stub (phase 1) — importable, all fns/consts stubbed |
@@ -278,14 +275,14 @@ these are chibi-specific, not r7rs standard. many are safe pure libs; some touch
 | `chibi/show/unicode` | ✅ | `alias-for (srfi 166 unicode)` |
 | `chibi/snow/*` | ❌ | snow package manager — file i/o + network ⚠️ |
 | `chibi/string` | ✅ | |
-| `chibi/stty` | ❌ | terminal control — OS ⚠️ |
+| `chibi/stty` | 🌑 | shadow stub — terminal ioctl, C-backed |
 | `chibi/sxml` | ✅ | SXML |
 | `chibi/syntax-case` | ✅ | syntax-case macros |
 | `chibi/system` | ✅ | sandbox stub (phase 1) — importable, all fns raise sandbox error |
-| `chibi/tar` | ❌ | tar format — file i/o ⚠️ |
+| `chibi/tar` | 🌑 | shadow stub — tar archives, hard-wired to filesystem (#105) |
 | `chibi/temp-file` | ✅ | sandbox stub (phase 1) — importable, fns raise sandbox error |
 | `chibi/term/ansi` | ✅ | ANSI terminal escape codes |
-| `chibi/term/edit-line` | ❌ | line editing — terminal i/o ⚠️ |
+| `chibi/term/edit-line` | 🌑 | shadow stub — line editor, depends on stty |
 | `chibi/text` | ✅ | text editor operations |
 | `chibi/text/base` | ✅ | (includes marks + movement) |
 | `chibi/text/marks` | ❌ | included in chibi/text/base |
@@ -326,40 +323,100 @@ tein's own modules — always in VFS.
 
 ## summary
 
-| category | ✅ safe | 🔒 unsafe | 🌑 shadow | ❌ not in VFS |
-|----------|---------|----------|----------|--------------|
-| scheme/* | 48 | 7 | 3 | 2 |
-| srfi/* | 101 | 3 | 1 | 1 |
-| chibi/* | 65 | 0 | 0 | 34 |
+| category | ✅ safe | 🔒 unsafe | 🌑 shadow | ❌ excluded |
+|----------|---------|----------|----------|-------------|
+| scheme/* | 48 | 7 | 4 | 1 |
+| srfi/* | 102 | 3 | 2 | 0 |
+| chibi/* | 68 | 0 | 7 | 24 |
 | tein/* | 12 | 0 | 0 | 0 |
-| **total** | **226** | **10** | **4** | **37** |
+| **total** | **230** | **10** | **13** | **25** |
 
-### priority queue
+### status
 
-**✅ shadow stubs done (phase 1 — error-on-call):**
-- `chibi/filesystem`, `chibi/process`, `chibi/system`
-- `chibi/shell`, `chibi/temp-file`
-- `chibi/net`, `chibi/net/http`, `chibi/net/server`, `chibi/net/http-server`,
+**✅ all modules resolved.** every chibi-scheme module is either in the VFS, intentionally excluded (appendix B), or tracked in a github issue.
+
+**phase-1 stubs (✅ in table — error-on-call): 11 modules**
+- OS filesystem: `chibi/filesystem`, `chibi/temp-file`
+- OS process/system: `chibi/process`, `chibi/system`
+- OS network: `chibi/net`, `chibi/net/http`, `chibi/net/server`, `chibi/net/http-server`,
   `chibi/net/server-util`, `chibi/net/servlet`
-- `chibi/channel` (embedded, not a stub — but depends on srfi/18 / threads)
+- shell execution: `chibi/shell`
 
-**⚠️ still needs shadow/trampoline (not in VFS):**
-- `chibi/mime` — file-backed MIME
-- `chibi/stty`, `chibi/term/edit-line` — terminal i/o
-- `chibi/tar` — file i/o
-- `chibi/app` — env/args
-- `scheme/load` — arbitrary file loading (already blocked; use `tein/load`)
-- `scheme/r5rs` — already blocked
+**shadow stubs (🌑 in table — error-on-call): 13 modules**
+- OS terminal: `chibi/stty`, `chibi/term/edit-line`
+- application: `chibi/app`, `chibi/config`, `chibi/log`, `chibi/tar`
+- info leak: `srfi/193`, `chibi/apropos`
+- scheme/file → `tein/file` (FsPolicy enforcement)
+- scheme/process-context → `tein/process` (neutered env/argv)
+- scheme/repl → neutered `interaction-environment`
+- scheme/load → `tein/load` (VFS-restricted)
+- srfi/98 → neutered env var stubs
 
-**phase 2 (selective gating — not started):**
-- selectively expose safe fns from stub modules with real FS/network policy checks
-- e.g. `chibi/filesystem` `file-exists?`, `file-size`; `chibi/process` `current-process-id`
+**tracked in issues:**
+- `scheme/r5rs` — #106 (blocked on #97, sandboxed eval)
+- phase 2 progressive gating — #105 (writable VFS compartment)
 
-**intentionally excluded (not useful for embedding):**
-- `chibi/disasm`, `chibi/heap-stats`, `chibi/modules`, `chibi/optimize/*`
-- `chibi/reload`, `chibi/repl`, `chibi/trace`, `chibi/type-inference`
-- `chibi/snow/*` (package manager)
-- `chibi/emscripten`, `chibi/win32/*`
-- `chibi/doc`, `chibi/scribble` (doc generation tools)
-- `chibi/zlib` (depends on native zlib; potential future clib feature)
-- `chibi/pty` (pseudo-terminal; not useful for embedded)
+---
+
+## appendix A: shadow stub rationale
+
+modules added to the VFS as shadow stubs (error-on-call). importing succeeds; calling
+any exported function raises `[sandbox:module/path] fn-name not available`. this lets
+code that conditionally uses these modules load without crashing, while preventing
+actual OS access. see #105 for future progressive gating (selectively unshadowing
+safe operations with real implementations).
+
+| module | why stubbed |
+|--------|-------------|
+| `chibi/filesystem` | POSIX filesystem ops: stat, mkdir, readlink, symlink, chmod, chown. gated by FsPolicy; #105 tracks selective unshadowing |
+| `chibi/process` | process creation (`system`, `execute`), signals, fork. `exit` overlaps with `tein/process` |
+| `chibi/system` | UID/GID queries, hostname, uname — OS identity information leak |
+| `chibi/shell` | shell command execution via `shell`, `shell->string`, `shell-pipe` + macros |
+| `chibi/temp-file` | creates files in `/tmp` — filesystem write outside policy control |
+| `chibi/net` | BSD socket API: `open-net-io`, `make-listener-socket`, address resolution |
+| `chibi/net/http` | HTTP client — network access |
+| `chibi/net/server` | TCP server loop — network listener |
+| `chibi/net/http-server` | HTTP server framework — network listener + filesystem serving |
+| `chibi/net/server-util` | server utilities (logging, connection handling) |
+| `chibi/net/servlet` | HTTP servlet framework — request/response handling with network + filesystem |
+| `chibi/stty` | terminal control: `stty`, `with-raw-io`, `get-terminal-width`. C-backed via `include-shared`; real impl is unsafe (raw ioctl) |
+| `chibi/term/edit-line` | interactive line editor depending on `chibi/stty` for terminal mode switching |
+| `chibi/log` | logging framework deeply coupled to OS: file locking (`file-lock`), process/user IDs for log prefixes, `open-output-file/append`. #105 could enable scoped log file writing |
+| `chibi/app` | CLI application framework depending on `chibi/config` (filesystem) and `scheme/process-context` (argv/env). stubs let libraries that optionally import it still load |
+| `chibi/config` | config file reader using `scheme/file` + `chibi/filesystem` (`file-directory?`). #105 could enable reading from allowed paths |
+| `chibi/tar` | tar archive handling hard-wired to `chibi/filesystem` (15+ direct calls: `create-directory*`, `link-file`, `symbolic-link-file`, `directory-fold-tree`, stat ops). #105 could enable scoped extraction |
+| `srfi/193` | SRFI-193 command-line: `command-line`, `command-name`, `script-file`, `script-directory`. leaks host argv and script path — information disclosure in sandbox |
+| `chibi/apropos` | `apropos` / `apropos-list` enumerate all bindings in an environment — exposes internal module structure, information leak |
+
+---
+
+## appendix B: intentionally excluded modules
+
+modules deliberately not added to the VFS. these expose chibi internals, target
+inapplicable platforms, or have tein-native replacements.
+
+| module | why excluded |
+|--------|-------------|
+| `chibi/disasm` | chibi bytecode disassembler — exposes VM internals; not useful outside chibi development |
+| `chibi/heap-stats` | GC heap introspection — chibi-internal debugging tool |
+| `chibi/modules` | module reflection (`module-exports`, `add-module!`, `delete-module!`) — exposes and mutates module system internals |
+| `chibi/optimize/*` | compiler optimiser passes (`optimize`, `profile`, `rest`) — chibi compiler internals |
+| `chibi/reload` | hot-reload modules from filesystem — arbitrary file loading, bypasses VFS |
+| `chibi/repl` | interactive REPL — reads from stdin, writes to stdout, loads files. use `tein/reader` for reader dispatch |
+| `chibi/trace` | execution tracing — debugging tool instrumenting chibi's eval, not meaningful in embedded context |
+| `chibi/type-inference` | type inference for chibi's compiler — internal optimisation pass |
+| `chibi/snow/*` | snow package manager — downloads and installs packages from network, full filesystem access |
+| `chibi/emscripten` | emscripten/JS interop — not applicable outside browser/wasm target |
+| `chibi/win32/*` | windows process creation — not applicable on linux; tein is linux-first |
+| `chibi/doc` | documentation extraction — reads source files, writes output files |
+| `chibi/scribble` | scribble document format — file i/o for document generation |
+| `chibi/json` | chibi's JSON library — tein provides `(tein json)` with rust-backed implementation |
+| `chibi/pty` | pseudo-terminal creation — dangerous OS primitive, not useful for embedded scheme |
+| `chibi/show` | top-level show library — use `(srfi 166)` instead (same implementation, standard name) |
+| `chibi/show/c` | C pretty-printer — niche formatting tool for C code output |
+| `chibi/regexp/pcre` | PCRE regex backend — requires native libpcre; `chibi/regexp` (IrRegex) is already in VFS |
+| `chibi/zlib` | zlib compression — requires native libz as clib. potential future feature if demand arises |
+| `chibi/ieee-754` | listed in original chibi inventory but no `.sld` found in `lib/` — likely dead/removed |
+| `chibi/text/marks` | text editor mark operations — included in `chibi/text/base`, not a standalone module |
+| `chibi/text/movement` | text editor cursor movement — included in `chibi/text/base`, not a standalone module |
+| `scheme/r5rs` | r5rs mega-bundle re-exporting `scheme/file`, `scheme/eval`, `scheme/load`, `scheme/repl`. blocked on #97 (sandboxed eval). tracked in #106 |

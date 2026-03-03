@@ -122,16 +122,23 @@ thread_local! {
 // files that re-export from safe tein counterparts or provide neutered stubs.
 // unsandboxed contexts use chibi's native versions (no shadow registered).
 //
+// hand-written shadows (functional):
 // - `scheme/file` — re-exports (tein file), providing FsPolicy enforcement
 // - `scheme/repl` — neutered interaction-environment via (current-environment)
 // - `scheme/process-context` — re-exports (tein process) with neutered env/argv
+// - `scheme/load` — re-exports (tein load), VFS-restricted load
 // - `srfi/98` — neutered get-environment-variable (always #f)
+//
+// generated shadow stubs (error-on-call): chibi/filesystem, chibi/process,
+// chibi/system, chibi/shell, chibi/temp-file, chibi/stty, chibi/term/edit-line,
+// chibi/app, chibi/config, chibi/log, chibi/tar, chibi/apropos, srfi/193,
+// chibi/net, chibi/net/http, chibi/net/server, chibi/net/http-server,
+// chibi/net/server-util, chibi/net/servlet.
 //
 // modules NOT shadowed and intentionally blocked:
 //
-// - `scheme/load` — loads arbitrary files from filesystem. use (tein load) instead.
 // - `scheme/eval` — eval + environment. tracked for future shadow (GH issue #97).
-// - `scheme/r5rs` — re-exports scheme/file, scheme/load, scheme/process-context.
+// - `scheme/r5rs` — re-exports scheme/eval; tracked in #106 (blocked on #97).
 
 /// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
 pub(crate) const GATE_OFF: u8 = 0;
@@ -341,8 +348,8 @@ pub enum Modules {
     /// conservative safe set — default for sandboxed contexts.
     ///
     /// includes all modules marked `default_safe: true` in the registry,
-    /// with transitive deps resolved. excludes `scheme/eval`, `scheme/load`,
-    /// `scheme/r5rs`, and `scheme/time`. `scheme/repl`, `scheme/file`,
+    /// with transitive deps resolved. excludes `scheme/eval`, `scheme/r5rs`,
+    /// and `scheme/time`. `scheme/repl`, `scheme/file`, `scheme/load`,
     /// `scheme/process-context`, and `tein/process` are included via
     /// shadow modules or neutered trampolines.
     #[default]

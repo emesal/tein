@@ -82,42 +82,42 @@
     - `test_chibi_show_aliases_load` — all 4 chibi/show aliases importable in sandbox
     - `test_srfi_227_definition_loads` — define-optionals works via the sub-module
 
+### session 6 — module inventory completion
+
+24. added `chibi/mime` as pure VFS entry
+    - pure MIME parsing: base64, content-type, message folding
+25. added `chibi/binary-record` as pure VFS entry
+    - binary record type macros, pure scheme
+26. added `chibi/memoize` as pure VFS entry
+    - in-memory LRU cache works; file-backed errors via shadowed deps
+    - future #105 (writable VFS compartment) upgrades automatically
+27. added 8 shadow stubs:
+    - `chibi/stty`, `chibi/term/edit-line` — terminal control
+    - `chibi/log`, `chibi/app`, `chibi/config` — application framework + logging
+    - `chibi/tar` — tar archives
+    - `srfi/193` — command-line info leak
+    - `chibi/apropos` — env introspection info leak
+28. added `scheme/load` as hand-written shadow
+    - re-exports VFS-restricted load from `(tein load)`
+29. updated module-inventory.md: legend, all status markers, summary table, appendices
+30. closed #92 (vet VFS modules for sandbox safety)
+
 ## current state
 
-**731 tests pass. branch: `dev`.**
+**all modules resolved. branch: `feature/module-inventory-completion-2603` → PR against `dev`.**
 
 ## what remains
 
-### 1. ➕ progressive gating for shadow stubs (tier 3 priority)
+### ✅ module inventory complete
 
-current stub behaviour: all fn/macro exports raise an error on call.
-future: selective allow-listing of individual functions with real implementations.
+all chibi-scheme modules are resolved — in VFS, intentionally excluded
+(with documented rationale in appendix B of docs/module-inventory.md),
+or tracked in github issues.
 
-modules that might get real rust trampolines in future:
-- `chibi/filesystem` — `file-exists?`, `file-size`, `directory-files` with FS policy
-- `chibi/process` — `current-process-id`, `parent-process-id` (read-only, safe)
-- `chibi/net` — socket creation with configurable network policy
-
-stub approach (phase 1) is complete. phase 2 would require individual `#[tein_module]`
-implementations wrapped with sandbox/FS policy checks.
-
-### 2. ➕ remaining pure-scheme modules
-
-`docs/module-inventory.md` has the full checklist. as of session 5 the remaining
-37 `❌` entries are nearly all intentionally excluded or need shadow/trampoline work:
-- intentionally excluded: `chibi/disasm`, `chibi/heap-stats`, `chibi/modules`,
-  `chibi/optimize/*`, `chibi/reload`, `chibi/repl`, `chibi/trace`, `chibi/type-inference`,
-  `chibi/snow/*`, `chibi/emscripten`, `chibi/win32/*`, `chibi/doc`, `chibi/scribble`,
-  `chibi/json`, `chibi/pty`, `chibi/show` (use srfi/166), `chibi/show/c`
-- need shadow/trampoline: `chibi/memoize`, `chibi/mime`, `chibi/stty`,
-  `chibi/term/edit-line`, `chibi/tar`, `chibi/app`, `chibi/log`,
-  `scheme/load`, `scheme/r5rs`, `srfi/193`
-- internal/non-applicable: `chibi/binary-record`, `chibi/config`, `chibi/apropos`,
-  `chibi/regexp/pcre`, `chibi/zlib`, `chibi/text/marks`, `chibi/text/movement`
-  (last two are included in chibi/text/base)
-- `chibi/ieee-754`: not found in lib/; probably dead
-
-lower priority — most useful modules are already in.
+**open issues for future work:**
+- #97 — sandboxed `(scheme eval)` + `(scheme load)` + `(scheme repl)`
+- #105 — writable VFS compartment (progressive gating for filesystem stubs)
+- #106 — `(scheme r5rs)` shadow (blocked on #97)
 
 ## key files
 
