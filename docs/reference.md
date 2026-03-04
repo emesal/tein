@@ -62,6 +62,7 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 | `tein/toml` | ✓ | `toml-parse`, `toml-stringify` (feature: `toml`) |
 | `tein/uuid` | ✓ | `make-uuid`, `uuid?`, `uuid-nil` (feature: `uuid`) |
 | `tein/time` | ✓ | `current-second`, `current-jiffy`, `jiffies-per-second`, `timezone-offset-seconds` (feature: `time`) |
+| `tein/safe-regexp` | ✓ | `regexp`, `regexp?`, `regexp-search`, `regexp-matches`, `regexp-matches?`, `regexp-replace`, `regexp-replace-all`, `regexp-extract`, `regexp-split`, `regexp-match-count`, `regexp-match-submatch`, `regexp-match->list`, `regexp-fold` (feature: `regex`) — linear-time via rust `regex` crate, no ReDoS |
 | `tein/file` | ✓ | R7RS file operations with `FsPolicy` enforcement |
 | `tein/load` | ✓ | `load` (VFS-restricted) |
 | `tein/process` | ✓ | `exit`, `emergency-exit`, `command-line`, `get-environment-variable`, `get-environment-variables` |

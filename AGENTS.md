@@ -53,6 +53,8 @@ src/
   toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso"). feature=toml
   uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
   time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second, timezone-offset-seconds. feature=time
+  safe_regexp.rs — #[tein_module("safe-regexp")]: regexp, regexp?, regexp-search, regexp-matches, regexp-replace,
+                   regexp-split, regexp-extract, regexp-fold, match accessors. feature=regex
   sexp_bridge.rs — Value ↔ Sexp; shared layer for format modules
 tein-ext/        — stable C ABI vtable for cdylib extensions (no chibi dependency)
 tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_loading.rs
@@ -156,6 +158,14 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 7. add test in `src/context.rs`
 
 **`JIFFY_EPOCH` is process-global**: `time.rs` uses a `static OnceLock<Instant>` shared across all `Context` instances. `current-jiffy` values are process-relative, not context-relative — epoch is set on first call anywhere in the process. this is correct per r7rs ("constant within a single run of the program") but means two separate contexts share the same jiffy epoch.
+
+**`(tein safe-regexp)` byte offsets**: match vector start/end values are byte offsets (rust regex semantics), not character offsets. for multi-byte unicode, these differ from scheme's char-indexed `substring`. use `regexp-match-submatch` for text extraction rather than raw offsets.
+
+**`(tein safe-regexp)` naming**: the `Regexp` foreign type is named `"safe-regexp"`, so auto-generated method names are `safe-regexp-search`, `safe-regexp-matches`, etc. the user-facing API (`regexp-search`, `regexp-matches`, etc.) is native `#[tein_fn]` free fns with string-or-regexp dispatch via `ensure_regexp`. `regexp?` is also a manual free fn — `#[tein_type(name = "safe-regexp")]` auto-generates `safe-regexp?` with the type prefix but not the user-facing `regexp?` name.
+
+**`(tein safe-regexp)` dynamic exports**: `tein/safe-regexp` uses `VfsSource::Dynamic` (no `.sld` for the scanner to parse). its exports are declared in `DYNAMIC_MODULE_EXPORTS` in `build.rs` — if new exports are added to the rust module, this table must be updated too or sandbox UX stubs will be wrong.
+
+**`(tein safe-regexp)` `regexp-fold` native fn**: `regexp-fold` is a hand-written `unsafe extern "C" fn` (not macro-generated) registered via `define_fn_variadic`. it calls scheme closures via `ffi::sexp_apply_proc`. the minimal `.scm` is comment-only — all fns are native.
 
 ## vfs module test harness
 
