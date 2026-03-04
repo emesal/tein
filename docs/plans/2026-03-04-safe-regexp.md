@@ -1498,6 +1498,57 @@ review any caveats discovered during implementation not already in task 10.
 
 ---
 
+## execution progress (updated 2026-03-04)
+
+### completed
+- **task 0** ✅ — `gen_return_conversion` Value arm + compile_error fallback; ext mode guard; test file created. committed: `9e8469e`. 823 tests passing.
+- **task 1** (partial, in-progress) — Cargo.toml regex dep + feature, lib.rs mod + feature table, VFS registry entry, context registration, VFS override with SAFE_REGEXP_SLD/SCM, regexp_fold_wrapper hand-written native fn.
+
+### current state (context cleared mid-task-1/2)
+
+`tein/src/safe_regexp.rs` exists with full implementation. 32/37 unit tests pass. 5 failures to fix before committing:
+
+1. **`#[tein_type(name = "safe-regexp")]`** — set on `Regexp` struct. type_name = `"safe-regexp"`. methods = `safe-regexp-search`, etc. `ensure_regexp` checks `type_name == "safe-regexp"`. BUT: `regexp?` predicate is auto-generated as `safe-regexp?` — need a manual `#[tein_fn(name = "regexp?")]` free fn. ADD this to the `safe_regexp_impl` mod.
+
+2. **split_basic test** — test was WRONG. `",\\s*"` on `"a, b,c , d"` correctly produces `["a", "b", "c ", "d"]` (space before `, ` stays with "c"). Update test to `"c "` not `"c"`.
+
+3. **search_with_compiled_regexp** — was failing due to type_name mismatch (was `"regexp"`, now fixed to `"safe-regexp"`). should pass after fix #1.
+
+4. **internal_safe_regexp_search, internal_safe_regexp_matches_q** — these tests use `safe-regexp-search` etc. (method names). After `#[tein_type(name = "safe-regexp")]`, these should be `safe-regexp-search` etc. Update tests to use updated method names or remove (they test internal names, which is fine).
+
+5. **sandbox_modules_safe_includes_safe_regexp** — verify after other fixes.
+
+### remaining work after fix
+
+- add `regexp?` free fn to `safe_regexp_impl`
+- fix split_basic test expectation
+- verify all 37 tests pass
+- run `just test` (no regressions)
+- run `just lint`
+- add scheme integration tests (task 8)
+- sandbox tests (task 9) — already in module
+- docs (task 10): AGENTS.md, reference.md
+- final verification (task 11)
+
+### key implementation decisions made
+
+**approach change from plan**: scheme wrappers are NOT in `.scm` (would be undefined at runtime in library scope). instead:
+- all user-facing fns (`regexp-search`, `regexp-matches`, etc.) → native `#[tein_fn]` free fns with `Value` arg for string-or-regexp dispatch via `ensure_regexp`
+- `regexp-fold` → hand-written `unsafe extern "C" fn` using `ffi::sexp_apply` to call scheme closures. registered via `define_fn_variadic("regexp-fold", regexp_fold_wrapper)`.
+- `.scm` is now comment-only (like json/process)
+- `make_foreign_via_ptr` added to `Context` (pub(crate)) for inserting foreign values from within `#[tein_fn]` wrappers
+- `FOREIGN_STORE_PTR` made `pub(crate)` for access from `ensure_regexp`
+- `#[tein_type(name = "safe-regexp")]` keeps method names as `safe-regexp-search` etc., avoiding collision with user-facing `regexp-search` free fns
+
+### uncommitted changes in src/
+- `tein/src/safe_regexp.rs` — full implementation (not committed yet)
+- `tein/src/context.rs` — make_foreign_via_ptr, FOREIGN_STORE_PTR pub(crate), regexp-fold registration + VFS override
+- `tein/src/sandbox.rs` — feature_enabled regex arm
+- `tein/src/vfs_registry.rs` — tein/safe-regexp entry
+- `tein/src/lib.rs` — mod safe_regexp, feature table
+- `tein/Cargo.toml` — regex dep + feature
+- `tein/build.rs` — feature_enabled regex arm
+
 ## notes for implementer
 
 - **task 0 is a prerequisite** — without `Value` return support in `gen_return_conversion`, tasks 5 and 6 silently fail. do this first.

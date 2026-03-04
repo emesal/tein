@@ -43,6 +43,7 @@
 //! | `toml`  | yes     | Enables `(tein toml)` module with `toml-parse` and `toml-stringify`. Pulls in `toml` crate. |
 //! | `uuid`  | yes     | Enables `(tein uuid)` module with `make-uuid`, `uuid?`, and `uuid-nil`. Pulls in `uuid` crate. |
 //! | `time`  | yes     | Enables `(tein time)` module with `current-second`, `current-jiffy`, and `jiffies-per-second`. Pure `std::time` — no external deps. |
+//! | `regex` | yes     | Enables `(tein safe-regexp)` module with linear-time regex. Guarantees O(n) — no ReDoS. Pulls in `regex` crate. |
 //!
 //! Disable default features with `default-features = false` for a minimal build
 //! without format-module dependencies.
@@ -77,6 +78,8 @@ mod timeout;
 mod toml;
 #[cfg(feature = "uuid")]
 mod uuid;
+#[cfg(feature = "regex")]
+mod safe_regexp;
 mod value;
 
 pub use context::{Context, ContextBuilder};
