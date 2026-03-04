@@ -1107,6 +1107,14 @@ fn gen_return_conversion_ext_value_fn(
         "bool" => quote! {
             ((*__tein_api).sexp_make_boolean)(if #expr { 1 } else { 0 })
         },
+        "Value" => {
+            // ext fns returning Value are not supported: ext crates don't link against chibi,
+            // so `to_raw` is unavailable. ext fns should return concrete types instead.
+            return Err(syn::Error::new_spanned(
+                ty,
+                "Value return type not yet supported in ext mode #[tein_fn]; return a concrete type (i64, f64, String, bool) instead",
+            ));
+        }
         _ => {
             return Err(syn::Error::new_spanned(
                 ty,
@@ -1792,7 +1800,20 @@ fn gen_return_conversion(
         "bool" => quote! {
             tein::raw::sexp_make_boolean(#result_expr)
         },
-        _ => quote! { tein::raw::get_void() },
+        "Value" => quote! {
+            {
+                let __tein_val: tein::Value = #result_expr;
+                match unsafe { __tein_val.to_raw(ctx) } {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
+                        tein::raw::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as tein::raw::sexp_sint_t)
+                    }
+                }
+            }
+        },
+        _ => quote! { compile_error!(concat!("unsupported #[tein_fn] return type: '", #type_str, "'. supported: i64, f64, String, bool, Value, ()")); },
     }
 }
 
