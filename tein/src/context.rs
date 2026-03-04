@@ -8411,11 +8411,16 @@ mod tests {
             .with_vfs_shadows()
             .build()
             .expect("build");
-        ctx.evaluate("(import (chibi test))").expect("import chibi/test");
+        ctx.evaluate("(import (chibi test))")
+            .expect("import chibi/test");
         // verify test infrastructure works
-        ctx.evaluate("(test-begin \"basic\") (test 1 1) (test-end)").expect("basic test");
+        ctx.evaluate("(test-begin \"basic\") (test 1 1) (test-end)")
+            .expect("basic test");
         let failures = ctx.evaluate("(test-failure-count)").expect("failure count");
-        assert_eq!(failures, Value::Integer(0), "no chibi test failures expected");
+        assert_eq!(
+            failures,
+            Value::Integer(0),
+            "no chibi test failures expected"
+        );
     }
-
 }

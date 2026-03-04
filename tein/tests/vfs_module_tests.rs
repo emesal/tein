@@ -17,7 +17,8 @@ fn run_chibi_test(import: &str) {
         .with_vfs_shadows()
         .build()
         .expect("context");
-    ctx.evaluate("(import (chibi test))").expect("import chibi/test");
+    ctx.evaluate("(import (chibi test))")
+        .expect("import chibi/test");
     ctx.evaluate(&format!("(import {})", import))
         .expect("import test module");
     ctx.evaluate("(run-tests)").expect("run-tests");
