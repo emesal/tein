@@ -334,3 +334,9 @@ fn test_srfi_18_threads() {
 fn test_srfi_19() {
     run_scheme_test(include_str!("scheme/srfi19.scm"));
 }
+
+#[cfg(feature = "regex")]
+#[test]
+fn test_safe_regexp() {
+    run_scheme_test(include_str!("scheme/safe_regexp.scm"));
+}

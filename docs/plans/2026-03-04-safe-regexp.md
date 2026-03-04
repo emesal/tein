@@ -1498,6 +1498,33 @@ review any caveats discovered during implementation not already in task 10.
 
 ---
 
+## execution progress (updated 2026-03-04)
+
+### completed
+- **task 0** ✅ — committed: `9e8469e`. 823 tests passing.
+- **tasks 1-9** ✅ — committed across `532a1e2`, `b253421`, `38dc4ca`. 37/37 unit tests + scheme integration tests passing. 857 tests total, 4 pre-existing sandbox failures (not introduced by this work).
+- **task 10** ✅ — committed: `cc9f240`. AGENTS.md + reference.md updated.
+- **task 11** ✅ — lint clean, full test suite confirmed.
+
+### key implementation decisions made
+
+**approach change from plan**: scheme wrappers are NOT in `.scm` (would be undefined at runtime in library scope). instead:
+- all user-facing fns (`regexp-search`, `regexp-matches`, etc.) → native `#[tein_fn]` free fns with `Value` arg for string-or-regexp dispatch via `ensure_regexp`
+- `regexp-fold` → hand-written `unsafe extern "C" fn` using `ffi::sexp_apply` to call scheme closures. registered via `define_fn_variadic("regexp-fold", regexp_fold_wrapper)`.
+- `.scm` is now comment-only (like json/process)
+- `make_foreign_via_ptr` added to `Context` (pub(crate)) for inserting foreign values from within `#[tein_fn]` wrappers
+- `FOREIGN_STORE_PTR` made `pub(crate)` for access from `ensure_regexp`
+- `#[tein_type(name = "safe-regexp")]` keeps method names as `safe-regexp-search` etc., avoiding collision with user-facing `regexp-search` free fns
+
+### uncommitted changes in src/
+- `tein/src/safe_regexp.rs` — full implementation (not committed yet)
+- `tein/src/context.rs` — make_foreign_via_ptr, FOREIGN_STORE_PTR pub(crate), regexp-fold registration + VFS override
+- `tein/src/sandbox.rs` — feature_enabled regex arm
+- `tein/src/vfs_registry.rs` — tein/safe-regexp entry
+- `tein/src/lib.rs` — mod safe_regexp, feature table
+- `tein/Cargo.toml` — regex dep + feature
+- `tein/build.rs` — feature_enabled regex arm
+
 ## notes for implementer
 
 - **task 0 is a prerequisite** — without `Value` return support in `gen_return_conversion`, tasks 5 and 6 silently fail. do this first.

@@ -96,7 +96,7 @@ impl Drop for PortStoreGuard {
 // the store without needing a Context reference. safe because Context is
 // !Send + !Sync and the pointer is only live during evaluation.
 thread_local! {
-    static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
+    pub(crate) static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
     /// current TeinExtApi pointer — set during load_extension() so ext method dispatch
     /// can call back into the host. null outside of ext loading and ext method calls.
     pub(crate) static EXT_API: Cell<*const tein_ext::TeinExtApi> = const { Cell::new(std::ptr::null()) };
@@ -1936,6 +1936,23 @@ impl ContextBuilder {
                 crate::time::time_impl::register_module_time(&context)?;
             }
 
+            #[cfg(feature = "regex")]
+            if self.standard_env {
+                crate::safe_regexp::safe_regexp_impl::register_module_safe_regexp(&context)?;
+                // register regexp-fold as a hand-written native fn (calls scheme closures)
+                context
+                    .define_fn_variadic("regexp-fold", crate::safe_regexp::regexp_fold_wrapper)?;
+                // override macro-generated .sld/.scm to export regexp-fold
+                context.register_vfs_module(
+                    "lib/tein/safe-regexp.sld",
+                    crate::safe_regexp::SAFE_REGEXP_SLD,
+                )?;
+                context.register_vfs_module(
+                    "lib/tein/safe-regexp.scm",
+                    crate::safe_regexp::SAFE_REGEXP_SCM,
+                )?;
+            }
+
             if self.standard_env {
                 context.register_file_module()?;
                 context.register_load_module()?;
@@ -2371,6 +2388,19 @@ impl Context {
     /// // scheme now has: counter?, counter-increment, counter-get
     /// ```
     pub fn register_foreign_type<T: ForeignType>(&self) -> Result<()> {
+        // in sandboxed contexts the context env has been switched to null_env, which
+        // only contains the 10 r7rs core syntax forms. both register_foreign_protocol
+        // (foreign?, foreign-type, foreign-handle-id) and the type helpers below
+        // (predicate, method wrappers) use `and`, `pair?`, `eq?` etc. — none of which
+        // are available in null_env. skipping is safe: these helpers are not exported
+        // by any SLD and are never called by native fn implementations. the native fns
+        // and VFS module entries (registered elsewhere) work correctly without them.
+        // see #116.
+        if IS_SANDBOXED.with(|c| c.get()) {
+            self.foreign_store.borrow_mut().register_type::<T>()?;
+            return Ok(());
+        }
+
         if !self.has_foreign_protocol.get() {
             self.register_foreign_protocol()?;
             self.has_foreign_protocol.set(true);
@@ -2414,6 +2444,24 @@ impl Context {
     /// The value lives until the Context is dropped.
     pub fn foreign_value<T: ForeignType>(&self, value: T) -> Result<Value> {
         let id = self.foreign_store.borrow_mut().insert(value);
+        Ok(Value::Foreign {
+            handle_id: id,
+            type_name: T::type_name().to_string(),
+        })
+    }
+
+    /// Insert a foreign value into the current context's store via the thread-local
+    /// `FOREIGN_STORE_PTR`. Usable from inside `#[tein_fn]` free fn wrappers where
+    /// no `Context` reference is available. Errors if no store is active (i.e. not
+    /// called during an active `evaluate()` / `call()`).
+    pub(crate) fn make_foreign_via_ptr<T: ForeignType>(
+        value: T,
+    ) -> std::result::Result<Value, String> {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            return Err("make_foreign_via_ptr: no active context store (internal error)".into());
+        }
+        let id = unsafe { (*store_ptr).borrow_mut().insert(value) };
         Ok(Value::Foreign {
             handle_id: id,
             type_name: T::type_name().to_string(),

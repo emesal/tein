@@ -288,6 +288,7 @@ fn feature_enabled(feature: Option<&str>) -> bool {
         Some("toml") => cfg!(feature = "toml"),
         Some("uuid") => cfg!(feature = "uuid"),
         Some("time") => cfg!(feature = "time"),
+        Some("regex") => cfg!(feature = "regex"),
         Some(f) => {
             // unknown feature name — conservatively include
             eprintln!("cargo:warning=unknown feature gate in VFS_REGISTRY: {f}");
@@ -315,6 +316,31 @@ const DYNAMIC_MODULE_EXPORTS: &[(&str, &[&str])] = &[
     ("tein/uuid", &["make-uuid", "uuid?", "uuid-nil"]),
     // tein/time is now VfsSource::Embedded (lib/tein/time.sld in chibi fork);
     // exports are parsed from the sld file by extract_exports — no entry needed here.
+    //
+    // src/safe_regexp.rs — #[tein_module("safe-regexp")] feature=regex
+    // user-facing api (string-or-regexp dispatch): regexp-search, regexp-search-from,
+    // regexp-matches, regexp-matches?, regexp-replace, regexp-replace-all,
+    // regexp-extract, regexp-split; match accessors; fold; constructor+predicate.
+    // internal method names (safe-regexp-*) are not listed — they are lower-level.
+    (
+        "tein/safe-regexp",
+        &[
+            "regexp",
+            "regexp?",
+            "regexp-search",
+            "regexp-search-from",
+            "regexp-matches",
+            "regexp-matches?",
+            "regexp-replace",
+            "regexp-replace-all",
+            "regexp-extract",
+            "regexp-split",
+            "regexp-match-count",
+            "regexp-match-submatch",
+            "regexp-match->list",
+            "regexp-fold",
+        ],
+    ),
 ];
 
 /// extract exported binding names from each module's `.sld` file.
