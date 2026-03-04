@@ -7952,14 +7952,16 @@ mod tests {
     }
 
     #[test]
-    fn test_srfi_98_shadow_uses_fake_env_in_sandbox() {
+    fn test_srfi_98_shadow_stubs_in_sandbox() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
             .build()
             .expect("builder");
-        // srfi/98 re-exports (tein process) — fake env should work
+        // srfi/98 in sandboxed contexts uses a self-contained stub shadow (not (tein process))
+        // because shadow SLDs cannot import VfsSource::Embedded modules via chibi's module
+        // machinery. for fake env access, import (tein process) directly.
         let r = ctx
             .evaluate(
                 "(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")",
@@ -7967,23 +7969,13 @@ mod tests {
             .expect("srfi/98 importable in sandbox");
         assert_eq!(
             r,
-            Value::String("true".to_string()),
-            "get-environment-variable returns fake env value"
+            Value::Boolean(false),
+            "srfi/98 stub always returns #f (use (tein process) for fake env)"
         );
-        // unknown var still #f
         let r = ctx
-            .evaluate("(get-environment-variable \"HOME\")")
-            .expect("get-environment-variable");
-        assert_eq!(r, Value::Boolean(false), "unknown var returns #f");
-        // alist non-empty
-        let r = ctx
-            .evaluate("(pair? (get-environment-variables))")
+            .evaluate("(get-environment-variables)")
             .expect("get-environment-variables");
-        assert_eq!(
-            r,
-            Value::Boolean(true),
-            "get-environment-variables returns non-empty alist"
-        );
+        assert_eq!(r, Value::Nil, "srfi/98 stub returns empty list");
     }
 
     #[test]
