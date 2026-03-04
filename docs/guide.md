@@ -2,6 +2,35 @@
 
 tein is an embeddable R7RS Scheme interpreter for Rust. this is the documentation index.
 
+## running tein from the command line
+
+tein ships a standalone binary for running Scheme scripts and an interactive REPL.
+
+```sh
+tein                              # start the REPL
+tein script.scm [args...]         # run a script
+tein --sandbox script.scm         # sandboxed (safe module set)
+tein --sandbox --all-modules ...  # sandboxed (full VFS module set)
+```
+
+Scripts can use a shebang line:
+
+```scheme
+#!/usr/bin/env tein
+(display "hello, world!")
+(newline)
+```
+
+For sandboxed scripts, pass flags after `tein` via `/usr/bin/env -S`:
+
+```scheme
+#!/usr/bin/env -S tein --sandbox
+(display "sandboxed!")
+(newline)
+```
+
+`(exit n)` sets the process exit code. `(command-line)` returns `("tein" "script.scm" ...)`.
+
 ## reading order
 
 **"i want to embed scheme in my rust app"**

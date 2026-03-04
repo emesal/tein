@@ -20,7 +20,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (393 lib + 40 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests)
+just test                         # all tests (439 lib + 40 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests + 11 tein-bin)
 cargo test -p tein --test vfs_module_tests  # chibi/srfi test suite integration (58 pass, 5 ignored)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
@@ -31,6 +31,10 @@ cargo test --features debug-chibi   # tests with chibi GC instrumentation (slowe
 just clean && cargo build         # nuclear option if ffi gets weird
 cargo build -p tein-test-ext       # build test cdylib extension
 cargo test -p tein -- ext          # run extension integration tests
+cargo build -p tein-bin            # build the tein binary
+cargo run -p tein-bin              # run REPL
+cargo run -p tein-bin -- script.scm  # run script
+cargo test -p tein-bin             # unit tests (arg parsing, shebang, paren_depth)
 ```
 
 ## architecture
@@ -146,6 +150,10 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **GC rooting in rust FFI**: chibi's conservative stack scanning is disabled — the GC does NOT see rust locals. any `sexp` held across an allocating FFI call can be freed. use `ffi::GcRoot::new(ctx, sexp)` (RAII, calls `sexp_preserve_object`/`sexp_release_object`). root across: list/pair/vector building loops, `evaluate()`'s read/eval loop, `call()`'s arg accumulator, `build()`'s source_env + null_env. allocating calls: `sexp_make_flonum`, `sexp_c_str`, `sexp_intern`, `sexp_cons`, `sexp_make_vector`, `sexp_open_input_string`, `sexp_read`, `sexp_evaluate`, `sexp_load_standard_env`, `sexp_make_null_env`, `sexp_env_define`, `env_copy_named`, `sexp_define_foreign_proc`, `sexp_preserve_object`. in C code use `sexp_gc_var`/`sexp_gc_preserve`/`sexp_gc_release`.
 
 **edition 2024:** `unsafe fn` bodies need inner `unsafe { }` blocks
+
+**`Value::Exit(i32)` is not a scheme type**: produced only by `check_exit()` when `EXIT_REQUESTED` thread-local is set. `Value::from_raw()` never produces it — do not add it to the type-checking dispatch in `from_raw`. `to_raw()` and `sexp_bridge` both return `Err` for `Exit`. used by embedders (and `tein-bin`) to distinguish an `(exit n)` escape from a normal return value.
+
+**`tein-bin` crate**: binary crate (`publish = false`), produces the `tein` executable. `rustyline` is a regular dep of `tein-bin`, not a dev-dep of `tein`.
 
 ## adding a new scheme type
 
