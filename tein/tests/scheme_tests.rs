@@ -318,3 +318,13 @@ fn test_scheme_fixnum() {
 fn test_scheme_bitwise() {
     run_scheme_test(include_str!("scheme/scheme_bitwise.scm"));
 }
+
+#[test]
+fn test_scheme_flonum() {
+    run_scheme_test(include_str!("scheme/scheme_flonum.scm"));
+}
+
+#[test]
+fn test_srfi_18_threads() {
+    run_scheme_test(include_str!("scheme/srfi_18_threads.scm"));
+}
