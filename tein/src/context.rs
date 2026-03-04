@@ -1403,6 +1403,10 @@ pub struct ContextBuilder {
     /// module-level sandbox configuration.
     /// when set, activates the registry-based sandbox path in build().
     sandbox_modules: Option<crate::sandbox::Modules>,
+    /// register VFS shadow modules without full sandboxing.
+    /// enables modules like `(scheme process-context)` in non-sandboxed contexts
+    /// where the shadow is needed (e.g. for `(chibi test)` which imports it).
+    with_vfs_shadows: bool,
 }
 
 impl ContextBuilder {
@@ -1440,6 +1444,20 @@ impl ContextBuilder {
     /// `Context::builder().standard_env().sandboxed(Modules::Safe)`.
     pub fn standard_env(mut self) -> Self {
         self.standard_env = true;
+        self
+    }
+
+    /// Register VFS shadow modules without enabling full sandboxing.
+    ///
+    /// Shadow modules (e.g. `scheme/process-context`, `scheme/file`) are normally
+    /// only registered during a sandboxed context build. This option registers them
+    /// in any context, enabling modules like `(chibi test)` — which imports
+    /// `(scheme process-context)` — to load correctly in non-sandboxed contexts.
+    ///
+    /// This does **not** enable the VFS gate or module allowlist; the context remains
+    /// fully permissive. Primarily useful for test harnesses.
+    pub fn with_vfs_shadows(mut self) -> Self {
+        self.with_vfs_shadows = true;
         self
     }
 
@@ -1772,6 +1790,13 @@ impl ContextBuilder {
                 context.register_process_module()?;
             }
 
+            // register VFS shadow modules if requested without full sandboxing.
+            // normally only done during sandboxed() build; this option enables
+            // shadow imports (e.g. scheme/process-context) in non-sandboxed contexts.
+            if self.with_vfs_shadows && self.sandbox_modules.is_none() {
+                crate::sandbox::register_vfs_shadows();
+            }
+
             Ok(context)
         }
     }
@@ -1883,6 +1908,7 @@ impl Context {
             file_read_prefixes: None,
             file_write_prefixes: None,
             sandbox_modules: None,
+            with_vfs_shadows: false,
         }
     }
 
@@ -8374,5 +8400,27 @@ mod tests {
             .evaluate("(import (chibi time)) (procedure? get-time-of-day)")
             .expect("chibi/time should load");
         assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_chibi_test_loads_with_vfs_shadows() {
+        // chibi/test requires scheme/time, scheme/process-context, chibi/term/ansi, chibi/diff.
+        // all of these must load successfully in a with_vfs_shadows non-sandboxed context.
+        let ctx = Context::builder()
+            .standard_env()
+            .with_vfs_shadows()
+            .build()
+            .expect("build");
+        ctx.evaluate("(import (chibi test))")
+            .expect("import chibi/test");
+        // verify test infrastructure works
+        ctx.evaluate("(test-begin \"basic\") (test 1 1) (test-end)")
+            .expect("basic test");
+        let failures = ctx.evaluate("(test-failure-count)").expect("failure count");
+        assert_eq!(
+            failures,
+            Value::Integer(0),
+            "no chibi test failures expected"
+        );
     }
 }
