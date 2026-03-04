@@ -2046,6 +2046,29 @@ pub struct Context {
     ext_api: RefCell<Option<Box<tein_ext::TeinExtApi>>>,
 }
 
+/// Convert a raw sexp exit value to an i32 exit code.
+///
+/// Called by `Context::check_exit()` after the GC root has been released.
+/// Interprets the raw sexp using r7rs `exit` semantics:
+/// - null / void / #t → 0
+/// - #f → 1
+/// - fixnum → value (clamped to i32)
+/// - anything else → 0
+unsafe fn exit_code_from_raw(raw: ffi::sexp) -> i32 {
+    unsafe {
+        if raw.is_null() || ffi::sexp_voidp(raw) != 0 {
+            return 0;
+        }
+        if ffi::sexp_booleanp(raw) != 0 {
+            return if ffi::sexp_truep(raw) != 0 { 0 } else { 1 };
+        }
+        if ffi::sexp_integerp(raw) != 0 {
+            return ffi::sexp_unbox_fixnum(raw) as i32;
+        }
+        0
+    }
+}
+
 impl Context {
     /// Create a new Scheme context with default settings.
     ///
@@ -2117,7 +2140,7 @@ impl Context {
     /// Check if `(exit)` was called during evaluation.
     ///
     /// If the exit flag is set, clears it, releases the GC root on the
-    /// stashed value, converts it to a `Value`, and returns `Some(Ok(value))`.
+    /// stashed value, and returns `Some(Ok(Value::Exit(n)))`.
     /// Returns `None` if no exit was requested.
     fn check_exit(&self) -> Option<Result<Value>> {
         if EXIT_REQUESTED.with(|c| c.replace(false)) {
@@ -2126,11 +2149,8 @@ impl Context {
             if !raw.is_null() {
                 unsafe { ffi::sexp_release_object(self.ctx, raw) };
             }
-            // null or void → (exit) with no args, return 0
-            if raw.is_null() || unsafe { ffi::sexp_voidp(raw) != 0 } {
-                return Some(Ok(Value::Integer(0)));
-            }
-            Some(unsafe { Value::from_raw(self.ctx, raw) })
+            let code = unsafe { exit_code_from_raw(raw) };
+            Some(Ok(Value::Exit(code)))
         } else {
             None
         }
@@ -4647,7 +4667,7 @@ mod tests {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
         let r = ctx.evaluate("(begin (exit) (+ 1 2))").unwrap();
-        assert_eq!(r, Value::Integer(0), "(exit) should return 0");
+        assert_eq!(r, Value::Exit(0), "(exit) should return Exit(0)");
     }
 
     #[test]
@@ -4655,7 +4675,7 @@ mod tests {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
         let r = ctx.evaluate("(begin (exit 42) (+ 1 2))").unwrap();
-        assert_eq!(r, Value::Integer(42), "(exit 42) should return 42");
+        assert_eq!(r, Value::Exit(42), "(exit 42) should return Exit(42)");
     }
 
     #[test]
@@ -4663,7 +4683,7 @@ mod tests {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
         let r = ctx.evaluate("(begin (exit #t) 999)").unwrap();
-        assert_eq!(r, Value::Integer(0), "(exit #t) should return 0");
+        assert_eq!(r, Value::Exit(0), "(exit #t) should return Exit(0)");
     }
 
     #[test]
@@ -4671,7 +4691,7 @@ mod tests {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
         let r = ctx.evaluate("(begin (exit #f) 999)").unwrap();
-        assert_eq!(r, Value::Integer(1), "(exit #f) should return 1");
+        assert_eq!(r, Value::Exit(1), "(exit #f) should return Exit(1)");
     }
 
     #[test]
@@ -4679,7 +4699,8 @@ mod tests {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
         let r = ctx.evaluate("(begin (exit \"done\") 999)").unwrap();
-        assert_eq!(r, Value::String("done".to_string()));
+        // non-integer, non-boolean → Exit(0) per r7rs
+        assert_eq!(r, Value::Exit(0), "(exit str) should return Exit(0)");
     }
 
     #[test]
@@ -4702,7 +4723,7 @@ mod tests {
         // exits with 42; after thunk never runs (no error thrown)
         assert_eq!(
             r,
-            Value::Integer(42),
+            Value::Exit(42),
             "exit bypasses dynamic-wind after thunk (GH #101)"
         );
     }
@@ -7783,11 +7804,11 @@ mod tests {
             .allow_module("tein/process")
             .build()
             .expect("build");
-        // (exit 0) should succeed and return 0
+        // (exit 0) should succeed and return Exit(0)
         let result = ctx
             .evaluate("(import (tein process)) (exit 0)")
             .expect("tein/process exit");
-        assert_eq!(result, Value::Integer(0));
+        assert_eq!(result, Value::Exit(0));
     }
 
     #[test]
@@ -8769,5 +8790,43 @@ mod tests {
             Value::Integer(0),
             "no chibi test failures expected"
         );
+    }
+
+    // --- exit escape hatch ---
+
+    #[test]
+    fn exit_no_args_returns_exit_zero() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit)").unwrap();
+        assert_eq!(result, Value::Exit(0));
+    }
+
+    #[test]
+    fn exit_true_returns_exit_zero() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit #t)").unwrap();
+        assert_eq!(result, Value::Exit(0));
+    }
+
+    #[test]
+    fn exit_false_returns_exit_one() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit #f)").unwrap();
+        assert_eq!(result, Value::Exit(1));
+    }
+
+    #[test]
+    fn exit_integer_returns_exit_n() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit 42)").unwrap();
+        assert_eq!(result, Value::Exit(42));
+    }
+
+    #[test]
+    fn exit_string_returns_exit_zero() {
+        // non-integer, non-boolean → 0 per r7rs
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate(r#"(import (tein process)) (exit "bye")"#).unwrap();
+        assert_eq!(result, Value::Exit(0));
     }
 }
