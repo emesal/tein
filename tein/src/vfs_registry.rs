@@ -503,12 +503,15 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // scheme/regex: default_safe: false — (chibi regexp) uses a backtracking engine,
+    // so pathological patterns can cause superlinear execution time (ReDoS risk with
+    // untrusted input). addable via .allow_module("scheme/regex") when needed.
     VfsEntry {
         path: "scheme/regex",
         deps: &["srfi/115"],
         files: &["lib/scheme/regex.sld"],
         clib: None,
-        default_safe: true,
+        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -1257,12 +1260,13 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // srfi/115: default_safe: false — alias for (chibi regexp), same ReDoS concern.
     VfsEntry {
         path: "srfi/115",
         deps: &["chibi/regexp"],
         files: &["lib/srfi/115.sld"],
         clib: None,
-        default_safe: true,
+        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -1951,7 +1955,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         ],
         files: &["lib/chibi/regexp.sld", "lib/chibi/regexp.scm"],
         clib: None,
-        default_safe: true,
+        // backtracking engine — ReDoS risk with untrusted patterns. not in default
+        // sandbox; addable via .allow_module("chibi/regexp") or Modules::All.
+        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
