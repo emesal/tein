@@ -97,6 +97,16 @@ pub(crate) mod safe_regexp_impl {
         crate::context::Context::make_foreign_via_ptr(Regexp { inner: rx })
     }
 
+    /// test whether a value is a compiled regexp object.
+    ///
+    /// returns `#t` for values created by `(regexp pattern)`, `#f` for everything else.
+    /// note: `#[tein_type(name = "safe-regexp")]` auto-generates `safe-regexp?` with the
+    /// type-name prefix; this free fn provides the user-facing `regexp?` name.
+    #[tein_fn(name = "regexp?")]
+    pub fn regexp_pred(val: Value) -> bool {
+        matches!(val, Value::Foreign { ref type_name, .. } if type_name == "safe-regexp")
+    }
+
     // --- user-facing API: string-or-regexp dispatch ---
     //
     // each wrapper fn accepts `rx: Value` (string or compiled Regexp),
@@ -795,12 +805,14 @@ mod tests {
                 (regexp-split ",\\s*" "a, b,c , d")
             "#)
             .unwrap();
+        // ",\\s*" on "c , d": the comma and trailing space are consumed, leaving "c "
+        // (leading space from "c " is not part of the delimiter match).
         assert_eq!(
             result,
             Value::List(vec![
                 Value::String("a".into()),
                 Value::String("b".into()),
-                Value::String("c".into()),
+                Value::String("c ".into()),
                 Value::String("d".into()),
             ])
         );
