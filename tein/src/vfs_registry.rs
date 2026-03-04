@@ -852,17 +852,17 @@ const VFS_REGISTRY: &[VfsEntry] = &[
 "),
     },
     // scheme/process-context: VFS shadow — provides r7rs process-context interface.
-    // imports (srfi 98) for env var access (avoids the broken (define x x) letrec*
-    // pattern where the RHS sees the pre-bound #<unspecified> instead of the global).
-    // command-line / exit / emergency-exit are inlined as stubs — they are sufficient
-    // for the chibi/test load chain (test-exit is never called). real exit semantics
-    // via tein/process are available directly from the global env when needed.
+    // delegates env vars and command-line to (tein process) trampolines which consult
+    // SANDBOX_ENV / SANDBOX_COMMAND_LINE thread-locals.
+    // exit / emergency-exit are inlined as stubs — they are sufficient for the
+    // chibi/test load chain (test-exit is never called). real exit semantics via
+    // tein/process are available directly from the global env when needed.
     //
     // r7rs exit should run dynamic-wind "after" thunks; tein does not implement this.
     // see GH #101. emergency-exit intentionally shares the stub implementation.
     VfsEntry {
         path: "scheme/process-context",
-        deps: &["srfi/98"],
+        deps: &["tein/process"],
         files: &[],
         clib: None,
         default_safe: true,
@@ -870,13 +870,10 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (scheme process-context)
-  (import (scheme base))
+  (import (tein process))
   (export get-environment-variable get-environment-variables
           command-line exit emergency-exit)
   (begin
-    (define (get-environment-variable name) #f)
-    (define (get-environment-variables) (list))
-    (define (command-line) (list \"tein\"))
     (define (exit . args) #f)
     (define (emergency-exit . args) #f)))
 "),
@@ -1213,11 +1210,11 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // srfi/98: VFS shadow — sandboxed contexts get neutered env var stubs.
-    // get-environment-variable always returns #f; get-environment-variables returns '().
+    // srfi/98: VFS shadow — sandboxed contexts delegate to (tein process) trampolines,
+    // which consult the SANDBOX_ENV thread-local. unsandboxed contexts use the real C clib.
     VfsEntry {
         path: "srfi/98",
-        deps: &[],
+        deps: &["tein/process"],
         files: &[],
         clib: None,
         default_safe: true,
@@ -1225,11 +1222,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: Some("\
 (define-library (srfi 98)
-  (import (scheme base))
-  (export get-environment-variable get-environment-variables)
-  (begin
-    (define (get-environment-variable name) #f)
-    (define (get-environment-variables) '())))
+  (import (tein process))
+  (export get-environment-variable get-environment-variables))
 "),
     },
     VfsEntry {

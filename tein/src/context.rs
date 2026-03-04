@@ -4415,21 +4415,30 @@ mod tests {
             .step_limit(5_000_000)
             .build()
             .expect("sandboxed context");
-        // (tein process) is in the safe set — trampolines neuter env/argv in sandbox
+        // (tein process) is in the safe set — trampolines use fake env/argv in sandbox
         let r = ctx.evaluate("(import (tein process))");
         assert!(
             r.is_ok(),
             "(tein process) should be importable in sandbox: {r:?}"
         );
-        // env vars neutered
+        // default fake env seed
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("true".to_string()));
+        // vars not in fake env still return #f
         let r = ctx.evaluate("(get-environment-variable \"HOME\")");
         assert_eq!(r.unwrap(), Value::Boolean(false));
-        // env var list neutered
-        let r = ctx.evaluate("(get-environment-variables)");
-        assert_eq!(r.unwrap(), Value::Nil);
-        // command-line returns fake
+        // env var list contains the seed
+        let r = ctx.evaluate("(import (scheme base)) (pair? (get-environment-variables))");
+        assert_eq!(r.unwrap(), Value::Boolean(true), "should have fake env vars");
+        // command-line returns default fake
         let r = ctx.evaluate("(command-line)");
-        assert_eq!(r.unwrap(), Value::List(vec![Value::String("tein".into())]));
+        assert_eq!(
+            r.unwrap(),
+            Value::List(vec![
+                Value::String("tein".into()),
+                Value::String("--sandbox".into()),
+            ])
+        );
     }
 
     #[test]
@@ -7935,30 +7944,109 @@ mod tests {
     }
 
     #[test]
-    fn test_srfi_98_shadow_neuters_env_vars_in_sandbox() {
+    fn test_srfi_98_shadow_uses_fake_env_in_sandbox() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
             .build()
             .expect("builder");
-        // srfi/98 shadow replaces the C clib — get-environment-variable always #f
+        // srfi/98 re-exports (tein process) — fake env should work
         let r = ctx
-            .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"HOME\")")
+            .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")")
             .expect("srfi/98 importable in sandbox");
         assert_eq!(
             r,
-            Value::Boolean(false),
-            "get-environment-variable neutered"
+            Value::String("true".to_string()),
+            "get-environment-variable returns fake env value"
         );
+        // unknown var still #f
         let r = ctx
-            .evaluate("(get-environment-variables)")
+            .evaluate("(get-environment-variable \"HOME\")")
+            .expect("get-environment-variable");
+        assert_eq!(r, Value::Boolean(false), "unknown var returns #f");
+        // alist non-empty
+        let r = ctx
+            .evaluate("(pair? (get-environment-variables))")
             .expect("get-environment-variables");
         assert_eq!(
             r,
-            Value::Nil,
-            "get-environment-variables returns empty list"
+            Value::Boolean(true),
+            "get-environment-variables returns non-empty alist"
         );
+    }
+
+    #[test]
+    fn test_sandbox_custom_environment_variables() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .environment_variables(&[("CHIBI_HASH_SALT", "42"), ("MY_VAR", "hello")])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context with custom env");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // custom var present
+        let r = ctx.evaluate("(get-environment-variable \"CHIBI_HASH_SALT\")");
+        assert_eq!(r.unwrap(), Value::String("42".to_string()));
+        let r = ctx.evaluate("(get-environment-variable \"MY_VAR\")");
+        assert_eq!(r.unwrap(), Value::String("hello".to_string()));
+        // default seed still present (merge, not replace)
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_custom_command_line() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .command_line(&["my-app", "--verbose"])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context with custom command-line");
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(command-line)");
+        assert_eq!(
+            r.unwrap(),
+            Value::List(vec![
+                Value::String("my-app".into()),
+                Value::String("--verbose".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_unsandboxed_ignores_environment_variables() {
+        unsafe { std::env::set_var("TEIN_TEST_UNSANDBOXED", "real") };
+        let ctx = Context::builder()
+            .standard_env()
+            .environment_variables(&[("TEIN_TEST_UNSANDBOXED", "fake")])
+            .build()
+            .expect("unsandboxed context");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // unsandboxed: reads real env, not fake
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_TEST_UNSANDBOXED\")");
+        assert_eq!(r.unwrap(), Value::String("real".to_string()));
+        unsafe { std::env::remove_var("TEIN_TEST_UNSANDBOXED") };
+    }
+
+    #[test]
+    fn test_sandbox_env_override_default_seed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .environment_variables(&[("TEIN_SANDBOX", "custom")])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // user override wins
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("custom".to_string()));
     }
 
     // --- (scheme show) / (srfi 166) sandbox tests ---
