@@ -1203,6 +1203,9 @@ unsafe extern "C" fn load_trampoline(
 // --- (tein process) trampolines ---
 
 /// `get-environment-variable` trampoline: returns env var value or `#f`.
+///
+/// sandboxed contexts consult the fake env map seeded by [`ContextBuilder::environment_variables`];
+/// vars not present in the map return `#f`. unsandboxed contexts read the real process environment.
 unsafe extern "C" fn get_env_var_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1215,9 +1218,18 @@ unsafe extern "C" fn get_env_var_trampoline(
             Err(e) => return e,
         };
 
-        // sandboxed contexts get neutered env var access
+        // sandboxed contexts consult the fake env map
         if IS_SANDBOXED.with(|c| c.get()) {
-            return ffi::get_false();
+            return SANDBOX_ENV.with(|cell| {
+                let borrow = cell.borrow();
+                match borrow.as_ref().and_then(|m| m.get(name)) {
+                    Some(val) => {
+                        let c_val = CString::new(val.as_str()).unwrap_or_default();
+                        ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t)
+                    }
+                    None => ffi::get_false(),
+                }
+            });
         }
 
         match std::env::var(name) {
@@ -1231,7 +1243,8 @@ unsafe extern "C" fn get_env_var_trampoline(
 }
 
 /// `get-environment-variables` trampoline: returns alist of all env vars as `((name . value) ...)`.
-/// sandboxed contexts return `'()`.
+///
+/// sandboxed contexts return the fake env map as an alist; unsandboxed contexts return the real env.
 unsafe extern "C" fn get_env_vars_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1239,9 +1252,40 @@ unsafe extern "C" fn get_env_vars_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        // sandboxed contexts get neutered env var access
+        // sandboxed contexts return the fake env as an alist
         if IS_SANDBOXED.with(|c| c.get()) {
-            return ffi::get_null();
+            return SANDBOX_ENV.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(map) = borrow.as_ref() else {
+                    return ffi::get_null();
+                };
+                let mut result = ffi::get_null();
+                for (key, val) in map {
+                    let _tail_root = ffi::GcRoot::new(ctx, result);
+                    let c_key = CString::new(key.as_str()).unwrap_or_default();
+                    let c_val = CString::new(val.as_str()).unwrap_or_default();
+                    let s_key = ffi::sexp_c_str(ctx, c_key.as_ptr(), key.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_key) != 0 {
+                        return s_key;
+                    }
+                    let _key_root = ffi::GcRoot::new(ctx, s_key);
+                    let s_val = ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_val) != 0 {
+                        return s_val;
+                    }
+                    let _val_root = ffi::GcRoot::new(ctx, s_val);
+                    let pair = ffi::sexp_cons(ctx, s_key, s_val);
+                    if ffi::sexp_exceptionp(pair) != 0 {
+                        return pair;
+                    }
+                    let _pair_root = ffi::GcRoot::new(ctx, pair);
+                    result = ffi::sexp_cons(ctx, pair, result);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return result;
+                    }
+                }
+                result
+            });
         }
 
         let mut result = ffi::get_null();
@@ -1275,7 +1319,9 @@ unsafe extern "C" fn get_env_vars_trampoline(
 }
 
 /// `command-line` trampoline: returns the host argv as a list of strings.
-/// sandboxed contexts return `'("tein")`.
+///
+/// sandboxed contexts return the fake command-line configured via [`ContextBuilder::command_line`]
+/// (default: `["tein", "--sandbox"]`). unsandboxed contexts return the real process argv.
 unsafe extern "C" fn command_line_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1283,15 +1329,30 @@ unsafe extern "C" fn command_line_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        // sandboxed contexts get a fake command line
+        // sandboxed contexts consult the fake command-line
         if IS_SANDBOXED.with(|c| c.get()) {
-            let name = CString::new("tein").unwrap();
-            let s = ffi::sexp_c_str(ctx, name.as_ptr(), 4);
-            if ffi::sexp_exceptionp(s) != 0 {
-                return s;
-            }
-            let _s_root = ffi::GcRoot::new(ctx, s);
-            return ffi::sexp_cons(ctx, s, ffi::get_null());
+            return SANDBOX_COMMAND_LINE.with(|cell| {
+                let borrow = cell.borrow();
+                let args = match borrow.as_ref() {
+                    Some(a) => a.clone(),
+                    None => vec!["tein".to_string(), "--sandbox".to_string()],
+                };
+                let mut result = ffi::get_null();
+                for arg in args.iter().rev() {
+                    let c_arg = CString::new(arg.as_str()).unwrap_or_default();
+                    let s_arg = ffi::sexp_c_str(ctx, c_arg.as_ptr(), arg.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_arg) != 0 {
+                        return s_arg;
+                    }
+                    let _arg_root = ffi::GcRoot::new(ctx, s_arg);
+                    let _tail_root = ffi::GcRoot::new(ctx, result);
+                    result = ffi::sexp_cons(ctx, s_arg, result);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return result;
+                    }
+                }
+                result
+            });
         }
 
         let mut result = ffi::get_null();
