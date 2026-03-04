@@ -8404,14 +8404,31 @@ mod tests {
 
     #[cfg(feature = "time")]
     #[test]
-    #[ignore = "TODO: (import (srfi 19)) fails — (tein time) native fns not visible \
-                in (srfi 19)'s isolated library env. see plan task 5 blocker notes."]
     fn test_srfi_19_import() {
+        // patch H: (import (srfi 19)) alone works — native fns registered via
+        // define_fn_variadic are now importable as library exports.
         let ctx = Context::new_standard().expect("context");
         ctx.evaluate("(import (srfi 19))")
             .expect("srfi 19 should import");
         let r = ctx.evaluate("(time? (current-time time-utc))");
         assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_srfi_19_sandboxed() {
+        // srfi/19 is default_safe: true — importable in sandboxed contexts.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(50_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (srfi 19))")
+            .expect("srfi 19 importable in sandbox");
+        let r = ctx.evaluate("(date-year (current-date 0))").unwrap();
+        assert!(matches!(r, Value::Integer(y) if y >= 2026));
     }
 
     #[test]

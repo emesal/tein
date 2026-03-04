@@ -20,7 +20,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (390 lib + 39 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests)
+just test                         # all tests (393 lib + 40 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests)
 cargo test -p tein --test vfs_module_tests  # chibi/srfi test suite integration (58 pass, 5 ignored)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
@@ -59,9 +59,10 @@ tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_l
 target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c    — chibi macro shims, fuel control, env_copy_named, VFS gate,
                    FS policy gate, custom ports, reader dispatch table, macro expansion hook
-  eval.c         — 7 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
+  eval.c         — 8 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
                    macro hook in analyze_macro_once (D), suppress false import warning (E),
-                   FS policy gate in open-input-file (F), FS policy gate in open-output-file (G)
+                   FS policy gate in open-input-file (F), FS policy gate in open-output-file (G),
+                   top-level native fn fallback in sexp_env_import_op (H)
   sexp.c         — 1 patch: reader dispatch before hardcoded # switch
   vm.c           — 2-line patch: fuel consumption at timeslice boundary
   lib/tein/      — tein scheme modules: foreign, reader, macro, test, json, toml,

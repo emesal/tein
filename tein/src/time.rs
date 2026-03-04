@@ -4,6 +4,7 @@
 //! - `current-second` — wall-clock POSIX time as inexact seconds since epoch
 //! - `current-jiffy` — monotonic nanosecond counter (exact integer)
 //! - `jiffies-per-second` — constant 10⁹
+//! - `timezone-offset-seconds` — local timezone UTC offset in seconds (via libc `localtime_r`)
 
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};

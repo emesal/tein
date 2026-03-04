@@ -328,3 +328,9 @@ fn test_scheme_flonum() {
 fn test_srfi_18_threads() {
     run_scheme_test(include_str!("scheme/srfi_18_threads.scm"));
 }
+
+#[cfg(feature = "time")]
+#[test]
+fn test_srfi_19() {
+    run_scheme_test(include_str!("scheme/srfi19.scm"));
+}

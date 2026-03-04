@@ -1094,6 +1094,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         deps: &[
             "scheme/base",
             "scheme/char",
+            "scheme/cxr",
             "scheme/write",
             "scheme/case-lambda",
             "srfi/9",
