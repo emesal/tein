@@ -129,6 +129,9 @@ fn value_to_sexp_depth(value: &Value, depth: usize) -> Result<Sexp> {
         Value::Unspecified => Err(Error::TypeError(
             "cannot convert unspecified to sexp".to_string(),
         )),
+        Value::Exit(n) => Err(Error::TypeError(format!(
+            "cannot convert Exit({n}) to sexp — exit is a rust-side signal only"
+        ))),
     }
 }
 

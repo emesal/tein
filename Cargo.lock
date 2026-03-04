@@ -507,7 +507,6 @@ dependencies = [
  "cc",
  "libloading",
  "regex",
- "rustyline",
  "serde",
  "serde_json",
  "tein-ext",
@@ -515,6 +514,14 @@ dependencies = [
  "tein-sexp",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "tein-bin"
+version = "0.1.0"
+dependencies = [
+ "rustyline",
+ "tein",
 ]
 
 [[package]]

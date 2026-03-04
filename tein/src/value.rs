@@ -26,6 +26,7 @@
 //! | `HashTable(sexp)` | hash-table | `as_hash_table()` |
 //! | `Nil` | `'()` | — |
 //! | `Unspecified` | void | — |
+//! | `Exit(i32)` | — | exit code from `(exit n)` |
 //! | `Procedure(sexp)` | lambda/opcode | `as_procedure()` |
 //! | `Foreign { .. }` | foreign object | `ctx.foreign_ref::<T>()` |
 //! | `Other(String)` | unhandled type | — |
@@ -154,6 +155,21 @@ pub enum Value {
 
     /// Unspecified value (like void in C).
     Unspecified,
+
+    /// Exit signal from `(exit)` or `(exit n)`.
+    ///
+    /// Returned when scheme code calls `(exit)`, `(exit #t)`, `(exit #f)`,
+    /// or `(exit n)`. The `i32` is the exit code:
+    /// - `(exit)` / `(exit #t)` → 0
+    /// - `(exit #f)` → 1
+    /// - `(exit n)` (integer) → n (clamped to i32)
+    /// - `(exit other)` → 0
+    ///
+    /// Embedders who need to propagate the exit signal should match on this
+    /// variant. Embedders who don't care can treat it like any other value.
+    ///
+    /// Note: produced only by `check_exit()` — never by `Value::from_raw()`.
+    Exit(i32),
 
     /// A callable Scheme procedure or opcode (builtin like `+`).
     ///
@@ -613,6 +629,10 @@ impl Value {
                 Value::Port(raw) => Ok(*raw),
                 Value::HashTable(raw) => Ok(*raw),
                 Value::Procedure(raw) => Ok(*raw),
+                Value::Exit(n) => Err(Error::TypeError(format!(
+                    "cannot convert Exit({}) to raw sexp — exit is a rust-side signal only",
+                    n,
+                ))),
                 Value::Other(desc) => Err(Error::TypeError(format!(
                     "cannot convert Other({}) to raw sexp",
                     desc,
@@ -863,6 +883,7 @@ impl PartialEq for Value {
             (Value::HashTable(a), Value::HashTable(b)) => std::ptr::eq(*a, *b),
             // procedure equality is raw pointer identity (same scheme object)
             (Value::Procedure(a), Value::Procedure(b)) => std::ptr::eq(*a, *b),
+            (Value::Exit(a), Value::Exit(b)) => a == b,
             (Value::Other(a), Value::Other(b)) => a == b,
             (
                 Value::Foreign {
@@ -958,6 +979,7 @@ impl fmt::Display for Value {
             Value::HashTable(_) => write!(f, "#<hash-table>"),
             Value::Nil => write!(f, "()"),
             Value::Unspecified => write!(f, "#<unspecified>"),
+            Value::Exit(n) => write!(f, "#<exit {}>", n),
             Value::Procedure(_) => write!(f, "#<procedure>"),
             Value::Other(s) => write!(f, "#<{}>", s),
             Value::Foreign {

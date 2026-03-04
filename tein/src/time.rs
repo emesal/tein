@@ -4,7 +4,8 @@
 //! - `current-second` — wall-clock POSIX time as inexact seconds since epoch
 //! - `current-jiffy` — monotonic nanosecond counter (exact integer)
 //! - `jiffies-per-second` — constant 10⁹
-//! - `timezone-offset-seconds` — local timezone UTC offset in seconds (via libc `localtime_r`)
+//! - `timezone-offset-seconds` — local timezone UTC offset in seconds
+//!   (unix: via libc `localtime_r`; windows: via `_get_timezone`; other: always 0)
 
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -14,15 +15,15 @@ use tein_macros::tein_module;
 /// constant for the rest of the program run (per r7rs).
 static JIFFY_EPOCH: OnceLock<Instant> = OnceLock::new();
 
-/// query local timezone offset via libc.
+/// query local timezone offset via libc (unix).
 ///
 /// uses `localtime_r` to read `tm_gmtoff` from the system timezone database.
 /// returns UTC offset in seconds (e.g. UTC+1 → 3600, UTC-5 → -18000, UTC → 0).
 /// on failure, returns 0 (UTC) as a safe fallback.
+#[cfg(unix)]
 fn local_utc_offset_seconds() -> i64 {
-    use std::mem::MaybeUninit;
-
     use std::ffi::{c_char, c_long};
+    use std::mem::MaybeUninit;
 
     unsafe extern "C" {
         fn time(tloc: *mut i64) -> i64;
@@ -54,6 +55,37 @@ fn local_utc_offset_seconds() -> i64 {
         }
         (*result).tm_gmtoff as i64
     }
+}
+
+/// query local timezone offset via windows CRT.
+///
+/// `_tzset()` populates the CRT timezone globals from the `TZ` env var or
+/// the system registry.  `_get_timezone()` returns seconds west of UTC
+/// (opposite sign from POSIX `tm_gmtoff`), so we negate.
+/// daylight-saving adjustment is not included (`_get_dstbias` would add it,
+/// but r7rs doesn't require dst-awareness here).
+/// on failure, returns 0 (UTC) as a safe fallback.
+#[cfg(windows)]
+fn local_utc_offset_seconds() -> i64 {
+    unsafe extern "C" {
+        fn _tzset();
+        fn _get_timezone(seconds: *mut i32) -> i32; // errno_t
+    }
+
+    unsafe {
+        _tzset();
+        let mut seconds_west: i32 = 0;
+        if _get_timezone(&mut seconds_west) != 0 {
+            return 0;
+        }
+        -(seconds_west as i64)
+    }
+}
+
+/// timezone offset is unavailable on this platform; returns 0 (UTC).
+#[cfg(not(any(unix, windows)))]
+fn local_utc_offset_seconds() -> i64 {
+    0
 }
 
 #[tein_module("time")]
@@ -88,7 +120,8 @@ pub(crate) mod time_impl {
     /// return local timezone's UTC offset in seconds.
     ///
     /// e.g. UTC+1 → 3600, UTC-5 → -18000, UTC → 0.
-    /// uses libc `localtime_r` to query the system timezone.
+    /// platform: unix uses `localtime_r`; windows uses `_get_timezone`;
+    /// other platforms always return 0 (UTC).
     /// returns real timezone even in sandboxed contexts.
     #[tein_fn(name = "timezone-offset-seconds")]
     pub fn timezone_offset_seconds() -> i64 {
