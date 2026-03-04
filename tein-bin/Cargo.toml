@@ -1,0 +1,17 @@
+[package]
+name = "tein-bin"
+version = "0.1.0"
+edition = "2024"
+authors = ["fey"]
+license = "ISC"
+publish = false
+description = "standalone tein scheme interpreter and REPL"
+repository = "https://github.com/emesal/tein"
+
+[[bin]]
+name = "tein"
+path = "src/main.rs"
+
+[dependencies]
+tein = { path = "../tein" }
+rustyline = { version = "17", features = ["with-file-history"] }

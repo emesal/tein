@@ -22,8 +22,6 @@ uuid = { version = "1", features = ["v4", "fast-rng"], optional = true }
 regex = { version = "1", optional = true }
 
 [dev-dependencies]
-rustyline = { version = "17", features = ["with-file-history"] }
-
 [features]
 ## json, toml, uuid, and time on by default — disable with `default-features = false` if you don't need them.
 default = ["json", "toml", "uuid", "time", "regex"]
