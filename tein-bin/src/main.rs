@@ -49,11 +49,51 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     Ok(Args { mode, sandbox, all_modules })
 }
 
+/// Strip shebang line if present.
+///
+/// If the source starts with `#!`, returns the content after the first `\n`.
+/// Otherwise returns the source unchanged. Handles files with no trailing newline.
+fn strip_shebang(src: &str) -> &str {
+    if src.starts_with("#!") {
+        match src.find('\n') {
+            Some(pos) => &src[pos + 1..],
+            None => "",
+        }
+    } else {
+        src
+    }
+}
+
 fn main() {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shebang_stripped() {
+        let src = "#!/usr/bin/env tein\n(+ 1 2)";
+        assert_eq!(strip_shebang(src), "(+ 1 2)");
+    }
+
+    #[test]
+    fn no_shebang_unchanged() {
+        let src = "(+ 1 2)";
+        assert_eq!(strip_shebang(src), "(+ 1 2)");
+    }
+
+    #[test]
+    fn shebang_only_no_newline() {
+        let src = "#!/usr/bin/env tein";
+        assert_eq!(strip_shebang(src), "");
+    }
+
+    #[test]
+    fn hash_not_shebang_unchanged() {
+        // #| block comment — not a shebang
+        let src = "#| comment |#\n(+ 1 2)";
+        assert_eq!(strip_shebang(src), "#| comment |#\n(+ 1 2)");
+    }
 
     #[test]
     fn no_args_is_repl() {
