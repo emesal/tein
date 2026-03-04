@@ -20,7 +20,7 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (390 lib + 39 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests)
+just test                         # all tests (393 lib + 40 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests)
 cargo test -p tein --test vfs_module_tests  # chibi/srfi test suite integration (58 pass, 5 ignored)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
@@ -52,16 +52,17 @@ src/
   json.rs        — json_parse + json_stringify_raw (raw sexp level, preserves alist)
   toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso"). feature=toml
   uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
-  time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second. feature=time
+  time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second, timezone-offset-seconds. feature=time
   sexp_bridge.rs — Value ↔ Sexp; shared layer for format modules
 tein-ext/        — stable C ABI vtable for cdylib extensions (no chibi dependency)
 tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_loading.rs
 target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
   tein_shim.c    — chibi macro shims, fuel control, env_copy_named, VFS gate,
                    FS policy gate, custom ports, reader dispatch table, macro expansion hook
-  eval.c         — 7 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
+  eval.c         — 8 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
                    macro hook in analyze_macro_once (D), suppress false import warning (E),
-                   FS policy gate in open-input-file (F), FS policy gate in open-output-file (G)
+                   FS policy gate in open-input-file (F), FS policy gate in open-output-file (G),
+                   top-level native fn fallback in sexp_env_import_op (H)
   sexp.c         — 1 patch: reader dispatch before hardcoded # switch
   vm.c           — 2-line patch: fuel consumption at timeslice boundary
   lib/tein/      — tein scheme modules: foreign, reader, macro, test, json, toml,
@@ -127,6 +128,12 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **Result::Err returns a scheme string**: `fn foo() -> Result<i64, String>` — the `Err` path returns `sexp_c_str(msg)` which becomes `Value::String(msg)` in rust. it's not an exception; `(test-error ...)` won't catch it. match on `Value::String` instead. same in internal and ext mode.
 
 **import warning suppression (eval.c patch E)**: `define_fn_variadic` registers bindings into the top-level env, not the library env. chibi's `sexp_env_import_op` would normally warn "importing undefined variable" for these because they're absent from the library's `.scm`. the fork patch suppresses the warning when `oldcell` (destination env lookup) is non-NULL — meaning the name is already reachable. NOTE: ext foreign type method convenience procs previously had doubled name prefixes (#69, fixed).
+
+**eval.c patch H — native proc import fallback**: `sexp_env_import_op` falls back to the top-level env when a name is absent from the source library env, importing it if it's a native procedure. required for any `define_fn_variadic`-registered proc to be importable as a transitive library dependency. if a new tein module exports native fns and needs to be used as a dep by pure-scheme libraries, patch H handles it automatically.
+
+**`(srfi 19)` deviations from spec**: `time-process` and `time-thread` raise `unsupported-clock-type` (no process/thread CPU clock in tein). `time-gc` type removed entirely. leap second table is static, last entry 2017.
+
+**`date->julian-day` reference bug fixed**: the reference implementation had `(/ ... (- offset))` which divides by zero for UTC (offset=0). tein fix: `(- (/ time-portion tm:sid) (/ offset tm:sid))`.
 
 **type checking order**: `from_raw` checks in broadest-first order: `complex → ratio → bignum → flonum → integer`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0 (garbage integer values) — flonum must come before integer. similarly, ratio and bignum are heap-allocated numbers chibi checks before fixnums/flonums; complex is the broadest and must be outermost.
 

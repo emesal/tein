@@ -8402,6 +8402,54 @@ mod tests {
         assert_eq!(result, Value::Boolean(true));
     }
 
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_srfi_19_import() {
+        // patch H: (import (srfi 19)) alone works — native fns registered via
+        // define_fn_variadic are now importable as library exports.
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (srfi 19))")
+            .expect("srfi 19 should import");
+        let r = ctx.evaluate("(time? (current-time time-utc))");
+        assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_srfi_19_sandboxed() {
+        // srfi/19 is default_safe: true — importable in sandboxed contexts.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(50_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (srfi 19))")
+            .expect("srfi 19 importable in sandbox");
+        let r = ctx.evaluate("(date-year (current-date 0))").unwrap();
+        assert!(matches!(r, Value::Integer(y) if y >= 2026));
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_scheme_time_shadow_uses_tein_time() {
+        // verify (scheme time) shadow works in a sandboxed context, where
+        // chibi/time (native C lib) is not available but (tein time) is.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (scheme base))").expect("import base");
+        ctx.evaluate("(import (scheme time))")
+            .expect("import scheme/time");
+        let r = ctx.evaluate("(> (current-second) 0)");
+        assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
     #[test]
     fn test_chibi_test_loads_with_vfs_shadows() {
         // chibi/test requires scheme/time, scheme/process-context, chibi/term/ansi, chibi/diff.

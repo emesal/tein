@@ -155,10 +155,14 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "tein/time",
         deps: &[],
-        files: &[],
+        files: &["lib/tein/time.sld", "lib/tein/time.scm"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Dynamic,
+        // Embedded: provides stub scheme definitions that chibi can compile
+        // against when (tein time) is a transitive library dependency (e.g.
+        // (srfi 19)). register_module_time then overwrites the stubs with
+        // native rust implementations via define_fn_variadic at context init.
+        source: VfsSource::Embedded,
         feature: Some("time"),
         shadow_sld: None,
     },
@@ -503,12 +507,15 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // scheme/regex: default_safe: false — (chibi regexp) uses a backtracking engine,
+    // so pathological patterns can cause superlinear execution time (ReDoS risk with
+    // untrusted input). addable via .allow_module("scheme/regex") when needed.
     VfsEntry {
         path: "scheme/regex",
         deps: &["srfi/115"],
         files: &["lib/scheme/regex.sld"],
         clib: None,
-        default_safe: true,
+        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -896,37 +903,21 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     // scheme/time shadow — overrides the Embedded entry above in sandboxed / with_vfs_shadows
-    // contexts. implements current-second/current-jiffy/jiffies-per-second inline using
-    // (chibi time)'s get-time-of-day, avoiding the broken TAI-offset chain.
-    // registered by register_vfs_shadows(). no feature gate needed.
+    // contexts. re-exports from (tein time) which is always available (no C deps).
+    // single source of truth for r7rs time primitives.
+    // registered by register_vfs_shadows(). gated behind "time" feature (matches tein/time).
     VfsEntry {
         path: "scheme/time",
-        deps: &["chibi/time"],
+        deps: &["tein/time"],
         files: &[],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Shadow,
-        feature: None,
-        // chibi/time exports get-time-of-day which returns (timeval* timezone*).
-        // use timeval-seconds / timeval-microseconds accessors to extract fields.
-        // current-jiffy uses a module-level epoch for process-relative counters.
+        feature: Some("time"),
         shadow_sld: Some(concat!(
             "(define-library (scheme time)\n",
-            "  (import (scheme base) (chibi time))\n",
-            "  (export current-second current-jiffy jiffies-per-second)\n",
-            "  (begin\n",
-            "    (define *jiffy-epoch* #f)\n",
-            "    (define (current-second)\n",
-            "      (let ((t (car (get-time-of-day))))\n",
-            "        (+ (timeval-seconds t) (/ (timeval-microseconds t) 1000000.0))))\n",
-            "    (define (current-jiffy)\n",
-            "      (let* ((t (car (get-time-of-day)))\n",
-            "             (ns (+ (* (timeval-seconds t) 1000000000)\n",
-            "                    (* (timeval-microseconds t) 1000))))\n",
-            "        (if *jiffy-epoch*\n",
-            "            (- ns *jiffy-epoch*)\n",
-            "            (begin (set! *jiffy-epoch* ns) 0))))\n",
-            "    (define (jiffies-per-second) 1000000000)))\n",
+            "  (import (tein time))\n",
+            "  (export current-second current-jiffy jiffies-per-second))\n",
         )),
     },
     VfsEntry {
@@ -1099,6 +1090,24 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
+        path: "srfi/19",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/cxr",
+            "scheme/write",
+            "scheme/case-lambda",
+            "srfi/9",
+            "tein/time",
+        ],
+        files: &["lib/srfi/19.sld", "lib/srfi/19.scm"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: Some("time"),
+        shadow_sld: None,
+    },
+    VfsEntry {
         path: "srfi/27",
         deps: &[],
         files: &["lib/srfi/27.sld", "lib/srfi/27/constructors.scm"],
@@ -1257,12 +1266,13 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    // srfi/115: default_safe: false — alias for (chibi regexp), same ReDoS concern.
     VfsEntry {
         path: "srfi/115",
         deps: &["chibi/regexp"],
         files: &["lib/srfi/115.sld"],
         clib: None,
-        default_safe: true,
+        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -1951,7 +1961,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         ],
         files: &["lib/chibi/regexp.sld", "lib/chibi/regexp.scm"],
         clib: None,
-        default_safe: true,
+        // backtracking engine — ReDoS risk with untrusted patterns. not in default
+        // sandbox; addable via .allow_module("chibi/regexp") or Modules::All.
+        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,

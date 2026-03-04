@@ -32,3 +32,11 @@
   (let* ((start (current-jiffy))
          (end (current-jiffy)))
     (>= (/ (- end start) jiffies-per-second) 0)))
+
+;; timezone-offset-seconds returns an integer
+(test-true "time/tz-offset-integer" (integer? (timezone-offset-seconds)))
+
+;; timezone-offset-seconds is within valid range (-50400 to 50400)
+(test-true "time/tz-offset-range"
+  (let ((tz (timezone-offset-seconds)))
+    (and (>= tz -50400) (<= tz 50400))))

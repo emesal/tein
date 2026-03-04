@@ -1570,12 +1570,17 @@ fn generate_register_fn(info: &ModuleInfo) -> proc_macro2::TokenStream {
         /// Must be called before any scheme code does `(import (tein ...))`.
         /// VFS entries are cleared on `Context::drop()`.
         pub fn #fn_ident(__tein_ctx: &tein::Context) -> tein::Result<()> {
+            // native fns must be defined in top-level BEFORE VFS modules are
+            // registered. when chibi later loads the library sld (on first import),
+            // it resolves exports by walking the env parent chain (localp=0). if
+            // the native fn is already in top-level, chibi's rename-binding import
+            // mechanism shares the top-level cell — no stubs needed.
+            #(#type_registrations)*
+            #(#fn_registrations)*
             __tein_ctx.register_vfs_module(#sld_path, #sld_content)?;
             __tein_ctx.register_vfs_module(#scm_path, #scm_content)?;
             __tein_ctx.register_vfs_module(#docs_sld_path, #docs_sld_content)?;
             __tein_ctx.register_vfs_module(#docs_scm_path, #docs_scm_content)?;
-            #(#type_registrations)*
-            #(#fn_registrations)*
             Ok(())
         }
     }

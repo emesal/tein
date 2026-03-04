@@ -313,11 +313,8 @@ const BOOTSTRAP_FILES: &[&str] = &["lib/init-7.scm", "lib/meta-7.scm"];
 const DYNAMIC_MODULE_EXPORTS: &[(&str, &[&str])] = &[
     // src/uuid.rs — #[tein_module("tein/uuid", ...)]
     ("tein/uuid", &["make-uuid", "uuid?", "uuid-nil"]),
-    // src/time.rs — #[tein_module("tein/time", ...)]
-    (
-        "tein/time",
-        &["current-second", "current-jiffy", "jiffies-per-second"],
-    ),
+    // tein/time is now VfsSource::Embedded (lib/tein/time.sld in chibi fork);
+    // exports are parsed from the sld file by extract_exports — no entry needed here.
 ];
 
 /// extract exported binding names from each module's `.sld` file.
