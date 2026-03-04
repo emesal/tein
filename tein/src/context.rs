@@ -45,6 +45,7 @@ use crate::{
     sandbox::{FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
@@ -129,6 +130,15 @@ thread_local! {
 thread_local! {
     static STUB_MODULE_MAP: RefCell<std::collections::HashMap<String, String>> =
         RefCell::new(std::collections::HashMap::new());
+}
+
+// --- sandbox fake process environment thread-locals ---
+//
+// populated during sandboxed() build path: fake env vars and command-line
+// for sandboxed contexts. cleared on Context::drop().
+thread_local! {
+    static SANDBOX_ENV: RefCell<Option<HashMap<String, String>>> = RefCell::new(None);
+    static SANDBOX_COMMAND_LINE: RefCell<Option<Vec<String>>> = RefCell::new(None);
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -1407,6 +1417,10 @@ pub struct ContextBuilder {
     /// enables modules like `(scheme process-context)` in non-sandboxed contexts
     /// where the shadow is needed (e.g. for `(chibi test)` which imports it).
     with_vfs_shadows: bool,
+    /// fake environment variables for sandboxed contexts.
+    sandbox_env: Option<Vec<(String, String)>>,
+    /// fake command-line for sandboxed contexts.
+    sandbox_command_line: Option<Vec<String>>,
 }
 
 impl ContextBuilder {
@@ -1569,6 +1583,54 @@ impl ContextBuilder {
             base.push(prefix.to_string());
         }
         self.sandbox_modules = Some(Modules::Only(base));
+        self
+    }
+
+    /// Inject fake environment variables for sandboxed contexts.
+    ///
+    /// Merges with the default seed (`TEIN_SANDBOX=true`). User entries
+    /// override defaults on key conflict. Ignored for unsandboxed contexts.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .environment_variables(&[("CHIBI_HASH_SALT", "42")])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn environment_variables(mut self, vars: &[(&str, &str)]) -> Self {
+        self.sandbox_env = Some(vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
+        self
+    }
+
+    /// Set the fake command-line for sandboxed contexts.
+    ///
+    /// Overrides the default `["tein", "--sandbox"]` entirely.
+    /// Ignored for unsandboxed contexts.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .command_line(&["my-app", "--verbose"])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn command_line(mut self, args: &[&str]) -> Self {
+        self.sandbox_command_line = Some(args.iter().map(|s| s.to_string()).collect());
         self
     }
 
@@ -1859,6 +1921,10 @@ pub struct Context {
     prev_vfs_allowlist: Vec<String>,
     /// previous IS_SANDBOXED value, restored on drop
     prev_is_sandboxed: bool,
+    /// previous SANDBOX_ENV value, restored on drop
+    prev_sandbox_env: Option<HashMap<String, String>>,
+    /// previous SANDBOX_COMMAND_LINE value, restored on drop
+    prev_sandbox_command_line: Option<Vec<String>>,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -1909,6 +1975,8 @@ impl Context {
             file_write_prefixes: None,
             sandbox_modules: None,
             with_vfs_shadows: false,
+            sandbox_env: None,
+            sandbox_command_line: None,
         }
     }
 
