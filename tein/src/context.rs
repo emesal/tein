@@ -45,6 +45,7 @@ use crate::{
     sandbox::{FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::path::Path;
@@ -129,6 +130,15 @@ thread_local! {
 thread_local! {
     static STUB_MODULE_MAP: RefCell<std::collections::HashMap<String, String>> =
         RefCell::new(std::collections::HashMap::new());
+}
+
+// --- sandbox fake process environment thread-locals ---
+//
+// populated during sandboxed() build path: fake env vars and command-line
+// for sandboxed contexts. cleared on Context::drop().
+thread_local! {
+    static SANDBOX_ENV: RefCell<Option<HashMap<String, String>>> = const { RefCell::new(None) };
+    static SANDBOX_COMMAND_LINE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -1193,6 +1203,9 @@ unsafe extern "C" fn load_trampoline(
 // --- (tein process) trampolines ---
 
 /// `get-environment-variable` trampoline: returns env var value or `#f`.
+///
+/// sandboxed contexts consult the fake env map seeded by [`ContextBuilder::environment_variables`];
+/// vars not present in the map return `#f`. unsandboxed contexts read the real process environment.
 unsafe extern "C" fn get_env_var_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1205,9 +1218,18 @@ unsafe extern "C" fn get_env_var_trampoline(
             Err(e) => return e,
         };
 
-        // sandboxed contexts get neutered env var access
+        // sandboxed contexts consult the fake env map
         if IS_SANDBOXED.with(|c| c.get()) {
-            return ffi::get_false();
+            return SANDBOX_ENV.with(|cell| {
+                let borrow = cell.borrow();
+                match borrow.as_ref().and_then(|m| m.get(name)) {
+                    Some(val) => {
+                        let c_val = CString::new(val.as_str()).unwrap_or_default();
+                        ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t)
+                    }
+                    None => ffi::get_false(),
+                }
+            });
         }
 
         match std::env::var(name) {
@@ -1221,7 +1243,8 @@ unsafe extern "C" fn get_env_var_trampoline(
 }
 
 /// `get-environment-variables` trampoline: returns alist of all env vars as `((name . value) ...)`.
-/// sandboxed contexts return `'()`.
+///
+/// sandboxed contexts return the fake env map as an alist; unsandboxed contexts return the real env.
 unsafe extern "C" fn get_env_vars_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1229,9 +1252,40 @@ unsafe extern "C" fn get_env_vars_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        // sandboxed contexts get neutered env var access
+        // sandboxed contexts return the fake env as an alist
         if IS_SANDBOXED.with(|c| c.get()) {
-            return ffi::get_null();
+            return SANDBOX_ENV.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(map) = borrow.as_ref() else {
+                    return ffi::get_null();
+                };
+                let mut result = ffi::get_null();
+                for (key, val) in map {
+                    let _tail_root = ffi::GcRoot::new(ctx, result);
+                    let c_key = CString::new(key.as_str()).unwrap_or_default();
+                    let c_val = CString::new(val.as_str()).unwrap_or_default();
+                    let s_key = ffi::sexp_c_str(ctx, c_key.as_ptr(), key.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_key) != 0 {
+                        return s_key;
+                    }
+                    let _key_root = ffi::GcRoot::new(ctx, s_key);
+                    let s_val = ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_val) != 0 {
+                        return s_val;
+                    }
+                    let _val_root = ffi::GcRoot::new(ctx, s_val);
+                    let pair = ffi::sexp_cons(ctx, s_key, s_val);
+                    if ffi::sexp_exceptionp(pair) != 0 {
+                        return pair;
+                    }
+                    let _pair_root = ffi::GcRoot::new(ctx, pair);
+                    result = ffi::sexp_cons(ctx, pair, result);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return result;
+                    }
+                }
+                result
+            });
         }
 
         let mut result = ffi::get_null();
@@ -1265,7 +1319,9 @@ unsafe extern "C" fn get_env_vars_trampoline(
 }
 
 /// `command-line` trampoline: returns the host argv as a list of strings.
-/// sandboxed contexts return `'("tein")`.
+///
+/// sandboxed contexts return the fake command-line configured via [`ContextBuilder::command_line`]
+/// (default: `["tein", "--sandbox"]`). unsandboxed contexts return the real process argv.
 unsafe extern "C" fn command_line_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -1273,15 +1329,30 @@ unsafe extern "C" fn command_line_trampoline(
     _args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
-        // sandboxed contexts get a fake command line
+        // sandboxed contexts consult the fake command-line
         if IS_SANDBOXED.with(|c| c.get()) {
-            let name = CString::new("tein").unwrap();
-            let s = ffi::sexp_c_str(ctx, name.as_ptr(), 4);
-            if ffi::sexp_exceptionp(s) != 0 {
-                return s;
-            }
-            let _s_root = ffi::GcRoot::new(ctx, s);
-            return ffi::sexp_cons(ctx, s, ffi::get_null());
+            return SANDBOX_COMMAND_LINE.with(|cell| {
+                let borrow = cell.borrow();
+                let args = match borrow.as_ref() {
+                    Some(a) => a.clone(),
+                    None => vec!["tein".to_string(), "--sandbox".to_string()],
+                };
+                let mut result = ffi::get_null();
+                for arg in args.iter().rev() {
+                    let c_arg = CString::new(arg.as_str()).unwrap_or_default();
+                    let s_arg = ffi::sexp_c_str(ctx, c_arg.as_ptr(), arg.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_arg) != 0 {
+                        return s_arg;
+                    }
+                    let _arg_root = ffi::GcRoot::new(ctx, s_arg);
+                    let _tail_root = ffi::GcRoot::new(ctx, result);
+                    result = ffi::sexp_cons(ctx, s_arg, result);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return result;
+                    }
+                }
+                result
+            });
         }
 
         let mut result = ffi::get_null();
@@ -1407,6 +1478,10 @@ pub struct ContextBuilder {
     /// enables modules like `(scheme process-context)` in non-sandboxed contexts
     /// where the shadow is needed (e.g. for `(chibi test)` which imports it).
     with_vfs_shadows: bool,
+    /// fake environment variables for sandboxed contexts.
+    sandbox_env: Option<Vec<(String, String)>>,
+    /// fake command-line for sandboxed contexts.
+    sandbox_command_line: Option<Vec<String>>,
 }
 
 impl ContextBuilder {
@@ -1572,6 +1647,58 @@ impl ContextBuilder {
         self
     }
 
+    /// Inject fake environment variables for sandboxed contexts.
+    ///
+    /// Merges with the default seed (`TEIN_SANDBOX=true`). User entries
+    /// override defaults on key conflict. Ignored for unsandboxed contexts.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .environment_variables(&[("CHIBI_HASH_SALT", "42")])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn environment_variables(mut self, vars: &[(&str, &str)]) -> Self {
+        self.sandbox_env = Some(
+            vars.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Set the fake command-line for sandboxed contexts.
+    ///
+    /// Overrides the default `["tein", "--sandbox"]` entirely.
+    /// Ignored for unsandboxed contexts.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .command_line(&["my-app", "--verbose"])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn command_line(mut self, args: &[&str]) -> Self {
+        self.sandbox_command_line = Some(args.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
     /// Check if a step limit has been configured.
     pub(crate) fn has_step_limit(&self) -> bool {
         self.step_limit.is_some()
@@ -1627,6 +1754,8 @@ impl ContextBuilder {
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
             let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
+            let prev_sandbox_env = SANDBOX_ENV.with(|cell| cell.borrow().clone());
+            let prev_sandbox_command_line = SANDBOX_COMMAND_LINE.with(|cell| cell.borrow().clone());
 
             if let Some(ref modules) = self.sandbox_modules.take() {
                 // registry-based sandbox path: builds a null env + import, resolves
@@ -1639,6 +1768,27 @@ impl ContextBuilder {
 
                 // mark sandboxed so policy enforcement applies
                 IS_SANDBOXED.with(|c| c.set(true));
+                // seed fake process environment for sandboxed contexts
+                {
+                    let mut env_map = HashMap::new();
+                    env_map.insert("TEIN_SANDBOX".to_string(), "true".to_string());
+                    if let Some(user_env) = self.sandbox_env.take() {
+                        for (k, v) in user_env {
+                            env_map.insert(k, v);
+                        }
+                    }
+                    SANDBOX_ENV.with(|cell| {
+                        *cell.borrow_mut() = Some(env_map);
+                    });
+
+                    let cmd_line = self
+                        .sandbox_command_line
+                        .take()
+                        .unwrap_or_else(|| vec!["tein".to_string(), "--sandbox".to_string()]);
+                    SANDBOX_COMMAND_LINE.with(|cell| {
+                        *cell.borrow_mut() = Some(cmd_line);
+                    });
+                }
                 // arm FS policy gate — C opcodes will call tein_fs_policy_check
                 FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
                 ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
@@ -1754,6 +1904,8 @@ impl ContextBuilder {
                 prev_fs_policy,
                 prev_vfs_allowlist,
                 prev_is_sandboxed,
+                prev_sandbox_env,
+                prev_sandbox_command_line,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
@@ -1859,6 +2011,10 @@ pub struct Context {
     prev_vfs_allowlist: Vec<String>,
     /// previous IS_SANDBOXED value, restored on drop
     prev_is_sandboxed: bool,
+    /// previous SANDBOX_ENV value, restored on drop
+    prev_sandbox_env: Option<HashMap<String, String>>,
+    /// previous SANDBOX_COMMAND_LINE value, restored on drop
+    prev_sandbox_command_line: Option<Vec<String>>,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -1909,6 +2065,8 @@ impl Context {
             file_write_prefixes: None,
             sandbox_modules: None,
             with_vfs_shadows: false,
+            sandbox_env: None,
+            sandbox_command_line: None,
         }
     }
 
@@ -2968,6 +3126,13 @@ impl Drop for Context {
         });
         // restore sandbox flag for the thread (defensive restore-previous pattern)
         IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
+        // restore previous fake process environment
+        SANDBOX_ENV.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_env);
+        });
+        SANDBOX_COMMAND_LINE.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_command_line);
+        });
 
         // clear UX stub module map so next context on this thread starts fresh
         STUB_MODULE_MAP.with(|map| map.borrow_mut().clear());
@@ -4254,21 +4419,34 @@ mod tests {
             .step_limit(5_000_000)
             .build()
             .expect("sandboxed context");
-        // (tein process) is in the safe set — trampolines neuter env/argv in sandbox
+        // (tein process) is in the safe set — trampolines use fake env/argv in sandbox
         let r = ctx.evaluate("(import (tein process))");
         assert!(
             r.is_ok(),
             "(tein process) should be importable in sandbox: {r:?}"
         );
-        // env vars neutered
+        // default fake env seed
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("true".to_string()));
+        // vars not in fake env still return #f
         let r = ctx.evaluate("(get-environment-variable \"HOME\")");
         assert_eq!(r.unwrap(), Value::Boolean(false));
-        // env var list neutered
-        let r = ctx.evaluate("(get-environment-variables)");
-        assert_eq!(r.unwrap(), Value::Nil);
-        // command-line returns fake
+        // env var list contains the seed
+        let r = ctx.evaluate("(import (scheme base)) (pair? (get-environment-variables))");
+        assert_eq!(
+            r.unwrap(),
+            Value::Boolean(true),
+            "should have fake env vars"
+        );
+        // command-line returns default fake
         let r = ctx.evaluate("(command-line)");
-        assert_eq!(r.unwrap(), Value::List(vec![Value::String("tein".into())]));
+        assert_eq!(
+            r.unwrap(),
+            Value::List(vec![
+                Value::String("tein".into()),
+                Value::String("--sandbox".into()),
+            ])
+        );
     }
 
     #[test]
@@ -7774,30 +7952,103 @@ mod tests {
     }
 
     #[test]
-    fn test_srfi_98_shadow_neuters_env_vars_in_sandbox() {
+    fn test_srfi_98_shadow_stubs_in_sandbox() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
             .build()
             .expect("builder");
-        // srfi/98 shadow replaces the C clib — get-environment-variable always #f
+        // srfi/98 in sandboxed contexts uses a self-contained stub shadow (not (tein process))
+        // because shadow SLDs cannot import VfsSource::Embedded modules via chibi's module
+        // machinery. for fake env access, import (tein process) directly.
         let r = ctx
-            .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"HOME\")")
+            .evaluate(
+                "(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")",
+            )
             .expect("srfi/98 importable in sandbox");
         assert_eq!(
             r,
             Value::Boolean(false),
-            "get-environment-variable neutered"
+            "srfi/98 stub always returns #f (use (tein process) for fake env)"
         );
         let r = ctx
             .evaluate("(get-environment-variables)")
             .expect("get-environment-variables");
+        assert_eq!(r, Value::Nil, "srfi/98 stub returns empty list");
+    }
+
+    #[test]
+    fn test_sandbox_custom_environment_variables() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .environment_variables(&[("CHIBI_HASH_SALT", "42"), ("MY_VAR", "hello")])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context with custom env");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // custom var present
+        let r = ctx.evaluate("(get-environment-variable \"CHIBI_HASH_SALT\")");
+        assert_eq!(r.unwrap(), Value::String("42".to_string()));
+        let r = ctx.evaluate("(get-environment-variable \"MY_VAR\")");
+        assert_eq!(r.unwrap(), Value::String("hello".to_string()));
+        // default seed still present (merge, not replace)
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_custom_command_line() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .command_line(&["my-app", "--verbose"])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context with custom command-line");
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(command-line)");
         assert_eq!(
-            r,
-            Value::Nil,
-            "get-environment-variables returns empty list"
+            r.unwrap(),
+            Value::List(vec![
+                Value::String("my-app".into()),
+                Value::String("--verbose".into()),
+            ])
         );
+    }
+
+    #[test]
+    fn test_unsandboxed_ignores_environment_variables() {
+        unsafe { std::env::set_var("TEIN_TEST_UNSANDBOXED", "real") };
+        let ctx = Context::builder()
+            .standard_env()
+            .environment_variables(&[("TEIN_TEST_UNSANDBOXED", "fake")])
+            .build()
+            .expect("unsandboxed context");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // unsandboxed: reads real env, not fake
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_TEST_UNSANDBOXED\")");
+        assert_eq!(r.unwrap(), Value::String("real".to_string()));
+        unsafe { std::env::remove_var("TEIN_TEST_UNSANDBOXED") };
+    }
+
+    #[test]
+    fn test_sandbox_env_override_default_seed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .environment_variables(&[("TEIN_SANDBOX", "custom")])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // user override wins
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("custom".to_string()));
     }
 
     // --- (scheme show) / (srfi 166) sandbox tests ---
