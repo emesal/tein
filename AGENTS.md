@@ -52,7 +52,7 @@ src/
   json.rs        — json_parse + json_stringify_raw (raw sexp level, preserves alist)
   toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso"). feature=toml
   uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
-  time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second. feature=time
+  time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second, timezone-offset-seconds. feature=time
   sexp_bridge.rs — Value ↔ Sexp; shared layer for format modules
 tein-ext/        — stable C ABI vtable for cdylib extensions (no chibi dependency)
 tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_loading.rs

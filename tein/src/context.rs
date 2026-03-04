@@ -8431,6 +8431,7 @@ mod tests {
         assert!(matches!(r, Value::Integer(y) if y >= 2026));
     }
 
+    #[cfg(feature = "time")]
     #[test]
     fn test_scheme_time_shadow_uses_tein_time() {
         // verify (scheme time) shadow works in a sandboxed context, where

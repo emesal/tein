@@ -22,6 +22,8 @@ static JIFFY_EPOCH: OnceLock<Instant> = OnceLock::new();
 fn local_utc_offset_seconds() -> i64 {
     use std::mem::MaybeUninit;
 
+    use std::ffi::{c_char, c_long};
+
     unsafe extern "C" {
         fn time(tloc: *mut i64) -> i64;
         fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
@@ -38,8 +40,8 @@ fn local_utc_offset_seconds() -> i64 {
         tm_wday: i32,
         tm_yday: i32,
         tm_isdst: i32,
-        tm_gmtoff: i64,
-        tm_zone: *const std::ffi::c_char,
+        tm_gmtoff: c_long,
+        tm_zone: *const c_char,
     }
 
     unsafe {
@@ -50,7 +52,7 @@ fn local_utc_offset_seconds() -> i64 {
         if result.is_null() {
             return 0;
         }
-        (*result).tm_gmtoff
+        (*result).tm_gmtoff as i64
     }
 }
 

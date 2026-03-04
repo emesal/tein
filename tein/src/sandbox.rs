@@ -351,8 +351,9 @@ pub enum Modules {
     /// conservative safe set — default for sandboxed contexts.
     ///
     /// includes all modules marked `default_safe: true` in the registry,
-    /// with transitive deps resolved. excludes `scheme/eval`, `scheme/r5rs`,
-    /// and `scheme/time`. `scheme/repl`, `scheme/file`, `scheme/load`,
+    /// with transitive deps resolved. excludes `scheme/eval` and `scheme/r5rs`.
+    /// `scheme/time` is available via a shadow re-exporting `(tein time)` (requires
+    /// feature `"time"`). `scheme/repl`, `scheme/file`, `scheme/load`,
     /// `scheme/process-context`, and `tein/process` are included via
     /// shadow modules or neutered trampolines.
     #[default]
