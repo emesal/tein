@@ -43,7 +43,10 @@ fn ensure_regexp(val: Value) -> Result<::regex::Regex, String> {
     use self::safe_regexp_impl::Regexp;
     match &val {
         Value::String(s) => ::regex::Regex::new(s).map_err(|e| e.to_string()),
-        Value::Foreign { type_name, handle_id } if type_name == "safe-regexp" => {
+        Value::Foreign {
+            type_name,
+            handle_id,
+        } if type_name == "safe-regexp" => {
             let store_ptr = crate::context::FOREIGN_STORE_PTR.with(|c| c.get());
             if store_ptr.is_null() {
                 return Err("regexp: no active context store (internal error)".into());
@@ -58,10 +61,7 @@ fn ensure_regexp(val: Value) -> Result<::regex::Regex, String> {
                 .ok_or_else(|| "regexp: foreign object is not a Regexp".to_string())?;
             Ok(rx.inner.clone())
         }
-        _ => Err(format!(
-            "regexp: expected string or regexp, got {}",
-            val
-        )),
+        _ => Err(format!("regexp: expected string or regexp, got {}", val)),
     }
 }
 
@@ -92,7 +92,6 @@ pub(crate) mod safe_regexp_impl {
     /// we insert into the active context's foreign store via `make_foreign_via_ptr`.
     #[tein_fn(name = "regexp")]
     pub fn regexp_compile(pattern: String) -> Result<Value, String> {
-
         let rx = ::regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
         crate::context::Context::make_foreign_via_ptr(Regexp { inner: rx })
     }
@@ -429,8 +428,8 @@ pub(crate) unsafe extern "C" fn regexp_fold_wrapper(
     mut args: crate::ffi::sexp,
 ) -> crate::ffi::sexp {
     unsafe {
-        use crate::ffi;
         use crate::Value;
+        use crate::ffi;
 
         // helper: return a scheme error string
         macro_rules! err {
@@ -464,11 +463,23 @@ pub(crate) unsafe extern "C" fn regexp_fold_wrapper(
 
         // parse optional: finish, start, end
         let has_finish = ffi::sexp_nullp(args) == 0;
-        let finish_sexp = if has_finish { next_arg!() } else { ffi::get_void() };
+        let finish_sexp = if has_finish {
+            next_arg!()
+        } else {
+            ffi::get_void()
+        };
         let has_start = ffi::sexp_nullp(args) == 0;
-        let start_sexp = if has_start { next_arg!() } else { ffi::get_void() };
+        let start_sexp = if has_start {
+            next_arg!()
+        } else {
+            ffi::get_void()
+        };
         let has_end = ffi::sexp_nullp(args) == 0;
-        let end_sexp = if has_end { next_arg!() } else { ffi::get_void() };
+        let end_sexp = if has_end {
+            next_arg!()
+        } else {
+            ffi::get_void()
+        };
 
         // extract the string
         let str_val = match Value::from_raw(ctx, str_sexp) {
@@ -549,11 +560,7 @@ pub(crate) unsafe extern "C" fn regexp_fold_wrapper(
             Ok(c) => c,
             Err(_) => err!("regexp-fold: str contains null bytes"),
         };
-        let s_raw = ffi::sexp_c_str(
-            ctx,
-            slice_cstr.as_ptr(),
-            slice_len as ffi::sexp_sint_t,
-        );
+        let s_raw = ffi::sexp_c_str(ctx, slice_cstr.as_ptr(), slice_len as ffi::sexp_sint_t);
         let _s_root = ffi::GcRoot::new(ctx, s_raw);
 
         // iteration loop
@@ -660,11 +667,13 @@ mod tests {
     #[test]
     fn search_basic() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-search "(\\d+)-(\\d+)" "foo-42-7-bar")))
                   (vector-ref (vector-ref m 0) 0))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("42-7".into()));
     }
@@ -672,12 +681,14 @@ mod tests {
     #[test]
     fn search_with_compiled_regexp() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((rx (regexp "(\\d+)-(\\d+)")))
                   (let ((m (regexp-search rx "foo-42-7-bar")))
                     (vector-ref (vector-ref m 0) 0)))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("42-7".into()));
     }
@@ -685,10 +696,12 @@ mod tests {
     #[test]
     fn search_no_match() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-search "xyz" "abc")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(false));
     }
@@ -696,10 +709,12 @@ mod tests {
     #[test]
     fn matches_full_string() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-matches? "\\d+" "42")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(true));
     }
@@ -707,10 +722,12 @@ mod tests {
     #[test]
     fn matches_partial_rejects() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-matches? "\\d+" "foo42bar")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(false));
     }
@@ -718,11 +735,13 @@ mod tests {
     #[test]
     fn search_from_offset() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-search-from "\\d+" "abc 42 def 99" 7)))
                   (vector-ref (vector-ref m 0) 0))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("99".into()));
     }
@@ -730,7 +749,8 @@ mod tests {
     #[test]
     fn match_vector_shape() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-search "(\\d+)-(\\d+)" "x-42-7-y")))
                   (list
@@ -738,7 +758,8 @@ mod tests {
                     (vector-ref (vector-ref m 0) 0)
                     (vector-ref (vector-ref m 1) 0)
                     (vector-ref (vector-ref m 2) 0)))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(
             result,
@@ -754,11 +775,13 @@ mod tests {
     #[test]
     fn unmatched_optional_group() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-search "(a)(b)?(c)" "ac")))
                   (vector-ref m 2))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(false));
     }
@@ -768,10 +791,12 @@ mod tests {
     #[test]
     fn replace_first() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-replace "\\d+" "a1b2c3" "X")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("aXb2c3".into()));
     }
@@ -779,10 +804,12 @@ mod tests {
     #[test]
     fn replace_all() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-replace-all "\\d+" "a1b2c3" "X")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("aXbXcX".into()));
     }
@@ -790,10 +817,12 @@ mod tests {
     #[test]
     fn replace_with_backref() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-replace "(\\w+)@(\\w+)" "user@host" "$2/$1")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("host/user".into()));
     }
@@ -801,10 +830,12 @@ mod tests {
     #[test]
     fn split_basic() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-split ",\\s*" "a, b,c , d")
-            "#)
+            "#,
+            )
             .unwrap();
         // ",\\s*" on "c , d": the comma and trailing space are consumed, leaving "c "
         // (leading space from "c " is not part of the delimiter match).
@@ -822,10 +853,12 @@ mod tests {
     #[test]
     fn extract_all_matches() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (length (regexp-extract "\\d+" "a1b22c333"))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Integer(3));
     }
@@ -833,10 +866,12 @@ mod tests {
     #[test]
     fn replace_no_match() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-replace "xyz" "hello" "X")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("hello".into()));
     }
@@ -844,10 +879,12 @@ mod tests {
     #[test]
     fn split_no_match() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-split "," "hello")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::List(vec![Value::String("hello".into())]));
     }
@@ -855,10 +892,12 @@ mod tests {
     #[test]
     fn split_consecutive_delimiters() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-split "," "a,,b,,,c")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(
             result,
@@ -878,10 +917,12 @@ mod tests {
     #[test]
     fn match_count() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-match-count (regexp-search "(a)(b)(c)" "abc"))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Integer(4)); // whole + 3 groups
     }
@@ -889,10 +930,12 @@ mod tests {
     #[test]
     fn match_submatch() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-match-submatch (regexp-search "(\\d+)-(\\d+)" "x-42-7-y") 2)
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("7".into()));
     }
@@ -900,10 +943,12 @@ mod tests {
     #[test]
     fn match_to_list() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-match->list (regexp-search "(a)(b)?(c)" "ac"))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(
             result,
@@ -921,14 +966,16 @@ mod tests {
     #[test]
     fn fold_collect_matches() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-fold "\\d+"
                   (lambda (i m s acc)
                     (cons (regexp-match-submatch m 0) acc))
                   '()
                   "a1b22c333")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(
             result,
@@ -943,14 +990,16 @@ mod tests {
     #[test]
     fn fold_with_finish() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-fold "\\d+"
                   (lambda (i m s acc) (+ acc 1))
                   0
                   "a1b22c333"
                   (lambda (i m s acc) (* acc 10)))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Integer(30));
     }
@@ -958,13 +1007,15 @@ mod tests {
     #[test]
     fn fold_empty_string() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-fold "\\d+"
                   (lambda (i m s acc) (+ acc 1))
                   0
                   "")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Integer(0));
     }
@@ -972,13 +1023,15 @@ mod tests {
     #[test]
     fn fold_no_matches() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-fold "\\d+"
                   (lambda (i m s acc) (+ acc 1))
                   0
                   "no numbers here")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Integer(0));
     }
@@ -988,10 +1041,12 @@ mod tests {
     #[test]
     fn empty_pattern_matches_everywhere() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (length (regexp-extract "" "abc"))
-            "#)
+            "#,
+            )
             .unwrap();
         // empty pattern matches at: before a, before b, before c, after c = 4
         assert_eq!(result, Value::Integer(4));
@@ -1000,11 +1055,13 @@ mod tests {
     #[test]
     fn unicode_match() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-search "café" "I love café!")))
                   (vector-ref (vector-ref m 0) 0))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("café".into()));
     }
@@ -1012,12 +1069,14 @@ mod tests {
     #[test]
     fn unicode_byte_offsets() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-search "café" "I love café!")))
                   (list (vector-ref (vector-ref m 0) 1)
                         (vector-ref (vector-ref m 0) 2)))
-            "#)
+            "#,
+            )
             .unwrap();
         // "I love " = 7 bytes, "café" = 5 bytes (c=1, a=1, f=1, é=2)
         assert_eq!(
@@ -1029,10 +1088,12 @@ mod tests {
     #[test]
     fn search_from_out_of_bounds() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-search-from "\\d+" "abc" 100)
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(false));
     }
@@ -1040,11 +1101,13 @@ mod tests {
     #[test]
     fn matches_with_captures_full() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (regexp-matches "(\\d{4})-(\\d{2})-(\\d{2})" "2026-03-04")))
                   (regexp-match->list m))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(
             result,
@@ -1060,13 +1123,15 @@ mod tests {
     #[test]
     fn fold_empty_pattern_terminates() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-fold ""
                   (lambda (i m s acc) (+ acc 1))
                   0
                   "ab")
-            "#)
+            "#,
+            )
             .unwrap();
         // matches at positions 0, 1, 2 (before a, before b, after b)
         assert_eq!(result, Value::Integer(3));
@@ -1077,11 +1142,13 @@ mod tests {
     #[test]
     fn internal_safe_regexp_search() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (let ((m (safe-regexp-search (regexp "(\\d+)-(\\d+)") "foo-42-7-bar")))
                   (vector-ref (vector-ref m 0) 0))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::String("42-7".into()));
     }
@@ -1089,10 +1156,12 @@ mod tests {
     #[test]
     fn internal_safe_regexp_matches_q() {
         let result = ctx()
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (safe-regexp-matches? (regexp "\\d+") "42")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(true));
     }
@@ -1107,10 +1176,12 @@ mod tests {
             .build()
             .unwrap();
         let result = ctx
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp-matches? "\\d+" "42")
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(true));
     }
@@ -1123,10 +1194,12 @@ mod tests {
             .build()
             .unwrap();
         let result = ctx
-            .evaluate(r#"
+            .evaluate(
+                r#"
                 (import (tein safe-regexp))
                 (regexp? (regexp "test"))
-            "#)
+            "#,
+            )
             .unwrap();
         assert_eq!(result, Value::Boolean(true));
     }

@@ -1940,10 +1940,8 @@ impl ContextBuilder {
             if self.standard_env {
                 crate::safe_regexp::safe_regexp_impl::register_module_safe_regexp(&context)?;
                 // register regexp-fold as a hand-written native fn (calls scheme closures)
-                context.define_fn_variadic(
-                    "regexp-fold",
-                    crate::safe_regexp::regexp_fold_wrapper,
-                )?;
+                context
+                    .define_fn_variadic("regexp-fold", crate::safe_regexp::regexp_fold_wrapper)?;
                 // override macro-generated .sld/.scm to export regexp-fold
                 context.register_vfs_module(
                     "lib/tein/safe-regexp.sld",
@@ -2443,7 +2441,9 @@ impl Context {
     /// `FOREIGN_STORE_PTR`. Usable from inside `#[tein_fn]` free fn wrappers where
     /// no `Context` reference is available. Errors if no store is active (i.e. not
     /// called during an active `evaluate()` / `call()`).
-    pub(crate) fn make_foreign_via_ptr<T: ForeignType>(value: T) -> std::result::Result<Value, String> {
+    pub(crate) fn make_foreign_via_ptr<T: ForeignType>(
+        value: T,
+    ) -> std::result::Result<Value, String> {
         let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
         if store_ptr.is_null() {
             return Err("make_foreign_via_ptr: no active context store (internal error)".into());

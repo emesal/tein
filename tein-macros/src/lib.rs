@@ -1813,7 +1813,9 @@ fn gen_return_conversion(
                 }
             }
         },
-        _ => quote! { compile_error!(concat!("unsupported #[tein_fn] return type: '", #type_str, "'. supported: i64, f64, String, bool, Value, ()")); },
+        _ => {
+            quote! { compile_error!(concat!("unsupported #[tein_fn] return type: '", #type_str, "'. supported: i64, f64, String, bool, Value, ()")); }
+        }
     }
 }
 

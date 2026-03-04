@@ -67,6 +67,8 @@ pub mod foreign;
 mod json;
 pub mod managed;
 mod port;
+#[cfg(feature = "regex")]
+mod safe_regexp;
 pub mod sandbox;
 #[cfg(feature = "json")]
 mod sexp_bridge;
@@ -78,8 +80,6 @@ mod timeout;
 mod toml;
 #[cfg(feature = "uuid")]
 mod uuid;
-#[cfg(feature = "regex")]
-mod safe_regexp;
 mod value;
 
 pub use context::{Context, ContextBuilder};
