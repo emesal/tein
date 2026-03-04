@@ -64,7 +64,106 @@ fn strip_shebang(src: &str) -> &str {
     }
 }
 
-fn main() {}
+/// Run a scheme script file.
+///
+/// Reads the file, strips shebang if present, evaluates via tein.
+/// Returns the process exit code: 0 on success, 1 on eval error.
+/// `Value::Exit(n)` propagates `n` directly.
+fn run_script(path: &std::path::Path, args: &Args) -> i32 {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tein: error reading {}: {}", path.display(), e);
+            return 1;
+        }
+    };
+
+    let source = strip_shebang(&source);
+
+    let ctx = match build_context_script(args, path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("tein: failed to initialize context: {}", e);
+            return 1;
+        }
+    };
+
+    match ctx.evaluate(source) {
+        Ok(tein::Value::Exit(n)) => n,
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("tein: {}", e);
+            1
+        }
+    }
+}
+
+/// Build a tein Context for script mode.
+///
+/// Sets `(command-line)` to `["tein", path, ...extra_args]` for sandboxed contexts.
+/// Unsandboxed contexts use real `std::env::args()` which is already correct.
+fn build_context_script(
+    args: &Args,
+    script_path: &std::path::Path,
+) -> tein::Result<tein::Context> {
+    use tein::sandbox::Modules;
+
+    if args.sandbox {
+        let modules = if args.all_modules { Modules::All } else { Modules::Safe };
+        let path_str = script_path.to_str().unwrap_or("");
+        let Mode::Script { extra_args, .. } = &args.mode else {
+            unreachable!("build_context_script called in non-script mode")
+        };
+        let mut cmd = vec!["tein", path_str];
+        cmd.extend(extra_args.iter().map(String::as_str));
+
+        tein::Context::builder()
+            .standard_env()
+            .sandboxed(modules)
+            .command_line(&cmd)
+            .build()
+    } else {
+        tein::Context::builder().standard_env().build()
+    }
+}
+
+/// Build a tein Context for REPL mode.
+fn build_context_repl(args: &Args) -> tein::Result<tein::Context> {
+    use tein::sandbox::Modules;
+
+    if args.sandbox {
+        let modules = if args.all_modules { Modules::All } else { Modules::Safe };
+        tein::Context::builder().standard_env().sandboxed(modules).build()
+    } else {
+        tein::Context::builder().standard_env().build()
+    }
+}
+
+fn run_repl(_args: &Args) {
+    // placeholder — implemented in task 6
+    eprintln!("tein: REPL not yet implemented");
+    std::process::exit(1);
+}
+
+fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args = match parse_args(raw) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("tein: {}", e);
+            eprintln!("usage: tein [--sandbox] [--all-modules] [script.scm [args...]]");
+            std::process::exit(2);
+        }
+    };
+
+    match &args.mode {
+        Mode::Repl => run_repl(&args),
+        Mode::Script { path, .. } => {
+            let code = run_script(path, &args);
+            std::process::exit(code);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
