@@ -1689,6 +1689,8 @@ impl ContextBuilder {
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
             let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
+            let prev_sandbox_env = SANDBOX_ENV.with(|cell| cell.borrow().clone());
+            let prev_sandbox_command_line = SANDBOX_COMMAND_LINE.with(|cell| cell.borrow().clone());
 
             if let Some(ref modules) = self.sandbox_modules.take() {
                 // registry-based sandbox path: builds a null env + import, resolves
@@ -1701,6 +1703,27 @@ impl ContextBuilder {
 
                 // mark sandboxed so policy enforcement applies
                 IS_SANDBOXED.with(|c| c.set(true));
+                // seed fake process environment for sandboxed contexts
+                {
+                    let mut env_map = HashMap::new();
+                    env_map.insert("TEIN_SANDBOX".to_string(), "true".to_string());
+                    if let Some(user_env) = self.sandbox_env.take() {
+                        for (k, v) in user_env {
+                            env_map.insert(k, v);
+                        }
+                    }
+                    SANDBOX_ENV.with(|cell| {
+                        *cell.borrow_mut() = Some(env_map);
+                    });
+
+                    let cmd_line = self
+                        .sandbox_command_line
+                        .take()
+                        .unwrap_or_else(|| vec!["tein".to_string(), "--sandbox".to_string()]);
+                    SANDBOX_COMMAND_LINE.with(|cell| {
+                        *cell.borrow_mut() = Some(cmd_line);
+                    });
+                }
                 // arm FS policy gate — C opcodes will call tein_fs_policy_check
                 FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
                 ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
@@ -1816,6 +1839,8 @@ impl ContextBuilder {
                 prev_fs_policy,
                 prev_vfs_allowlist,
                 prev_is_sandboxed,
+                prev_sandbox_env,
+                prev_sandbox_command_line,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
@@ -3036,6 +3061,13 @@ impl Drop for Context {
         });
         // restore sandbox flag for the thread (defensive restore-previous pattern)
         IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
+        // restore previous fake process environment
+        SANDBOX_ENV.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_env);
+        });
+        SANDBOX_COMMAND_LINE.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_command_line);
+        });
 
         // clear UX stub module map so next context on this thread starts fresh
         STUB_MODULE_MAP.with(|map| map.borrow_mut().clear());
