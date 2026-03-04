@@ -13,6 +13,46 @@ use tein_macros::tein_module;
 /// constant for the rest of the program run (per r7rs).
 static JIFFY_EPOCH: OnceLock<Instant> = OnceLock::new();
 
+/// query local timezone offset via libc.
+///
+/// uses `localtime_r` to read `tm_gmtoff` from the system timezone database.
+/// returns UTC offset in seconds (e.g. UTC+1 → 3600, UTC-5 → -18000, UTC → 0).
+/// on failure, returns 0 (UTC) as a safe fallback.
+fn local_utc_offset_seconds() -> i64 {
+    use std::mem::MaybeUninit;
+
+    unsafe extern "C" {
+        fn time(tloc: *mut i64) -> i64;
+        fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+    }
+
+    #[repr(C)]
+    struct Tm {
+        tm_sec: i32,
+        tm_min: i32,
+        tm_hour: i32,
+        tm_mday: i32,
+        tm_mon: i32,
+        tm_year: i32,
+        tm_wday: i32,
+        tm_yday: i32,
+        tm_isdst: i32,
+        tm_gmtoff: i64,
+        tm_zone: *const std::ffi::c_char,
+    }
+
+    unsafe {
+        let mut t: i64 = 0;
+        time(&mut t);
+        let mut tm = MaybeUninit::<Tm>::uninit();
+        let result = localtime_r(&t, tm.as_mut_ptr());
+        if result.is_null() {
+            return 0;
+        }
+        (*result).tm_gmtoff
+    }
+}
+
 #[tein_module("time")]
 pub(crate) mod time_impl {
     /// nanoseconds per second — the jiffy resolution constant.
@@ -40,5 +80,15 @@ pub(crate) mod time_impl {
     pub fn current_jiffy() -> i64 {
         let epoch = super::JIFFY_EPOCH.get_or_init(super::Instant::now);
         epoch.elapsed().as_nanos() as i64
+    }
+
+    /// return local timezone's UTC offset in seconds.
+    ///
+    /// e.g. UTC+1 → 3600, UTC-5 → -18000, UTC → 0.
+    /// uses libc `localtime_r` to query the system timezone.
+    /// returns real timezone even in sandboxed contexts.
+    #[tein_fn(name = "timezone-offset-seconds")]
+    pub fn timezone_offset_seconds() -> i64 {
+        super::local_utc_offset_seconds()
     }
 }
