@@ -57,7 +57,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `scheme/sort` | ✅ | |
 | `scheme/stream` | ✅ | |
 | `scheme/text` | ✅ | |
-| `scheme/time` | 🔒 | depends on scheme/process-context; use `tein/time` instead |
+| `scheme/time` | ✅ | shadow re-exports from `tein/time` (feature: `time`) |
 | `scheme/time/tai` | 🔒 | needs external TAI data; unsafe by default |
 | `scheme/time/tai-to-utc-offset` | 🔒 | same |
 | `scheme/vector` | ✅ | |
@@ -93,6 +93,7 @@ r7rs small: `scheme/base` + the 25 standard libraries.
 | `srfi/14` | ✅ | char-sets |
 | `srfi/16` | ✅ | case-lambda |
 | `srfi/18` | 🔒 | OS threads; posix-only, deliberately unsafe |
+| `srfi/19` | ✅ | time data types and procedures; depends on `tein/time` (feature: `time`) |
 | `srfi/23` | ✅ | error |
 | `srfi/26` | ✅ | cut/cute |
 | `srfi/27` | ✅ | random numbers (PRNG, no OS seeding side-effects) |

@@ -61,7 +61,7 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 | `tein/json` | ✓ | `json-parse`, `json-stringify` (feature: `json`) |
 | `tein/toml` | ✓ | `toml-parse`, `toml-stringify` (feature: `toml`) |
 | `tein/uuid` | ✓ | `make-uuid`, `uuid?`, `uuid-nil` (feature: `uuid`) |
-| `tein/time` | ✓ | `current-second`, `current-jiffy`, `jiffies-per-second` (feature: `time`) |
+| `tein/time` | ✓ | `current-second`, `current-jiffy`, `jiffies-per-second`, `timezone-offset-seconds` (feature: `time`) |
 | `tein/file` | ✓ | R7RS file operations with `FsPolicy` enforcement |
 | `tein/load` | ✓ | `load` (VFS-restricted) |
 | `tein/process` | ✓ | `exit`, `emergency-exit`, `command-line`, `get-environment-variable`, `get-environment-variables` |
@@ -90,7 +90,7 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 | `scheme/file` | — | `open-input-file` etc. (use `tein/file` in sandbox) |
 | `scheme/eval` | — | `eval`, `environment` |
 | `scheme/repl` | — | `interaction-environment` |
-| `scheme/time` | — | `current-second`, `current-jiffy` (via `scheme/time` tai chain) |
+| `scheme/time` | ✓ | `current-second`, `current-jiffy`, `jiffies-per-second` (re-exports `tein/time`; feature: `time`) |
 
 ### srfi/* modules (selected)
 
@@ -105,6 +105,7 @@ POSIX-only) and `srfi/146/hash` (depends on unsafe internals).
 | `srfi/9` | `define-record-type` |
 | `srfi/13` | string library |
 | `srfi/14` | character sets |
+| `srfi/19` | time data types and procedures (`make-time`, `make-date`, `date->string`, etc.; feature: `time`) |
 | `srfi/27` | random number sources |
 | `srfi/69` | basic hash tables |
 | `srfi/98` | env var access |

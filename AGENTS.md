@@ -129,6 +129,12 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **import warning suppression (eval.c patch E)**: `define_fn_variadic` registers bindings into the top-level env, not the library env. chibi's `sexp_env_import_op` would normally warn "importing undefined variable" for these because they're absent from the library's `.scm`. the fork patch suppresses the warning when `oldcell` (destination env lookup) is non-NULL — meaning the name is already reachable. NOTE: ext foreign type method convenience procs previously had doubled name prefixes (#69, fixed).
 
+**eval.c patch H — native proc import fallback**: `sexp_env_import_op` falls back to the top-level env when a name is absent from the source library env, importing it if it's a native procedure. required for any `define_fn_variadic`-registered proc to be importable as a transitive library dependency. if a new tein module exports native fns and needs to be used as a dep by pure-scheme libraries, patch H handles it automatically.
+
+**`(srfi 19)` deviations from spec**: `time-process` and `time-thread` raise `unsupported-clock-type` (no process/thread CPU clock in tein). `time-gc` type removed entirely. leap second table is static, last entry 2017.
+
+**`date->julian-day` reference bug fixed**: the reference implementation had `(/ ... (- offset))` which divides by zero for UTC (offset=0). tein fix: `(- (/ time-portion tm:sid) (/ offset tm:sid))`.
+
 **type checking order**: `from_raw` checks in broadest-first order: `complex → ratio → bignum → flonum → integer`. the integer predicate includes `_or_integer_flonump` and will match floats like 4.0 (garbage integer values) — flonum must come before integer. similarly, ratio and bignum are heap-allocated numbers chibi checks before fixnums/flonums; complex is the broadest and must be outermost.
 
 **json alist round-trip via chibi**: `Value::from_raw` collapses dotted pairs `(key . val)` into proper lists when `val` is itself a proper list — e.g. `("x" . (("y" . 1)))` becomes `Value::List(["x", Value::Pair("y",1)])`. this loses alist structure needed for json object detection. `json_stringify_raw` (used by the scheme trampoline) works directly at the raw sexp level to detect alist entries via `sexp_pairp + sexp_stringp(car)`, bypassing `from_raw`. the rust-only `json_stringify` path (test-only) via sexp_bridge remains correct since it operates on hand-built `Value`s that haven't been through chibi.

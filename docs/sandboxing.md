@@ -67,14 +67,14 @@ Included in Safe:
 - `scheme/process-context` — via shadow re-exporting from `(tein process)` with neutered env/argv
 - all `srfi/*` modules in the registry
 - all `tein/*` modules (including `tein/process` — env vars and command-line are neutered by trampolines in sandboxed contexts)
-- feature-gated modules when enabled: `tein/json`, `tein/toml`, `tein/uuid`, `tein/time`
+- `scheme/time` — via shadow that re-exports from `(tein time)` (feature: `time`)
+- feature-gated modules when enabled: `tein/json`, `tein/toml`, `tein/uuid`, `tein/time`, `srfi/19`
 
 Excluded from Safe:
 
 - `scheme/eval` — exports `eval` and `environment`; use `Modules::All` to enable explicitly
 - `scheme/load` — loads arbitrary files from the filesystem; use `(tein load)` instead
 - `scheme/r5rs` — re-exports `scheme/file`, `scheme/load`, `scheme/process-context`
-- `scheme/time` — depends on `scheme/process-context` and `scheme/file` at the Embedded level
 
 ### `Modules::All`
 
