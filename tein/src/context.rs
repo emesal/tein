@@ -8403,6 +8403,23 @@ mod tests {
     }
 
     #[test]
+    fn test_scheme_time_shadow_uses_tein_time() {
+        // verify (scheme time) shadow works in a sandboxed context, where
+        // chibi/time (native C lib) is not available but (tein time) is.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (scheme base))").expect("import base");
+        ctx.evaluate("(import (scheme time))").expect("import scheme/time");
+        let r = ctx.evaluate("(> (current-second) 0)");
+        assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
     fn test_chibi_test_loads_with_vfs_shadows() {
         // chibi/test requires scheme/time, scheme/process-context, chibi/term/ansi, chibi/diff.
         // all of these must load successfully in a with_vfs_shadows non-sandboxed context.

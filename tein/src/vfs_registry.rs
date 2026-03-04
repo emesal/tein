@@ -899,37 +899,21 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     // scheme/time shadow — overrides the Embedded entry above in sandboxed / with_vfs_shadows
-    // contexts. implements current-second/current-jiffy/jiffies-per-second inline using
-    // (chibi time)'s get-time-of-day, avoiding the broken TAI-offset chain.
-    // registered by register_vfs_shadows(). no feature gate needed.
+    // contexts. re-exports from (tein time) which is always available (no C deps).
+    // single source of truth for r7rs time primitives.
+    // registered by register_vfs_shadows(). gated behind "time" feature (matches tein/time).
     VfsEntry {
         path: "scheme/time",
-        deps: &["chibi/time"],
+        deps: &["tein/time"],
         files: &[],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Shadow,
-        feature: None,
-        // chibi/time exports get-time-of-day which returns (timeval* timezone*).
-        // use timeval-seconds / timeval-microseconds accessors to extract fields.
-        // current-jiffy uses a module-level epoch for process-relative counters.
+        feature: Some("time"),
         shadow_sld: Some(concat!(
             "(define-library (scheme time)\n",
-            "  (import (scheme base) (chibi time))\n",
-            "  (export current-second current-jiffy jiffies-per-second)\n",
-            "  (begin\n",
-            "    (define *jiffy-epoch* #f)\n",
-            "    (define (current-second)\n",
-            "      (let ((t (car (get-time-of-day))))\n",
-            "        (+ (timeval-seconds t) (/ (timeval-microseconds t) 1000000.0))))\n",
-            "    (define (current-jiffy)\n",
-            "      (let* ((t (car (get-time-of-day)))\n",
-            "             (ns (+ (* (timeval-seconds t) 1000000000)\n",
-            "                    (* (timeval-microseconds t) 1000))))\n",
-            "        (if *jiffy-epoch*\n",
-            "            (- ns *jiffy-epoch*)\n",
-            "            (begin (set! *jiffy-epoch* ns) 0))))\n",
-            "    (define (jiffies-per-second) 1000000000)))\n",
+            "  (import (tein time))\n",
+            "  (export current-second current-jiffy jiffies-per-second))\n",
         )),
     },
     VfsEntry {
