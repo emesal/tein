@@ -8402,6 +8402,18 @@ mod tests {
         assert_eq!(result, Value::Boolean(true));
     }
 
+    #[cfg(feature = "time")]
+    #[test]
+    #[ignore = "TODO: (import (srfi 19)) fails — (tein time) native fns not visible \
+                in (srfi 19)'s isolated library env. see plan task 5 blocker notes."]
+    fn test_srfi_19_import() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (srfi 19))")
+            .expect("srfi 19 should import");
+        let r = ctx.evaluate("(time? (current-time time-utc))");
+        assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
     #[test]
     fn test_scheme_time_shadow_uses_tein_time() {
         // verify (scheme time) shadow works in a sandboxed context, where
@@ -8414,7 +8426,8 @@ mod tests {
             .build()
             .expect("sandboxed context");
         ctx.evaluate("(import (scheme base))").expect("import base");
-        ctx.evaluate("(import (scheme time))").expect("import scheme/time");
+        ctx.evaluate("(import (scheme time))")
+            .expect("import scheme/time");
         let r = ctx.evaluate("(> (current-second) 0)");
         assert_eq!(r.unwrap(), Value::Boolean(true));
     }

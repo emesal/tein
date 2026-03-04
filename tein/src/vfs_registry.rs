@@ -155,10 +155,14 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     VfsEntry {
         path: "tein/time",
         deps: &[],
-        files: &[],
+        files: &["lib/tein/time.sld", "lib/tein/time.scm"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Dynamic,
+        // Embedded: provides stub scheme definitions that chibi can compile
+        // against when (tein time) is a transitive library dependency (e.g.
+        // (srfi 19)). register_module_time then overwrites the stubs with
+        // native rust implementations via define_fn_variadic at context init.
+        source: VfsSource::Embedded,
         feature: Some("time"),
         shadow_sld: None,
     },
@@ -1083,6 +1087,23 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        path: "srfi/19",
+        deps: &[
+            "scheme/base",
+            "scheme/char",
+            "scheme/write",
+            "scheme/case-lambda",
+            "srfi/9",
+            "tein/time",
+        ],
+        files: &["lib/srfi/19.sld", "lib/srfi/19.scm"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: Some("time"),
         shadow_sld: None,
     },
     VfsEntry {
