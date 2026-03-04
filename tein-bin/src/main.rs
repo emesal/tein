@@ -139,10 +139,148 @@ fn build_context_repl(args: &Args) -> tein::Result<tein::Context> {
     }
 }
 
-fn run_repl(_args: &Args) {
-    // placeholder — implemented in task 6
-    eprintln!("tein: REPL not yet implemented");
-    std::process::exit(1);
+/// Compute net paren depth change for a line, skipping strings and comments.
+///
+/// Rules:
+/// - `(` increments depth, `)` decrements
+/// - inside `"..."`: skip all chars (handle `\"` escape)
+/// - after `;` outside a string: skip rest of line (line comment)
+/// - `#|...|#` block comments: not handled (intentional simplicity)
+fn paren_depth(line: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => loop {
+                match chars.next() {
+                    Some('\\') => {
+                        chars.next();
+                    }
+                    Some('"') | None => break,
+                    _ => {}
+                }
+            },
+            ';' => break,
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// History file path: `~/.tein_history`, derived from `$HOME`.
+/// Returns `None` on platforms where `$HOME` is not set.
+fn history_path() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".tein_history"))
+}
+
+fn run_repl(args: &Args) {
+    use rustyline::DefaultEditor;
+    use rustyline::error::ReadlineError;
+
+    println!("tein {} — r7rs scheme", env!("CARGO_PKG_VERSION"));
+    println!("type ,help for commands, ,quit to exit\n");
+
+    let ctx = match build_context_repl(args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("tein: failed to initialize context: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let mut rl = match DefaultEditor::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("tein: failed to initialize editor: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(path) = history_path() {
+        let _ = rl.load_history(&path);
+    }
+
+    let mut buffer = String::new();
+    let mut depth = 0i32;
+
+    loop {
+        let prompt = if buffer.is_empty() { "tein> " } else { "  ... " };
+
+        match rl.readline(prompt) {
+            Ok(line) => {
+                if buffer.is_empty() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Some(cmd) = trimmed.strip_prefix(',') {
+                        match cmd.trim() {
+                            "quit" | "q" => break,
+                            "help" | "h" => {
+                                println!(",help  — show this message");
+                                println!(",quit  — exit the repl");
+                                continue;
+                            }
+                            other => {
+                                eprintln!("unknown command: ,{}", other);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                if !buffer.is_empty() {
+                    buffer.push('\n');
+                }
+                depth += paren_depth(&line);
+                buffer.push_str(&line);
+
+                if depth <= 0 {
+                    let input = buffer.trim().to_owned();
+                    buffer.clear();
+                    depth = 0;
+
+                    if !input.is_empty() {
+                        let _ = rl.add_history_entry(&input);
+                        match ctx.evaluate(&input) {
+                            Ok(tein::Value::Unspecified) => {}
+                            Ok(tein::Value::Exit(n)) => {
+                                if let Some(path) = history_path() {
+                                    let _ = rl.save_history(&path);
+                                }
+                                std::process::exit(n);
+                            }
+                            Ok(value) => println!("{}", value),
+                            Err(e) => eprintln!("error: {}", e),
+                        }
+                    }
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                if !buffer.is_empty() {
+                    buffer.clear();
+                    depth = 0;
+                    println!("^C");
+                }
+            }
+            Err(ReadlineError::Eof) => {
+                println!();
+                break;
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+                break;
+            }
+        }
+    }
+
+    if let Some(path) = history_path() {
+        let _ = rl.save_history(&path);
+    }
 }
 
 fn main() {
@@ -168,6 +306,41 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paren_balanced() {
+        assert_eq!(paren_depth("(+ 1 2)"), 0);
+    }
+
+    #[test]
+    fn paren_open() {
+        assert_eq!(paren_depth("(define (f x)"), 1);
+    }
+
+    #[test]
+    fn paren_close() {
+        assert_eq!(paren_depth("  (+ x 1))"), -1);
+    }
+
+    #[test]
+    fn paren_string_with_parens() {
+        assert_eq!(paren_depth(r#"(display "(hi)")"#), 0);
+    }
+
+    #[test]
+    fn paren_string_with_escape() {
+        assert_eq!(paren_depth(r#"(display "a\"b")"#), 0);
+    }
+
+    #[test]
+    fn paren_line_comment() {
+        assert_eq!(paren_depth("(define x ; todo)"), 1);
+    }
+
+    #[test]
+    fn paren_empty() {
+        assert_eq!(paren_depth(""), 0);
+    }
 
     #[test]
     fn shebang_stripped() {
