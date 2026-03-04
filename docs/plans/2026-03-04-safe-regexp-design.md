@@ -10,7 +10,9 @@ linear-time regular expression support via rust's `regex` crate, exposed as `(te
 
 ## approach
 
-**maximal rust, minimal scheme.** rust implements all core operations via `#[tein_module]`. scheme implements only `regexp-fold` (higher-order iteration over matches via `regexp-search-from`). match results are plain scheme vectors — no foreign types for matches, destructurable with `(chibi match)`.
+**maximal rust, minimal scheme.** `Regexp` foreign type wraps `regex::Regex` via `#[tein_type]`. core operations are `#[tein_methods]` on `Regexp` returning `Value` for match vectors. scheme `.scm` provides user-facing free-function wrappers (`regexp-search` etc.) with string-or-regexp dispatch, delegating to internal methods (`safe-regexp-search` etc.). `regexp-fold` is scheme-side (takes closures). match results are plain scheme vectors — destructurable with `(chibi match)`.
+
+**prerequisite**: #114 — `gen_return_conversion` in tein-macros needs a `Value` arm for `#[tein_fn]` free fns returning `Result<Value, String>`.
 
 ## API surface
 
@@ -18,7 +20,11 @@ linear-time regular expression support via rust's `regex` crate, exposed as `(te
 
 `Regexp` — wraps `regex::Regex`. compiled once, reused. all API procs accept both a pre-compiled `Regexp` and a raw pattern string (compile-on-the-fly for one-shot usage).
 
-### rust-side procs (`#[tein_fn]`)
+### two-layer API
+
+the type is named `safe-regexp`, so auto-generated method names are `safe-regexp-search`, `safe-regexp-matches`, etc. (internal). scheme wrappers provide the user-facing `regexp-search`, `regexp-matches`, etc. with string-or-regexp coercion via `(%ensure-regexp rx)`.
+
+### rust-side — `#[tein_methods]` on `Regexp` + `#[tein_fn]` free fns
 
 | scheme name | rust impl | signature | notes |
 |---|---|---|---|
@@ -82,7 +88,11 @@ works naturally with `(chibi match)` for destructuring:
 
 ### string-or-regexp argument handling
 
-every fn accepting `rx` handles both `Value::Foreign` (extract `Regexp`) and `Value::String` (compile on the fly). shared helper, exact mechanics tbd during implementation based on `#[tein_type]` extraction patterns.
+scheme-side: `(%ensure-regexp rx)` compiles strings on the fly, passes `Regexp` foreign objects through. rust methods always receive a `Regexp` foreign type — no mixed-type dispatch needed in rust.
+
+### VFS override
+
+macro-generated `.sld/.scm` are overridden at registration time with hand-written versions that add scheme wrappers and `regexp-fold`. native fns resolve via top-level env (eval.c patch H). docs sub-library (`tein/safe-regexp/docs`) reflects only macro-generated exports — `regexp-fold` and wrapper names not listed there (known limitation).
 
 ### sandbox
 
