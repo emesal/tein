@@ -20,7 +20,8 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (356 lib + 12 tein_fn + 3 tein_fn_value_arg + 32 scheme + 8 tein_module_const + 4 tein_module_naming + 1 tein_module_parse + 11 tein_module_docs + 25 tein-macros + 14 ext_loading + 9 tein_uuid + 8 tein_time + doc-tests)
+just test                         # all tests (390 lib + 39 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests)
+cargo test -p tein --test vfs_module_tests  # chibi/srfi test suite integration (58 pass, 5 ignored)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 just lint                          # lint (cargo fmt + cargo clippy)
@@ -148,6 +149,20 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 7. add test in `src/context.rs`
 
 **`JIFFY_EPOCH` is process-global**: `time.rs` uses a `static OnceLock<Instant>` shared across all `Context` instances. `current-jiffy` values are process-relative, not context-relative — epoch is set on first call anywhere in the process. this is correct per r7rs ("constant within a single run of the program") but means two separate contexts share the same jiffy epoch.
+
+## vfs module test harness
+
+`tests/vfs_module_tests.rs` wires chibi's bundled srfi/chibi test suites into cargo test.
+- `run_chibi_test(module)` builds a `standard_env().with_vfs_shadows()` context, imports the module, calls `(run-tests)`, checks `(test-failure-count)`.
+- `(chibi test)` is in the VFS as `default_safe: false` — not available in sandboxed contexts.
+- **5 tests permanently ignored** (see `#[ignore]` annotations in source):
+  - `srfi_33`: `bitwise-merge` implementation quirk in chibi
+  - `srfi_35`: imports `(chibi repl)` — not in VFS
+  - `srfi_166`: needs real `delete-file` — `chibi/filesystem` stub blocks it
+  - `chibi_diff`: `edits->string/color` needs real TERM env var
+  - `chibi_weak`: `(gc)` in test body → SIGSEGV in embedded chibi
+- **excluded from harness entirely**: `chibi/regexp-test` (needs pcre), crypto/mime/memoize (fs/network), filesystem/process/system-test (OS-level), `srfi/179/231` (fuel concerns)
+- **shadow SLD rules**: never import other shadow libraries inside a shadow library body — each must be self-contained with `(chibi)` or `(scheme base)` only. never use `(define x x)` pattern — letrec* pre-binds to `#<unspecified>`.
 
 ## license
 - ISC
