@@ -8826,7 +8826,9 @@ mod tests {
     fn exit_string_returns_exit_zero() {
         // non-integer, non-boolean → 0 per r7rs
         let ctx = Context::new_standard().unwrap();
-        let result = ctx.evaluate(r#"(import (tein process)) (exit "bye")"#).unwrap();
+        let result = ctx
+            .evaluate(r#"(import (tein process)) (exit "bye")"#)
+            .unwrap();
         assert_eq!(result, Value::Exit(0));
     }
 }
