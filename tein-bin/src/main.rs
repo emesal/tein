@@ -4,7 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, PartialEq)]
 enum Mode {
     Repl,
-    Script { path: PathBuf, extra_args: Vec<String> },
+    Script {
+        path: PathBuf,
+        extra_args: Vec<String>,
+    },
 }
 
 /// Parsed CLI arguments.
@@ -46,7 +49,11 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         Mode::Script { path, extra_args }
     };
 
-    Ok(Args { mode, sandbox, all_modules })
+    Ok(Args {
+        mode,
+        sandbox,
+        all_modules,
+    })
 }
 
 /// Strip shebang line if present.
@@ -102,14 +109,15 @@ fn run_script(path: &std::path::Path, args: &Args) -> i32 {
 ///
 /// Sets `(command-line)` to `["tein", path, ...extra_args]` for sandboxed contexts.
 /// Unsandboxed contexts use real `std::env::args()` which is already correct.
-fn build_context_script(
-    args: &Args,
-    script_path: &std::path::Path,
-) -> tein::Result<tein::Context> {
+fn build_context_script(args: &Args, script_path: &std::path::Path) -> tein::Result<tein::Context> {
     use tein::sandbox::Modules;
 
     if args.sandbox {
-        let modules = if args.all_modules { Modules::All } else { Modules::Safe };
+        let modules = if args.all_modules {
+            Modules::All
+        } else {
+            Modules::Safe
+        };
         let path_str = script_path.to_str().unwrap_or("");
         let Mode::Script { extra_args, .. } = &args.mode else {
             unreachable!("build_context_script called in non-script mode")
@@ -132,8 +140,15 @@ fn build_context_repl(args: &Args) -> tein::Result<tein::Context> {
     use tein::sandbox::Modules;
 
     if args.sandbox {
-        let modules = if args.all_modules { Modules::All } else { Modules::Safe };
-        tein::Context::builder().standard_env().sandboxed(modules).build()
+        let modules = if args.all_modules {
+            Modules::All
+        } else {
+            Modules::Safe
+        };
+        tein::Context::builder()
+            .standard_env()
+            .sandboxed(modules)
+            .build()
     } else {
         tein::Context::builder().standard_env().build()
     }
@@ -208,7 +223,11 @@ fn run_repl(args: &Args) {
     let mut depth = 0i32;
 
     loop {
-        let prompt = if buffer.is_empty() { "tein> " } else { "  ... " };
+        let prompt = if buffer.is_empty() {
+            "tein> "
+        } else {
+            "  ... "
+        };
 
         match rl.readline(prompt) {
             Ok(line) => {
@@ -380,7 +399,10 @@ mod tests {
         let args = parse_args(vec!["script.scm".into()]).unwrap();
         assert_eq!(
             args.mode,
-            Mode::Script { path: "script.scm".into(), extra_args: vec![] }
+            Mode::Script {
+                path: "script.scm".into(),
+                extra_args: vec![]
+            }
         );
     }
 
@@ -422,7 +444,10 @@ mod tests {
         assert!(args.sandbox);
         assert_eq!(
             args.mode,
-            Mode::Script { path: "script.scm".into(), extra_args: vec![] }
+            Mode::Script {
+                path: "script.scm".into(),
+                extra_args: vec![]
+            }
         );
     }
 }
