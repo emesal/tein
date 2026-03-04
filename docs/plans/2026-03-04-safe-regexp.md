@@ -1501,34 +1501,10 @@ review any caveats discovered during implementation not already in task 10.
 ## execution progress (updated 2026-03-04)
 
 ### completed
-- **task 0** ✅ — `gen_return_conversion` Value arm + compile_error fallback; ext mode guard; test file created. committed: `9e8469e`. 823 tests passing.
-- **task 1** (partial, in-progress) — Cargo.toml regex dep + feature, lib.rs mod + feature table, VFS registry entry, context registration, VFS override with SAFE_REGEXP_SLD/SCM, regexp_fold_wrapper hand-written native fn.
-
-### current state (context cleared mid-task-1/2)
-
-`tein/src/safe_regexp.rs` exists with full implementation. 32/37 unit tests pass. 5 failures to fix before committing:
-
-1. **`#[tein_type(name = "safe-regexp")]`** — set on `Regexp` struct. type_name = `"safe-regexp"`. methods = `safe-regexp-search`, etc. `ensure_regexp` checks `type_name == "safe-regexp"`. BUT: `regexp?` predicate is auto-generated as `safe-regexp?` — need a manual `#[tein_fn(name = "regexp?")]` free fn. ADD this to the `safe_regexp_impl` mod.
-
-2. **split_basic test** — test was WRONG. `",\\s*"` on `"a, b,c , d"` correctly produces `["a", "b", "c ", "d"]` (space before `, ` stays with "c"). Update test to `"c "` not `"c"`.
-
-3. **search_with_compiled_regexp** — was failing due to type_name mismatch (was `"regexp"`, now fixed to `"safe-regexp"`). should pass after fix #1.
-
-4. **internal_safe_regexp_search, internal_safe_regexp_matches_q** — these tests use `safe-regexp-search` etc. (method names). After `#[tein_type(name = "safe-regexp")]`, these should be `safe-regexp-search` etc. Update tests to use updated method names or remove (they test internal names, which is fine).
-
-5. **sandbox_modules_safe_includes_safe_regexp** — verify after other fixes.
-
-### remaining work after fix
-
-- add `regexp?` free fn to `safe_regexp_impl`
-- fix split_basic test expectation
-- verify all 37 tests pass
-- run `just test` (no regressions)
-- run `just lint`
-- add scheme integration tests (task 8)
-- sandbox tests (task 9) — already in module
-- docs (task 10): AGENTS.md, reference.md
-- final verification (task 11)
+- **task 0** ✅ — committed: `9e8469e`. 823 tests passing.
+- **tasks 1-9** ✅ — committed across `532a1e2`, `b253421`, `38dc4ca`. 37/37 unit tests + scheme integration tests passing. 857 tests total, 4 pre-existing sandbox failures (not introduced by this work).
+- **task 10** ✅ — committed: `cc9f240`. AGENTS.md + reference.md updated.
+- **task 11** ✅ — lint clean, full test suite confirmed.
 
 ### key implementation decisions made
 
