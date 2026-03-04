@@ -2388,6 +2388,19 @@ impl Context {
     /// // scheme now has: counter?, counter-increment, counter-get
     /// ```
     pub fn register_foreign_type<T: ForeignType>(&self) -> Result<()> {
+        // in sandboxed contexts the context env has been switched to null_env, which
+        // only contains the 10 r7rs core syntax forms. both register_foreign_protocol
+        // (foreign?, foreign-type, foreign-handle-id) and the type helpers below
+        // (predicate, method wrappers) use `and`, `pair?`, `eq?` etc. — none of which
+        // are available in null_env. skipping is safe: these helpers are not exported
+        // by any SLD and are never called by native fn implementations. the native fns
+        // and VFS module entries (registered elsewhere) work correctly without them.
+        // see #116.
+        if IS_SANDBOXED.with(|c| c.get()) {
+            self.foreign_store.borrow_mut().register_type::<T>()?;
+            return Ok(());
+        }
+
         if !self.has_foreign_protocol.get() {
             self.register_foreign_protocol()?;
             self.has_foreign_protocol.set(true);
