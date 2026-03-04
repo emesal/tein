@@ -421,6 +421,7 @@ pub(crate) const SAFE_REGEXP_SCM: &str = r#";; (tein safe-regexp) — linear-tim
 /// # Safety
 ///
 /// called by chibi-scheme — all pointers are valid in the chibi C API contract.
+#[allow(unused_assignments)] // next_arg! macro: last `args = sexp_cdr(args)` is intentionally unused
 pub(crate) unsafe extern "C" fn regexp_fold_wrapper(
     ctx: crate::ffi::sexp,
     _self: crate::ffi::sexp,
