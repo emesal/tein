@@ -137,8 +137,8 @@ thread_local! {
 // populated during sandboxed() build path: fake env vars and command-line
 // for sandboxed contexts. cleared on Context::drop().
 thread_local! {
-    static SANDBOX_ENV: RefCell<Option<HashMap<String, String>>> = RefCell::new(None);
-    static SANDBOX_COMMAND_LINE: RefCell<Option<Vec<String>>> = RefCell::new(None);
+    static SANDBOX_ENV: RefCell<Option<HashMap<String, String>>> = const { RefCell::new(None) };
+    static SANDBOX_COMMAND_LINE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -1667,7 +1667,11 @@ impl ContextBuilder {
     /// # }
     /// ```
     pub fn environment_variables(mut self, vars: &[(&str, &str)]) -> Self {
-        self.sandbox_env = Some(vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
+        self.sandbox_env = Some(
+            vars.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
         self
     }
 
@@ -4429,7 +4433,11 @@ mod tests {
         assert_eq!(r.unwrap(), Value::Boolean(false));
         // env var list contains the seed
         let r = ctx.evaluate("(import (scheme base)) (pair? (get-environment-variables))");
-        assert_eq!(r.unwrap(), Value::Boolean(true), "should have fake env vars");
+        assert_eq!(
+            r.unwrap(),
+            Value::Boolean(true),
+            "should have fake env vars"
+        );
         // command-line returns default fake
         let r = ctx.evaluate("(command-line)");
         assert_eq!(
@@ -7953,7 +7961,9 @@ mod tests {
             .expect("builder");
         // srfi/98 re-exports (tein process) — fake env should work
         let r = ctx
-            .evaluate("(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")")
+            .evaluate(
+                "(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")",
+            )
             .expect("srfi/98 importable in sandbox");
         assert_eq!(
             r,

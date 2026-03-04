@@ -136,8 +136,9 @@ evaluation and returns a value to the rust caller.
 ```
 
 In sandboxed contexts, `get-environment-variable`, `get-environment-variables`, and
-`command-line` are replaced with neutered trampolines — they return controlled responses
-rather than leaking host environment data.
+`command-line` consult fake process state instead of leaking host data. defaults:
+`TEIN_SANDBOX=true` in the env map, `["tein", "--sandbox"]` as the command-line.
+configure via `ContextBuilder::environment_variables()` and `ContextBuilder::command_line()`.
 
 **r7rs deviation:** both `exit` and `emergency-exit` have emergency-exit semantics in tein —
 neither runs `dynamic-wind` "after" thunks. r7rs `exit` should run them. see issue #101.

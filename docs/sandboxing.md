@@ -64,9 +64,9 @@ Included in Safe:
 - `scheme/fixnum`, `scheme/flonum`, `scheme/bitwise`, `scheme/rlist`
 - `scheme/file` — via shadow module that re-exports from `(tein file)`, enforcing FsPolicy
 - `scheme/repl` — via shadow module returning `(current-environment)` (neutered, no raw eval)
-- `scheme/process-context` — via shadow re-exporting from `(tein process)` with neutered env/argv
-- all `srfi/*` modules in the registry
-- all `tein/*` modules (including `tein/process` — env vars and command-line are neutered by trampolines in sandboxed contexts)
+- `scheme/process-context` — via shadow re-exporting from `(tein process)`, which consults fake env/command-line
+- all `srfi/*` modules in the registry (including `srfi/98` — delegates to `(tein process)` trampolines)
+- all `tein/*` modules (including `tein/process` — env vars and command-line return fake values; see `ContextBuilder::environment_variables` / `ContextBuilder::command_line`)
 - `scheme/time` — via shadow that re-exports from `(tein time)` (feature: `time`)
 - feature-gated modules when enabled: `tein/json`, `tein/toml`, `tein/uuid`, `tein/time`, `srfi/19`
 
@@ -169,6 +169,32 @@ In sandboxed contexts, `(scheme file)` is a shadow module that re-exports from `
 
 ---
 
+## fake environment variables and command-line
+
+In sandboxed contexts, `get-environment-variable`, `get-environment-variables`, and `command-line` consult thread-local fake state rather than the real process environment. defaults:
+
+- env map seeded with `{"TEIN_SANDBOX": "true"}`
+- command-line: `["tein", "--sandbox"]`
+
+configure via builder methods:
+
+```rust
+let ctx = Context::builder()
+    .standard_env()
+    .sandboxed(Modules::Safe)
+    .environment_variables(&[("APP_NAME", "my-app"), ("LOG_LEVEL", "info")])
+    .command_line(&["my-app", "--config", "/etc/my-app.toml"])
+    .build()?;
+```
+
+`.environment_variables()` **merges** with the default seed — user entries override defaults on key conflict. `.command_line()` **replaces** the default entirely.
+
+these methods are silently ignored for unsandboxed contexts (real env is always used).
+
+both values are restored to their previous state on `Context::drop()`, so sequential sandboxed contexts on the same thread do not bleed state.
+
+---
+
 ## step limits
 
 `.step_limit(n)` caps the number of VM instructions per `evaluate()` or `call()` invocation. Fuel resets before each call.
@@ -218,4 +244,4 @@ State persists across calls — unlike a fresh context, `TimeoutContext` accumul
 
 ## where the sandbox is heading
 
-The current sandbox controls what code can access at build time: a fixed allowlist resolved before the first evaluation. Planned work includes host callbacks to intercept specific operations at runtime — environment variable reads (GH #99), per-call file IO interception. The goal is a fully configurable permission system where the host can observe, modify, or deny any privileged operation without rebuilding the context.
+The current sandbox controls what code can access at build time: a fixed allowlist resolved before the first evaluation. Planned work includes host callbacks to intercept specific operations at runtime — per-call file IO interception. The goal is a fully configurable permission system where the host can observe, modify, or deny any privileged operation without rebuilding the context.
