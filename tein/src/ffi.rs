@@ -206,6 +206,11 @@ unsafe extern "C" {
     // FS policy gate (for sandboxed file IO)
     pub fn tein_fs_policy_gate_set(level: c_int);
 
+    // meta env accessor (for sandboxed scheme/eval #97)
+    pub fn tein_sexp_global_meta_env(ctx: sexp) -> sexp;
+    // make-immutable wrapper (chibi SEXP_API, for r7rs environment)
+    pub fn tein_sexp_make_immutable(ctx: sexp, x: sexp) -> sexp;
+
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
 
@@ -734,6 +739,26 @@ pub unsafe fn load_standard_env(ctx: sexp, env: sexp, version: sexp) -> sexp {
 #[inline]
 pub unsafe fn load_standard_ports(ctx: sexp, env: sexp) -> sexp {
     unsafe { tein_sexp_load_standard_ports(ctx, env) }
+}
+
+/// Get the meta environment (`SEXP_G_META_ENV`) — contains `mutable-environment`,
+/// `environment`, and other module-system internals from `meta-7.scm`.
+///
+/// # Safety
+/// `ctx` must be a valid chibi context with standard env loaded.
+#[inline]
+pub unsafe fn sexp_global_meta_env(ctx: sexp) -> sexp {
+    unsafe { tein_sexp_global_meta_env(ctx) }
+}
+
+/// Make a value immutable (wraps `sexp_make_immutable_op`).
+/// Used by `environment` trampoline to freeze the env after construction.
+///
+/// # Safety
+/// `ctx` must be a valid chibi context; `x` must be a valid sexp.
+#[inline]
+pub unsafe fn sexp_make_immutable(ctx: sexp, x: sexp) -> sexp {
+    unsafe { tein_sexp_make_immutable(ctx, x) }
 }
 
 /// set the VFS module gate at C level.
