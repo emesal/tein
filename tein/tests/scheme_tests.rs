@@ -346,3 +346,8 @@ fn test_safe_regexp() {
 fn test_scheme_tein_crypto() {
     run_scheme_test(include_str!("scheme/crypto.scm"));
 }
+
+#[test]
+fn test_chibi_regexp() {
+    run_scheme_test(include_str!("scheme/chibi_regexp.scm"));
+}
