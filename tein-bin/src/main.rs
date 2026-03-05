@@ -1,4 +1,3 @@
-use std::io::Write as _;
 use std::path::PathBuf;
 
 /// CLI mode.
@@ -266,7 +265,15 @@ fn run_repl(args: &Args) {
 
                     if !input.is_empty() {
                         let _ = rl.add_history_entry(&input);
-                        match ctx.evaluate(&input) {
+                        // Wrap in flush-output so chibi flushes before
+                        // returning to rust. rustyline's \r\x1b[K prompt
+                        // redraw erases mid-line output, so we always emit
+                        // \n after eval — see GH #120 for the clean fix.
+                        let flushed = format!(
+                            "(let ((--r-- (begin {}))) (flush-output (current-output-port)) --r--)",
+                            input
+                        );
+                        match ctx.evaluate(&flushed) {
                             Ok(tein::Value::Unspecified) => {}
                             Ok(tein::Value::Exit(n)) => {
                                 if let Some(path) = history_path() {
@@ -277,11 +284,7 @@ fn run_repl(args: &Args) {
                             Ok(value) => println!("{}", value),
                             Err(e) => eprintln!("error: {}", e),
                         }
-                        // Flush chibi's stdout (a C FILE* on fd 1) after each
-                        // expression. rustyline's raw-mode terminal causes libc
-                        // to switch stdout to fully-buffered, so without this
-                        // display/write output only appears on process exit.
-                        let _ = std::io::stdout().flush();
+                        println!();
                     }
                 }
             }
