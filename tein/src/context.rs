@@ -139,6 +139,10 @@ thread_local! {
 thread_local! {
     static SANDBOX_ENV: RefCell<Option<HashMap<String, String>>> = const { RefCell::new(None) };
     static SANDBOX_COMMAND_LINE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+
+    /// GC-rooted mutable env returned by `interaction-environment` in sandbox.
+    /// Lazily created on first call; cleared on `Context::drop()`.
+    pub(crate) static INTERACTION_ENV: Cell<ffi::sexp> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -3358,6 +3362,15 @@ impl Drop for Context {
 
         // clear UX stub module map so next context on this thread starts fresh
         STUB_MODULE_MAP.with(|map| map.borrow_mut().clear());
+
+        // release interaction-environment if it was created (#97)
+        INTERACTION_ENV.with(|cell| {
+            let env = cell.get();
+            if !env.is_null() {
+                unsafe { ffi::sexp_release_object(self.ctx, env) };
+                cell.set(std::ptr::null_mut());
+            }
+        });
 
         // clear any pending exit request — defensive safety net in case evaluation
         // was interrupted before the eval loop could consume the flag.
