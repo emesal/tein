@@ -111,7 +111,8 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 ### srfi/* modules (selected)
 
 All `srfi/*` modules in the registry are `default_safe: true` except `srfi/18` (threads,
-POSIX-only) and `srfi/146/hash` (depends on unsafe internals).
+POSIX-only), `srfi/115` (regexp — backtracking engine, ReDoS risk with untrusted patterns),
+and `srfi/146/hash` (depends on unsafe internals).
 
 | module | description |
 |--------|-------------|
@@ -125,7 +126,7 @@ POSIX-only) and `srfi/146/hash` (depends on unsafe internals).
 | `srfi/27` | random number sources |
 | `srfi/69` | basic hash tables |
 | `srfi/98` | env var access |
-| `srfi/115` | regular expressions |
+| `srfi/115` | regular expressions (`default_safe: false` — ReDoS risk; alias for `(chibi regexp)`) |
 | `srfi/125` | hash tables |
 | `srfi/128` | comparators |
 | `srfi/133` | vector library |
@@ -133,6 +134,21 @@ POSIX-only) and `srfi/146/hash` (depends on unsafe internals).
 | `srfi/166` | monadic formatting (`(scheme show)` alias) |
 
 Full list: see `tein/src/vfs_registry.rs`.
+
+### regexp modules
+
+Three aliases provide the same regexp engine (SRFI-115 / chibi IrRegex):
+
+| module | notes |
+|--------|-------|
+| `(chibi regexp)` | canonical implementation — SRE syntax, submatches, fold, split, extract |
+| `(srfi 115)` | SRFI-115 alias |
+| `(scheme regex)` | R7RS-large alias |
+
+All three are `default_safe: false` — the engine can exhibit superlinear time on
+pathological patterns. use `.allow_module("chibi/regexp")` or `Modules::All` to
+enable. for untrusted patterns, prefer `(tein safe-regexp)` which guarantees
+linear time.
 
 ## scheme environment quirks
 
