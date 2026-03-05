@@ -498,7 +498,10 @@ unsafe extern "C" fn ext_trampoline_register_vfs(
             Ok(s) => s,
             Err(_) => return -1,
         };
-        ffi::tein_vfs_register(c_path.as_ptr(), content, content_len as std::ffi::c_uint);
+        let rc = ffi::tein_vfs_register(c_path.as_ptr(), content, content_len as std::ffi::c_uint);
+        if rc != 0 {
+            return -1;
+        }
         0
     }
 }
@@ -1821,7 +1824,7 @@ impl ContextBuilder {
                 // arm FS policy gate — C opcodes will call tein_fs_policy_check
                 FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
                 ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
-                crate::sandbox::register_vfs_shadows(); // inject shadow modules before VFS gate is armed
+                crate::sandbox::register_vfs_shadows()?; // inject shadow modules before VFS gate is armed
 
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
@@ -1997,7 +2000,7 @@ impl ContextBuilder {
             // normally only done during sandboxed() build; this option enables
             // shadow imports (e.g. scheme/process-context) in non-sandboxed contexts.
             if self.with_vfs_shadows && self.sandbox_modules.is_none() {
-                crate::sandbox::register_vfs_shadows();
+                crate::sandbox::register_vfs_shadows()?;
             }
 
             Ok(context)
@@ -2744,12 +2747,17 @@ impl Context {
         let full_path = format!("/vfs/{path}");
         let c_path = std::ffi::CString::new(full_path)
             .map_err(|_| Error::EvalError("VFS path contains null bytes".into()))?;
-        unsafe {
+        let rc = unsafe {
             ffi::tein_vfs_register(
                 c_path.as_ptr(),
                 content.as_ptr() as *const std::ffi::c_char,
                 content.len() as std::ffi::c_uint,
-            );
+            )
+        };
+        if rc != 0 {
+            return Err(Error::InitError(
+                "VFS registration failed: out of memory".into(),
+            ));
         }
         Ok(())
     }
