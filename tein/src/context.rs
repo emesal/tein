@@ -6964,6 +6964,43 @@ mod tests {
     }
 
     #[test]
+    fn test_set_current_output_port_survives_multiple_evals() {
+        // regression: verify the custom port survives subsequent evaluate calls
+        // (e.g. env-extending imports) after set_current_output_port.
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("open port");
+        ctx.set_current_output_port(&port).expect("set port");
+
+        // several intervening evals that may extend the env (like REPL history/imports)
+        ctx.evaluate("(define __test__ 1)").expect("define");
+        ctx.evaluate("(import (scheme base))").expect("import");
+
+        // display should still go to our custom port
+        ctx.evaluate("(display \"hello\")").expect("display");
+        ctx.evaluate("(flush-output (current-output-port))")
+            .expect("flush");
+
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"hello", "port should survive multiple evals");
+    }
+
+    #[test]
     fn test_set_current_input_port() {
         let ctx = Context::new_standard().expect("context");
         let port = ctx

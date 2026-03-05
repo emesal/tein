@@ -214,6 +214,11 @@ impl TrackingWriter {
     fn last_was_newline(&self) -> bool {
         self.last_newline.get()
     }
+
+    /// reset to "no output produced" state before each eval.
+    fn reset(&self) {
+        self.last_newline.set(true);
+    }
 }
 
 /// shared wrapper that delegates `Write` to stdout while updating
@@ -315,8 +320,21 @@ fn run_repl(args: &Args) {
 
                     if !input.is_empty() {
                         let _ = rl.add_history_entry(&input);
-                        match ctx.evaluate(&input) {
-                            Ok(tein::Value::Unspecified) => {}
+                        tracker.reset();
+                        // wrap with flush so chibi's custom port buffer is
+                        // drained before we inspect tracker state or print
+                        // the return value. the tracker records the last
+                        // byte written, so blank-line suppression is correct.
+                        let flushed = format!(
+                            "(let ((__r__ (begin {}))) (flush-output (current-output-port)) __r__)",
+                            input
+                        );
+                        match ctx.evaluate(&flushed) {
+                            Ok(tein::Value::Unspecified) => {
+                                if !tracker.last_was_newline() {
+                                    println!();
+                                }
+                            }
                             Ok(tein::Value::Exit(n)) => {
                                 if let Some(path) = history_path() {
                                     let _ = rl.save_history(&path);
