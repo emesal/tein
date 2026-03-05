@@ -5839,6 +5839,84 @@ mod tests {
     }
 
     #[test]
+    fn test_chibi_regexp_blocked_in_modules_safe() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx.evaluate("(import (chibi regexp))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "(chibi regexp) should be blocked in Modules::Safe, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_chibi_regexp_allowed_in_modules_all() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::All)
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (chibi regexp)) (regexp? (regexp '(+ digit)))");
+        assert!(
+            r.is_ok(),
+            "(chibi regexp) should work under Modules::All: {:?}",
+            r.err()
+        );
+    }
+
+    #[test]
+    fn test_chibi_regexp_allowed_via_allow_module() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/regexp")
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (chibi regexp)) (regexp? (regexp '(+ digit)))");
+        assert!(
+            r.is_ok(),
+            "(chibi regexp) should work via allow_module: {:?}",
+            r.err()
+        );
+    }
+
+    #[test]
+    fn test_srfi_115_alias_blocked_in_safe() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx.evaluate("(import (srfi 115))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "(srfi 115) should be blocked in Modules::Safe, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_scheme_regex_alias_blocked_in_safe() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx.evaluate("(import (scheme regex))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "(scheme regex) should be blocked in Modules::Safe, got: {err:?}"
+        );
+    }
+
+    #[test]
     fn test_vfs_gate_allowlist_raii() {
         use crate::sandbox::{Modules, VFS_ALLOWLIST};
         // verify allowlist is restored, not just the gate level
