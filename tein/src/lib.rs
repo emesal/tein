@@ -60,6 +60,8 @@
 extern crate self as tein;
 
 mod context;
+#[cfg(feature = "crypto")]
+mod crypto;
 mod error;
 mod ffi;
 pub mod foreign;
@@ -80,8 +82,6 @@ mod timeout;
 mod toml;
 #[cfg(feature = "uuid")]
 mod uuid;
-#[cfg(feature = "crypto")]
-mod crypto;
 mod value;
 
 pub use context::{Context, ContextBuilder};

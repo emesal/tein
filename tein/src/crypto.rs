@@ -86,7 +86,9 @@ pub(crate) mod crypto_impl {
     #[tein_fn(name = "blake3-bytes")]
     pub fn blake3_bytes(input: Value) -> Result<Value, String> {
         let bytes = super::extract_input_bytes(&input)?;
-        Ok(Value::Bytevector(::blake3::hash(&bytes).as_bytes().to_vec()))
+        Ok(Value::Bytevector(
+            ::blake3::hash(&bytes).as_bytes().to_vec(),
+        ))
     }
 
     /// generate a bytevector of n cryptographically random bytes.

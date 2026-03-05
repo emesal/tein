@@ -8844,8 +8844,7 @@ mod tests {
         // NIST test vectors: SHA-256("") and SHA-512("")
         const SHA256_EMPTY: &str =
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        const SHA512_EMPTY: &str =
-            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+        const SHA512_EMPTY: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
              47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
         // BLAKE3("") from reference implementation
         const BLAKE3_EMPTY: &str =
@@ -8858,7 +8857,9 @@ mod tests {
         #[test]
         fn test_sha256_string() {
             let ctx = Context::builder().standard_env().build().unwrap();
-            let result = ctx.evaluate("(import (tein crypto)) (sha256 \"\")").unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"\")")
+                .unwrap();
             assert_eq!(result, Value::String(SHA256_EMPTY.to_string()));
         }
 
@@ -8883,7 +8884,9 @@ mod tests {
         #[test]
         fn test_sha512_string() {
             let ctx = Context::builder().standard_env().build().unwrap();
-            let result = ctx.evaluate("(import (tein crypto)) (sha512 \"\")").unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha512 \"\")")
+                .unwrap();
             assert_eq!(result, Value::String(SHA512_EMPTY.to_string()));
         }
 
@@ -8921,9 +8924,7 @@ mod tests {
             let hex = ctx
                 .evaluate("(import (tein crypto)) (sha256 \"hello\")")
                 .unwrap();
-            let bv_hex = ctx
-                .evaluate("(sha256 #u8(104 101 108 108 111))")
-                .unwrap();
+            let bv_hex = ctx.evaluate("(sha256 #u8(104 101 108 108 111))").unwrap();
             assert_eq!(hex, bv_hex);
         }
 

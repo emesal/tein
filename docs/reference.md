@@ -34,6 +34,8 @@ lifetime issues.
 | `toml` | yes | enables `(tein toml)` with `toml-parse` / `toml-stringify` | `toml` |
 | `uuid` | yes | enables `(tein uuid)` with `make-uuid`, `uuid?`, `uuid-nil` | `uuid` |
 | `time` | yes | enables `(tein time)` with `current-second`, `current-jiffy` | none (`std::time`) |
+| `regex` | yes | enables `(tein safe-regexp)` with linear-time regex | `regex` |
+| `crypto` | yes | enables `(tein crypto)` with SHA-256, SHA-512, BLAKE3, CSPRNG | `sha2`, `blake3`, `rand` |
 
 Disable all with `default-features = false`:
 
@@ -63,6 +65,7 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 | `tein/uuid` | ✓ | `make-uuid`, `uuid?`, `uuid-nil` (feature: `uuid`) |
 | `tein/time` | ✓ | `current-second`, `current-jiffy`, `jiffies-per-second`, `timezone-offset-seconds` (feature: `time`) |
 | `tein/safe-regexp` | ✓ | `regexp`, `regexp?`, `regexp-search`, `regexp-matches`, `regexp-matches?`, `regexp-replace`, `regexp-replace-all`, `regexp-extract`, `regexp-split`, `regexp-match-count`, `regexp-match-submatch`, `regexp-match->list`, `regexp-fold` (feature: `regex`) — linear-time via rust `regex` crate, no ReDoS |
+| `tein/crypto` | ✓ | `sha256`, `sha256-bytes`, `sha512`, `sha512-bytes`, `blake3`, `blake3-bytes`, `random-bytes`, `random-integer`, `random-float` (feature: `crypto`) — hash fns accept string or bytevector; CSPRNG via `rand` |
 | `tein/file` | ✓ | R7RS file operations with `FsPolicy` enforcement |
 | `tein/load` | ✓ | `load` (VFS-restricted) |
 | `tein/process` | ✓ | `exit`, `emergency-exit`, `command-line`, `get-environment-variable`, `get-environment-variables` |
