@@ -281,6 +281,21 @@ assert_eq!(&*written, b"hello");
 
 The backing `Read`/`Write` is stored in the context's port store and lives until the `Context` is dropped. There is no explicit close API — for resources that must be released promptly, drop the `Context` or use a wrapper with a completion flag.
 
+### Redirecting standard ports
+
+By default, `(current-output-port)` writes to C stdout. You can redirect it to a custom port:
+
+```rust
+let ctx = Context::new_standard()?;
+let port = ctx.open_output_port(my_writer)?;
+ctx.set_current_output_port(&port)?;
+
+// all scheme output now goes through my_writer
+ctx.evaluate("(display \"hello\")")?;
+```
+
+The same works for input and error ports via `set_current_input_port` and `set_current_error_port`.
+
 ---
 
 ## TimeoutContext

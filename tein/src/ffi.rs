@@ -217,6 +217,14 @@ unsafe extern "C" {
     pub fn tein_make_custom_input_port(ctx: sexp, read_proc: sexp) -> sexp;
     pub fn tein_make_custom_output_port(ctx: sexp, write_proc: sexp) -> sexp;
 
+    // parameter setting (for current-output-port etc.)
+    pub fn tein_sexp_set_parameter(ctx: sexp, env: sexp, name: sexp, value: sexp);
+
+    // global symbol accessors for standard port parameters
+    pub fn tein_sexp_global_cur_in_symbol(ctx: sexp) -> sexp;
+    pub fn tein_sexp_global_cur_out_symbol(ctx: sexp) -> sexp;
+    pub fn tein_sexp_global_cur_err_symbol(ctx: sexp) -> sexp;
+
     // reader dispatch table (# syntax extensions)
     pub fn tein_reader_dispatch_set(ctx: sexp, c: c_int, proc: sexp) -> c_int;
     pub fn tein_reader_dispatch_unset(ctx: sexp, c: c_int) -> c_int;
@@ -864,6 +872,34 @@ pub unsafe fn make_custom_input_port(ctx: sexp, read_proc: sexp) -> sexp {
 #[inline]
 pub unsafe fn make_custom_output_port(ctx: sexp, write_proc: sexp) -> sexp {
     unsafe { tein_make_custom_output_port(ctx, write_proc) }
+}
+
+/// set a parameter value in the given environment.
+///
+/// used to override `current-output-port`, `current-input-port`,
+/// `current-error-port`. `name` must be the global symbol for the
+/// parameter (obtained via `sexp_global_cur_*_symbol`).
+#[inline]
+pub unsafe fn sexp_set_parameter(ctx: sexp, env: sexp, name: sexp, value: sexp) {
+    unsafe { tein_sexp_set_parameter(ctx, env, name, value) }
+}
+
+/// return the global symbol for `current-input-port`.
+#[inline]
+pub unsafe fn sexp_global_cur_in_symbol(ctx: sexp) -> sexp {
+    unsafe { tein_sexp_global_cur_in_symbol(ctx) }
+}
+
+/// return the global symbol for `current-output-port`.
+#[inline]
+pub unsafe fn sexp_global_cur_out_symbol(ctx: sexp) -> sexp {
+    unsafe { tein_sexp_global_cur_out_symbol(ctx) }
+}
+
+/// return the global symbol for `current-error-port`.
+#[inline]
+pub unsafe fn sexp_global_cur_err_symbol(ctx: sexp) -> sexp {
+    unsafe { tein_sexp_global_cur_err_symbol(ctx) }
 }
 
 /// copy a named binding from src_env to dst_env, searching both direct
