@@ -20,11 +20,14 @@ serde_json = { version = "1", optional = true }
 toml_crate = { package = "toml", version = "1.0", default-features = false, features = ["parse", "display", "serde"], optional = true }
 uuid = { version = "1", features = ["v4", "fast-rng"], optional = true }
 regex = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+blake3 = { version = "1", optional = true }
+rand = { version = "0.9", optional = true }
 
 [dev-dependencies]
 [features]
 ## json, toml, uuid, and time on by default — disable with `default-features = false` if you don't need them.
-default = ["json", "toml", "uuid", "time", "regex"]
+default = ["json", "toml", "uuid", "time", "regex", "crypto"]
 ## enables `(tein json)` module with `json-parse` and `json-stringify`.
 ## pulls in serde + serde_json.
 json = ["dep:serde_json", "dep:serde", "tein-sexp/serde"]
@@ -40,6 +43,9 @@ time = []
 ## enables `(tein safe-regexp)` module with linear-time regex via rust `regex` crate.
 ## guarantees O(n) matching — no backtracking, no ReDoS.
 regex = ["dep:regex"]
+## enables `(tein crypto)` module with SHA-256, SHA-512, BLAKE3 hashing and CSPRNG.
+## pulls in sha2, blake3, and rand crates.
+crypto = ["dep:sha2", "dep:blake3", "dep:rand"]
 ## enables chibi-scheme GC debugging instrumentation (+4 bytes/object overhead).
 ## adds magic-number header validation and pointer bounds checking before GC mark.
 ## useful for diagnosing heap corruption, dangling pointers, and unrooted locals.

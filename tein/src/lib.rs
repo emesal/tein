@@ -60,6 +60,8 @@
 extern crate self as tein;
 
 mod context;
+#[cfg(feature = "crypto")]
+mod crypto;
 mod error;
 mod ffi;
 pub mod foreign;

@@ -392,6 +392,7 @@ fn feature_enabled(feature: Option<&str>) -> bool {
         Some("uuid") => cfg!(feature = "uuid"),
         Some("time") => cfg!(feature = "time"),
         Some("regex") => cfg!(feature = "regex"),
+        Some("crypto") => cfg!(feature = "crypto"),
         Some(f) => {
             // unknown feature name — conservatively include (build.rs handles gating)
             eprintln!("warning: unknown feature gate in VFS_REGISTRY: {f}");

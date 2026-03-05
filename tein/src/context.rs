@@ -1936,6 +1936,11 @@ impl ContextBuilder {
                 crate::time::time_impl::register_module_time(&context)?;
             }
 
+            #[cfg(feature = "crypto")]
+            if self.standard_env {
+                crate::crypto::crypto_impl::register_module_crypto(&context)?;
+            }
+
             #[cfg(feature = "regex")]
             if self.standard_env {
                 crate::safe_regexp::safe_regexp_impl::register_module_safe_regexp(&context)?;
@@ -8830,5 +8835,184 @@ mod tests {
             .evaluate(r#"(import (tein process)) (exit "bye")"#)
             .unwrap();
         assert_eq!(result, Value::Exit(0));
+    }
+
+    #[cfg(feature = "crypto")]
+    mod crypto_tests {
+        use super::*;
+
+        // NIST test vectors: SHA-256("") and SHA-512("")
+        const SHA256_EMPTY: &str =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        const SHA512_EMPTY: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+             47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
+        // BLAKE3("") from reference implementation
+        const BLAKE3_EMPTY: &str =
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+
+        // SHA-256("hello")
+        const SHA256_HELLO: &str =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        #[test]
+        fn test_sha256_string() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"\")")
+                .unwrap();
+            assert_eq!(result, Value::String(SHA256_EMPTY.to_string()));
+        }
+
+        #[test]
+        fn test_sha256_hello() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"hello\")")
+                .unwrap();
+            assert_eq!(result, Value::String(SHA256_HELLO.to_string()));
+        }
+
+        #[test]
+        fn test_sha256_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (sha256-bytes \"\"))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(32));
+        }
+
+        #[test]
+        fn test_sha512_string() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha512 \"\")")
+                .unwrap();
+            assert_eq!(result, Value::String(SHA512_EMPTY.to_string()));
+        }
+
+        #[test]
+        fn test_sha512_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (sha512-bytes \"\"))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(64));
+        }
+
+        #[test]
+        fn test_blake3_string() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (blake3 \"\")")
+                .unwrap();
+            assert_eq!(result, Value::String(BLAKE3_EMPTY.to_string()));
+        }
+
+        #[test]
+        fn test_blake3_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (blake3-bytes \"\"))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(32));
+        }
+
+        #[test]
+        fn test_hash_string_bytevector_equivalence() {
+            // "hello" as string vs #u8(104 101 108 108 111) must yield the same hash
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let hex = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"hello\")")
+                .unwrap();
+            let bv_hex = ctx.evaluate("(sha256 #u8(104 101 108 108 111))").unwrap();
+            assert_eq!(hex, bv_hex);
+        }
+
+        #[test]
+        fn test_hash_invalid_input() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            let result = ctx.evaluate("(sha256 42)").unwrap();
+            // Result::Err returns a scheme string (see AGENTS.md critical gotchas)
+            assert!(matches!(result, Value::String(s) if s.contains("string or bytevector")));
+        }
+
+        #[test]
+        fn test_random_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (random-bytes 16))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(16));
+        }
+
+        #[test]
+        fn test_random_bytes_zero() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (random-bytes 0))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(0));
+        }
+
+        #[test]
+        fn test_random_bytes_negative() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            let result = ctx.evaluate("(random-bytes -1)").unwrap();
+            assert!(matches!(result, Value::String(s) if s.contains("non-negative")));
+        }
+
+        #[test]
+        fn test_random_integer_bounds() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            // run 100 iterations, all results must be in [0, 10)
+            let result = ctx
+                .evaluate(
+                    "(let loop ((i 0) (ok #t))
+                       (if (= i 100) ok
+                         (let ((r (random-integer 10)))
+                           (loop (+ i 1) (and ok (>= r 0) (< r 10))))))",
+                )
+                .unwrap();
+            assert_eq!(result, Value::Boolean(true));
+        }
+
+        #[test]
+        fn test_random_integer_invalid() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            let result = ctx.evaluate("(random-integer 0)").unwrap();
+            assert!(matches!(result, Value::String(s) if s.contains("positive")));
+        }
+
+        #[test]
+        fn test_random_float_bounds() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            let result = ctx
+                .evaluate(
+                    "(let loop ((i 0) (ok #t))
+                       (if (= i 100) ok
+                         (let ((r (random-float)))
+                           (loop (+ i 1) (and ok (>= r 0.0) (< r 1.0))))))",
+                )
+                .unwrap();
+            assert_eq!(result, Value::Boolean(true));
+        }
+
+        #[test]
+        fn test_crypto_sandbox_access() {
+            let ctx = Context::builder()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
+                .build()
+                .unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"test\")")
+                .unwrap();
+            assert!(matches!(result, Value::String(_)));
+        }
     }
 }

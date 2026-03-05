@@ -289,6 +289,7 @@ fn feature_enabled(feature: Option<&str>) -> bool {
         Some("uuid") => cfg!(feature = "uuid"),
         Some("time") => cfg!(feature = "time"),
         Some("regex") => cfg!(feature = "regex"),
+        Some("crypto") => cfg!(feature = "crypto"),
         Some(f) => {
             // unknown feature name — conservatively include
             eprintln!("cargo:warning=unknown feature gate in VFS_REGISTRY: {f}");
@@ -339,6 +340,21 @@ const DYNAMIC_MODULE_EXPORTS: &[(&str, &[&str])] = &[
             "regexp-match-submatch",
             "regexp-match->list",
             "regexp-fold",
+        ],
+    ),
+    // src/crypto.rs — #[tein_module("crypto")] feature=crypto
+    (
+        "tein/crypto",
+        &[
+            "sha256",
+            "sha256-bytes",
+            "sha512",
+            "sha512-bytes",
+            "blake3",
+            "blake3-bytes",
+            "random-bytes",
+            "random-integer",
+            "random-float",
         ],
     ),
 ];

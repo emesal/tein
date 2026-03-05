@@ -129,6 +129,8 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **`Value` arg in `#[tein_fn]` free fns**: use `value: Value` in the fn signature to accept any scheme value. extraction uses `Value::from_raw`; `Value` is brought into scope automatically by the macro. useful for predicates that accept heterogeneous input (e.g. `uuid?`).
 
+**`#[tein_fn]` supported return types**: `i64`, `f64`, `String`, `bool`, `Value`, `()`, and `Result<T, E>` where T is any of those. `Vec<u8>` is **not** supported — return `Value::Bytevector(vec)` instead. `Value` is the escape hatch for any scheme type not directly mapped (bytevectors, booleans from complex logic, etc.).
+
 **tein_const scheme naming**: constants get no module prefix — `#[tein_const] pub const GREETING` in module `"foo"` → scheme name `greeting`, not `foo-greeting`. free fns do get the prefix (`foo-greet`).
 
 **Result::Err returns a scheme string**: `fn foo() -> Result<i64, String>` — the `Err` path returns `sexp_c_str(msg)` which becomes `Value::String(msg)` in rust. it's not an exception; `(test-error ...)` won't catch it. match on `Value::String` instead. same in internal and ext mode.
