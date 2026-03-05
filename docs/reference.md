@@ -26,6 +26,18 @@
 return borrowed references (`&str` / `&[Value]`) — bind the `Value` before calling to avoid
 lifetime issues.
 
+## Context port methods
+
+| Method | Description |
+|--------|-------------|
+| `ctx.open_input_port(reader)` | wrap a `Read` impl as a scheme input port |
+| `ctx.open_output_port(writer)` | wrap a `Write` impl as a scheme output port |
+| `ctx.set_current_input_port(&port)` | redirect `(current-input-port)` to a custom port |
+| `ctx.set_current_output_port(&port)` | redirect `(current-output-port)` to a custom port |
+| `ctx.set_current_error_port(&port)` | redirect `(current-error-port)` to a custom port |
+| `ctx.read(&port)` | read one s-expression from a port |
+| `ctx.evaluate_port(&port)` | read and eval until EOF |
+
 ## feature flags
 
 | flag | default | description | deps |
