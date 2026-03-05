@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::path::PathBuf;
 
 /// CLI mode.
@@ -276,6 +277,11 @@ fn run_repl(args: &Args) {
                             Ok(value) => println!("{}", value),
                             Err(e) => eprintln!("error: {}", e),
                         }
+                        // Flush chibi's stdout (a C FILE* on fd 1) after each
+                        // expression. rustyline's raw-mode terminal causes libc
+                        // to switch stdout to fully-buffered, so without this
+                        // display/write output only appears on process exit.
+                        let _ = std::io::stdout().flush();
                     }
                 }
             }
