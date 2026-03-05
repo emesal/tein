@@ -340,3 +340,9 @@ fn test_srfi_19() {
 fn test_safe_regexp() {
     run_scheme_test(include_str!("scheme/safe_regexp.scm"));
 }
+
+#[cfg(feature = "crypto")]
+#[test]
+fn test_scheme_tein_crypto() {
+    run_scheme_test(include_str!("scheme/crypto.scm"));
+}
