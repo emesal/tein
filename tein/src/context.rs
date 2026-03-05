@@ -794,6 +794,11 @@ unsafe extern "C" fn json_parse_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "json-parse: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
         let str_sexp = ffi::sexp_car(args);
         if ffi::sexp_stringp(str_sexp) == 0 {
             let msg = "json-parse: expected string argument";
@@ -845,6 +850,11 @@ unsafe extern "C" fn json_stringify_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "json-stringify: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
         let val_sexp = ffi::sexp_car(args);
         match crate::json::json_stringify_raw(ctx, val_sexp) {
             Ok(json) => {
@@ -874,6 +884,11 @@ unsafe extern "C" fn toml_parse_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "toml-parse: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
         let str_sexp = ffi::sexp_car(args);
         if ffi::sexp_stringp(str_sexp) == 0 {
             let msg = "toml-parse: expected string argument";
@@ -923,6 +938,11 @@ unsafe extern "C" fn toml_stringify_trampoline(
     args: ffi::sexp,
 ) -> ffi::sexp {
     unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "toml-stringify: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
         let val_sexp = ffi::sexp_car(args);
         match crate::toml::toml_stringify_raw(ctx, val_sexp) {
             Ok(toml_str) => {
@@ -988,16 +1008,25 @@ unsafe extern "C" fn ux_stub(
 
 // --- trampoline helpers ---
 
-/// Extract the first argument as a `&str`, returning an error sexp on type mismatch.
+/// Extract the first argument as a `&str`, returning an error sexp on type mismatch or missing arg.
 ///
 /// # Safety
-/// `args` must be a valid scheme list with at least one element.
+/// `args` must be a valid scheme list (may be null/empty — arity error returned in that case).
 unsafe fn extract_string_arg<'a>(
     ctx: ffi::sexp,
     args: ffi::sexp,
     fn_name: &str,
 ) -> std::result::Result<&'a str, ffi::sexp> {
     unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = format!("{}: expected 1 argument, got 0", fn_name);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return Err(ffi::make_error(
+                ctx,
+                c_msg.as_ptr(),
+                msg.len() as ffi::sexp_sint_t,
+            ));
+        }
         let first = ffi::sexp_car(args);
         if ffi::sexp_stringp(first) == 0 {
             let msg = format!("{}: expected string argument", fn_name);
@@ -4652,6 +4681,15 @@ mod tests {
     }
 
     #[test]
+    fn test_tein_process_get_env_var_no_args() {
+        // calling (get-environment-variable) with no arguments must not segfault
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable)");
+        assert!(r.is_err(), "expected arity error, got: {:?}", r);
+    }
+
+    #[test]
     fn test_tein_process_get_env_vars() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
@@ -7676,6 +7714,306 @@ mod tests {
             .expect("parse");
         match result {
             Value::String(msg) => assert!(msg.contains("toml-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    // --- trampoline bad-input / arity robustness tests ---
+    //
+    // variadic trampolines (define_fn_variadic, num_args=0) receive sexp_null as
+    // `args` when called with no arguments — chibi does no arity checking. calling
+    // sexp_car on sexp_null is UB (segfault). these tests verify:
+    //   (a) no-args → Err (or scheme error string, per trampoline convention)
+    //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err or error string
+    //   (c) extra args don't crash (variadic; extra args are silently ignored)
+    //
+    // note: json/toml parse/stringify errors return a scheme *string* (not an exception),
+    // per the AGENTS.md convention for native function errors. so we match Value::String.
+    // get-environment-variable, file-exists?, delete-file, and load return make_error
+    // (proper scheme exceptions) → evaluate() returns Err.
+
+    // --- get-environment-variable ---
+
+    #[test]
+    fn test_get_env_var_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable 42)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable #t)");
+        assert!(r.is_err(), "expected type error for boolean arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable '(\"PATH\"))");
+        assert!(r.is_err(), "expected type error for list arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_wrong_type_lambda() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable (lambda (x) x))");
+        assert!(r.is_err(), "expected type error for lambda arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_extra_args_ignored() {
+        // extra args are ignored by variadic trampolines — should not crash
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        // "PATH" is almost certainly set; regardless, we just check no crash
+        let r = ctx.evaluate("(get-environment-variable \"PATH\" \"extra\")");
+        assert!(r.is_ok(), "extra args should be silently ignored: {:?}", r);
+    }
+
+    // --- file-exists? ---
+
+    #[test]
+    fn test_file_exists_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists?)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? 42)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type_symbol() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? 'myfile)");
+        assert!(r.is_err(), "expected type error for symbol arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? #f)");
+        assert!(r.is_err(), "expected type error for boolean arg: {:?}", r);
+    }
+
+    // --- delete-file ---
+
+    #[test]
+    fn test_delete_file_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(delete-file)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[test]
+    fn test_delete_file_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(delete-file 99)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_delete_file_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(delete-file '(\"/tmp/x\"))");
+        assert!(r.is_err(), "expected type error for list arg: {:?}", r);
+    }
+
+    // --- load ---
+
+    #[test]
+    fn test_load_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[test]
+    fn test_load_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load 42)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_load_wrong_type_symbol() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load 'myfile)");
+        assert!(r.is_err(), "expected type error for symbol arg: {:?}", r);
+    }
+
+    // --- json-parse ---
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse)");
+        // returns make_error → Err
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse 42)").unwrap();
+        // type mismatch returns a scheme string (AGENTS.md convention)
+        match r {
+            Value::String(msg) => assert!(msg.contains("json-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse #f)").unwrap();
+        match r {
+            Value::String(msg) => assert!(msg.contains("json-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse '(1 2 3))").unwrap();
+        match r {
+            Value::String(msg) => assert!(msg.contains("json-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_lambda() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse (lambda () 42))").unwrap();
+        match r {
+            Value::String(msg) => assert!(msg.contains("json-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    // --- json-stringify ---
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_stringify_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-stringify)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_stringify_lambda_arg() {
+        // lambdas are not json-serialisable — should get an error string, not a crash
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-stringify (lambda (x) x))").unwrap();
+        match r {
+            Value::String(_) => {} // error string is fine
+            other => panic!("expected error string or string, got {other:?}"),
+        }
+    }
+
+    // --- toml-parse ---
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse 42)").unwrap();
+        match r {
+            Value::String(msg) => assert!(msg.contains("toml-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse #t)").unwrap();
+        match r {
+            Value::String(msg) => assert!(msg.contains("toml-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse '(\"a\" \"b\"))").unwrap();
+        match r {
+            Value::String(msg) => assert!(msg.contains("toml-parse")),
+            other => panic!("expected error string, got {other:?}"),
+        }
+    }
+
+    // --- toml-stringify ---
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_stringify_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-stringify)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_stringify_integer_arg() {
+        // integers are not valid toml root values — should return an error string
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-stringify 42)").unwrap();
+        match r {
+            Value::String(_) => {} // error string is fine
             other => panic!("expected error string, got {other:?}"),
         }
     }
