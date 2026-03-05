@@ -1936,6 +1936,11 @@ impl ContextBuilder {
                 crate::time::time_impl::register_module_time(&context)?;
             }
 
+            #[cfg(feature = "crypto")]
+            if self.standard_env {
+                crate::crypto::crypto_impl::register_module_crypto(&context)?;
+            }
+
             #[cfg(feature = "regex")]
             if self.standard_env {
                 crate::safe_regexp::safe_regexp_impl::register_module_safe_regexp(&context)?;

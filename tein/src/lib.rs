@@ -80,6 +80,8 @@ mod timeout;
 mod toml;
 #[cfg(feature = "uuid")]
 mod uuid;
+#[cfg(feature = "crypto")]
+mod crypto;
 mod value;
 
 pub use context::{Context, ContextBuilder};
