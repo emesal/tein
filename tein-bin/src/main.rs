@@ -192,6 +192,49 @@ fn history_path() -> Option<std::path::PathBuf> {
         .map(|h| std::path::PathBuf::from(h).join(".tein_history"))
 }
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+/// tracks whether the last byte written to stdout was a newline.
+///
+/// used by the REPL to conditionally emit `\n` after eval — avoids
+/// spurious blank lines when scheme output already ends with `\n`.
+/// flushes stdout on every write for immediate streaming output.
+struct TrackingWriter {
+    last_newline: Cell<bool>,
+}
+
+impl TrackingWriter {
+    fn new() -> Self {
+        Self {
+            last_newline: Cell::new(true),
+        }
+    }
+
+    fn last_was_newline(&self) -> bool {
+        self.last_newline.get()
+    }
+}
+
+/// shared wrapper that delegates `Write` to stdout while updating
+/// the `TrackingWriter` state. uses `Rc` because `Context` is `!Send`.
+struct SharedTrackingWriter(Rc<TrackingWriter>);
+
+impl std::io::Write for SharedTrackingWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = std::io::stdout().write(buf)?;
+        if n > 0 {
+            self.0.last_newline.set(buf[n - 1] == b'\n');
+        }
+        std::io::stdout().flush()?;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stdout().flush()
+    }
+}
+
 fn run_repl(args: &Args) {
     use rustyline::DefaultEditor;
     use rustyline::error::ReadlineError;
@@ -206,6 +249,13 @@ fn run_repl(args: &Args) {
             std::process::exit(1);
         }
     };
+
+    let tracker = Rc::new(TrackingWriter::new());
+    let port = ctx
+        .open_output_port(SharedTrackingWriter(tracker.clone()))
+        .expect("failed to create tracking output port");
+    ctx.set_current_output_port(&port)
+        .expect("failed to set output port");
 
     let mut rl = match DefaultEditor::new() {
         Ok(r) => r,
@@ -265,15 +315,7 @@ fn run_repl(args: &Args) {
 
                     if !input.is_empty() {
                         let _ = rl.add_history_entry(&input);
-                        // Wrap in flush-output so chibi flushes before
-                        // returning to rust. rustyline's \r\x1b[K prompt
-                        // redraw erases mid-line output, so we always emit
-                        // \n after eval — see GH #120 for the clean fix.
-                        let flushed = format!(
-                            "(let ((--r-- (begin {}))) (flush-output (current-output-port)) --r--)",
-                            input
-                        );
-                        match ctx.evaluate(&flushed) {
+                        match ctx.evaluate(&input) {
                             Ok(tein::Value::Unspecified) => {}
                             Ok(tein::Value::Exit(n)) => {
                                 if let Some(path) = history_path() {
@@ -281,10 +323,19 @@ fn run_repl(args: &Args) {
                                 }
                                 std::process::exit(n);
                             }
-                            Ok(value) => println!("{}", value),
-                            Err(e) => eprintln!("error: {}", e),
+                            Ok(value) => {
+                                if !tracker.last_was_newline() {
+                                    println!();
+                                }
+                                println!("{}", value);
+                            }
+                            Err(e) => {
+                                if !tracker.last_was_newline() {
+                                    println!();
+                                }
+                                eprintln!("error: {}", e);
+                            }
                         }
-                        println!();
                     }
                 }
             }
@@ -439,6 +490,50 @@ mod tests {
         let args = parse_args(vec!["--sandbox".into(), "--all-modules".into()]).unwrap();
         assert!(args.sandbox);
         assert!(args.all_modules);
+    }
+
+    #[test]
+    fn tracking_writer_tracks_newline() {
+        use std::io::Write;
+
+        let tracker = Rc::new(TrackingWriter::new());
+        let mut writer = SharedTrackingWriter(tracker.clone());
+
+        assert!(tracker.last_was_newline());
+
+        writer.write_all(b"hello").unwrap();
+        assert!(!tracker.last_was_newline());
+
+        writer.write_all(b"\n").unwrap();
+        assert!(tracker.last_was_newline());
+
+        writer.write_all(b"world\n").unwrap();
+        assert!(tracker.last_was_newline());
+
+        writer.write_all(b"no newline").unwrap();
+        assert!(!tracker.last_was_newline());
+    }
+
+    #[test]
+    fn tracking_writer_empty_write() {
+        use std::io::Write;
+
+        let tracker = Rc::new(TrackingWriter::new());
+        let mut writer = SharedTrackingWriter(tracker.clone());
+
+        // initial state: true (as if at start of line)
+        assert!(tracker.last_was_newline());
+
+        // empty write shouldn't change state
+        writer.write_all(b"").unwrap();
+        assert!(tracker.last_was_newline());
+
+        writer.write_all(b"x").unwrap();
+        assert!(!tracker.last_was_newline());
+
+        // empty write after non-newline shouldn't change state
+        writer.write_all(b"").unwrap();
+        assert!(!tracker.last_was_newline());
     }
 
     #[test]
