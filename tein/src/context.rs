@@ -2918,6 +2918,118 @@ impl Context {
         }
     }
 
+    /// set a standard port parameter to the given port value.
+    ///
+    /// `symbol_fn` returns the global symbol for the parameter
+    /// (e.g. `ffi::sexp_global_cur_out_symbol`).
+    fn set_port_parameter(
+        &self,
+        port: &Value,
+        symbol_fn: unsafe fn(ffi::sexp) -> ffi::sexp,
+    ) -> Result<()> {
+        let raw_port = port
+            .as_port()
+            .ok_or_else(|| Error::TypeError(format!("expected port, got {}", port)))?;
+        unsafe {
+            let env = ffi::sexp_context_env(self.ctx);
+            let sym = symbol_fn(self.ctx);
+            ffi::sexp_set_parameter(self.ctx, env, sym, raw_port);
+        }
+        Ok(())
+    }
+
+    /// Set the current output port for this context.
+    ///
+    /// Replaces the port that `(current-output-port)` returns in Scheme code.
+    /// All output operations (`display`, `write`, `newline`, `write-char`)
+    /// that default to `(current-output-port)` will use this port.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    /// impl std::io::Write for SharedWriter {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.lock().unwrap().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_output_port(SharedWriter(buf.clone()))?;
+    /// ctx.set_current_output_port(&port)?;
+    /// ctx.evaluate("(display \"hello\")")?;
+    /// ctx.evaluate("(flush-output (current-output-port))")?;
+    /// assert_eq!(&*buf.lock().unwrap(), b"hello");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_current_output_port(&self, port: &Value) -> Result<()> {
+        self.set_port_parameter(port, ffi::sexp_global_cur_out_symbol)
+    }
+
+    /// Set the current input port for this context.
+    ///
+    /// Replaces the port that `(current-input-port)` returns in Scheme code.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_input_port(std::io::Cursor::new(b"42"))?;
+    /// ctx.set_current_input_port(&port)?;
+    /// let val = ctx.evaluate("(read)")?;
+    /// assert_eq!(val, Value::Integer(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_current_input_port(&self, port: &Value) -> Result<()> {
+        self.set_port_parameter(port, ffi::sexp_global_cur_in_symbol)
+    }
+
+    /// Set the current error port for this context.
+    ///
+    /// Replaces the port that `(current-error-port)` returns in Scheme code.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    /// impl std::io::Write for SharedWriter {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.lock().unwrap().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_output_port(SharedWriter(buf.clone()))?;
+    /// ctx.set_current_error_port(&port)?;
+    /// ctx.evaluate("(display \"oops\" (current-error-port))")?;
+    /// ctx.evaluate("(flush-output (current-error-port))")?;
+    /// assert_eq!(&*buf.lock().unwrap(), b"oops");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_current_error_port(&self, port: &Value) -> Result<()> {
+        self.set_port_parameter(port, ffi::sexp_global_cur_err_symbol)
+    }
+
     /// Read one s-expression from a port.
     ///
     /// Returns the parsed but unevaluated expression.
@@ -6817,6 +6929,91 @@ mod tests {
 
         let output = buf.lock().unwrap();
         assert_eq!(&*output, b"hello");
+    }
+
+    #[test]
+    fn test_set_current_output_port() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("open port");
+
+        ctx.set_current_output_port(&port).expect("set port");
+
+        // display without explicit port arg — should go to our custom port
+        ctx.evaluate("(display \"hello\")").expect("display");
+        ctx.evaluate("(flush-output (current-output-port))")
+            .expect("flush");
+
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"hello");
+    }
+
+    #[test]
+    fn test_set_current_input_port() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"42"))
+            .expect("open port");
+        ctx.set_current_input_port(&port).expect("set port");
+        let val = ctx.evaluate("(read)").expect("read");
+        assert_eq!(val, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_set_current_error_port() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("open port");
+        ctx.set_current_error_port(&port).expect("set port");
+        ctx.evaluate("(display \"oops\" (current-error-port))")
+            .expect("display");
+        ctx.evaluate("(flush-output (current-error-port))")
+            .expect("flush");
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"oops");
+    }
+
+    #[test]
+    fn test_set_port_rejects_non_port() {
+        let ctx = Context::new_standard().expect("context");
+        let err = ctx
+            .set_current_output_port(&Value::Integer(42))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::TypeError(_)),
+            "expected TypeError, got {:?}",
+            err
+        );
     }
 
     #[test]
