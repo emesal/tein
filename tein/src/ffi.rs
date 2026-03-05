@@ -239,7 +239,8 @@ unsafe extern "C" {
     pub fn tein_macro_expand_hook_clear(ctx: sexp);
 
     // runtime VFS registration (tein_shim.c dynamic VFS table)
-    pub fn tein_vfs_register(key: *const c_char, content: *const c_char, length: c_uint);
+    // returns 0 on success, -1 on OOM.
+    pub fn tein_vfs_register(key: *const c_char, content: *const c_char, length: c_uint) -> c_int;
     pub fn tein_vfs_clear_dynamic();
     /// look up a VFS path and return a pointer to its content and length.
     ///
