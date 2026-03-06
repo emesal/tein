@@ -3320,8 +3320,7 @@ impl Context {
                     parts.push(n.to_string());
                 } else {
                     return Err(Error::EvalError(
-                        "register_module: library name elements must be symbols or integers"
-                            .into(),
+                        "register_module: library name elements must be symbols or integers".into(),
                     ));
                 }
                 cursor = ffi::sexp_cdr(cursor);
@@ -3338,11 +3337,9 @@ impl Context {
                         let s = ffi::sexp_symbol_to_string(self.ctx, clause_head);
                         let ptr = ffi::sexp_string_data(s);
                         let len = ffi::sexp_string_size(s) as usize;
-                        let sym = std::str::from_utf8(std::slice::from_raw_parts(
-                            ptr as *const u8,
-                            len,
-                        ))
-                        .unwrap_or("");
+                        let sym =
+                            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                                .unwrap_or("");
                         if sym == "include"
                             || sym == "include-ci"
                             || sym == "include-library-declarations"
@@ -6364,7 +6361,10 @@ mod tests {
         ctx.allow_module_runtime("my/tool");
 
         let after = VFS_ALLOWLIST.with(|cell| cell.borrow().contains(&"my/tool".to_string()));
-        assert!(after, "my/tool should be in allowlist after allow_module_runtime");
+        assert!(
+            after,
+            "my/tool should be in allowlist after allow_module_runtime"
+        );
     }
 
     #[test]
@@ -6375,7 +6375,9 @@ mod tests {
         )
         .expect("register_module");
 
-        let result = ctx.evaluate("(import (my tool)) (greet \"world\")").expect("eval");
+        let result = ctx
+            .evaluate("(import (my tool)) (greet \"world\")")
+            .expect("eval");
         assert_eq!(result, Value::String("hi world".into()));
     }
 
@@ -6428,7 +6430,9 @@ mod tests {
         )
         .expect("first registration");
 
-        let v1 = ctx.evaluate("(import (my versioned)) val").expect("eval v1");
+        let v1 = ctx
+            .evaluate("(import (my versioned)) val")
+            .expect("eval v1");
         assert_eq!(v1, Value::Integer(1));
 
         // re-register (update) — VFS entry is shadowed, but chibi caches the module
@@ -6510,16 +6514,24 @@ mod tests {
             .build()
             .expect("sandboxed + dynamic modules");
 
-        let result = ctx.evaluate(r#"
+        let result = ctx
+            .evaluate(
+                r#"
             (import (tein modules))
             (module-registered? '(nonexistent thing))
-        "#).expect("module-registered? for nonexistent");
+        "#,
+            )
+            .expect("module-registered? for nonexistent");
         assert_eq!(result, Value::Boolean(false));
 
-        let result = ctx.evaluate(r#"
+        let result = ctx
+            .evaluate(
+                r#"
             (import (tein modules))
             (module-registered? '(scheme base))
-        "#).expect("module-registered? for scheme/base");
+        "#,
+            )
+            .expect("module-registered? for scheme/base");
         assert_eq!(result, Value::Boolean(true));
     }
 

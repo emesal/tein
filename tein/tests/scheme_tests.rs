@@ -270,7 +270,8 @@ fn test_scheme_tein_modules() {
         .allow_dynamic_modules()
         .build()
         .expect("sandboxed + dynamic modules context");
-    ctx.evaluate("(import (tein test))").expect("import tein test");
+    ctx.evaluate("(import (tein test))")
+        .expect("import tein test");
     ctx.evaluate(include_str!("scheme/register_module.scm"))
         .expect("register_module scheme tests failed");
 }

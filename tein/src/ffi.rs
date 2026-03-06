@@ -255,8 +255,10 @@ unsafe extern "C" {
     ///
     /// skips dynamic entries — used for collision detection in register_module.
     /// returns null if the path is not in the static VFS.
-    pub fn tein_vfs_lookup_static(full_path: *const c_char, out_length: *mut c_uint)
-        -> *const c_char;
+    pub fn tein_vfs_lookup_static(
+        full_path: *const c_char,
+        out_length: *mut c_uint,
+    ) -> *const c_char;
 }
 
 // convenience wrappers that call our shim layer
