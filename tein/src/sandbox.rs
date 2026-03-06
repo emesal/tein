@@ -123,10 +123,13 @@ thread_local! {
 // unsandboxed contexts use chibi's native versions (no shadow registered).
 //
 // hand-written shadows (functional):
+// - `scheme/eval` — exports eval (from chibi) + environment (tein-environment-internal
+//   trampoline, validates specs against VFS_ALLOWLIST). closes #97.
+// - `scheme/load` — re-exports (tein load) VFS-restricted load + environment trampoline.
+// - `scheme/repl` — interaction-environment delegates to tein-interaction-environment-internal:
+//   a persistent mutable env (INTERACTION_ENV) that accumulates definitions across evals.
 // - `scheme/file` — re-exports (tein file), providing FsPolicy enforcement
-// - `scheme/repl` — neutered interaction-environment via (current-environment)
 // - `scheme/process-context` — re-exports (tein process) with neutered env/argv
-// - `scheme/load` — re-exports (tein load), VFS-restricted load
 // - `srfi/98` — neutered get-environment-variable (always #f)
 //
 // generated shadow stubs (error-on-call): chibi/filesystem, chibi/process,
@@ -137,8 +140,7 @@ thread_local! {
 //
 // modules NOT shadowed and intentionally blocked:
 //
-// - `scheme/eval` — eval + environment. tracked for future shadow (GH issue #97).
-// - `scheme/r5rs` — re-exports scheme/eval; tracked in #106 (blocked on #97).
+// - `scheme/r5rs` — re-exports scheme/eval; tracked in #106.
 
 /// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
 pub(crate) const GATE_OFF: u8 = 0;
@@ -455,10 +457,10 @@ mod registry_tests {
             safe.iter().any(|m| m == "srfi/166"),
             "srfi/166 missing from safe"
         );
-        // excluded modules must not appear
+        // scheme/eval is now in safe set (#97)
         assert!(
-            !safe.iter().any(|m| m == "scheme/eval"),
-            "scheme/eval should not be in safe set"
+            safe.iter().any(|m| m == "scheme/eval"),
+            "scheme/eval should be in safe set (#97)"
         );
     }
 
