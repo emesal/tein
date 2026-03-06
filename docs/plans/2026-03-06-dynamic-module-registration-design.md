@@ -1,6 +1,6 @@
 # dynamic module registration
 
-**issue**: (to be filed)
+**issue**: #132
 **date**: 2026-03-06
 **status**: design
 

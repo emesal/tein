@@ -104,6 +104,8 @@ tests/           — scheme_tests.rs (integration runner), scheme/*.scm
 
 **cdylib extension flow**: `ctx.load_extension(path)` → `libloading::Library::new(path)` → resolves `tein_ext_init` symbol → builds `TeinExtApi` vtable populated with trampolines into `ffi::*` → sets `FOREIGN_STORE_PTR` + `EXT_API` thread-locals → calls `tein_ext_init(ctx, &api)`. the extension's generated init fn (from `#[tein_module("name", ext = true)]`) checks API version, stores api pointer in `__TEIN_API` thread-local, calls `register_vfs_module`/`register_foreign_type`/`define_fn_variadic` through vtable. for ext foreign types, `ext_trampoline_register_type` builds `ExtTypeEntry` in `ForeignStore` with `TeinMethodFn` pointers; dispatch routes through `MethodLookup::Ext { func, is_mut }` passing `*mut c_void` and the api table. the shared library is leaked (no unload). `EXT_API` is also set during `evaluate()`/`call()` so ext method dispatch has access to the vtable at any time.
 
+**dynamic module registration flow**: `ctx.register_module(source)` → sexp_read to parse define-library → extract library name → collision check via `tein_vfs_lookup_static` (rejects built-in modules) → reject `(include ...)` → register source as `/vfs/lib/<path>.sld` via `tein_vfs_register` → append to live `VFS_ALLOWLIST`. scheme-side: `(tein modules)` exports `register-module` (trampoline via CONTEXT_PTR → `ctx.register_module()`) and `module-registered?`. gated in sandbox via `.allow_dynamic_modules()` (= `.allow_module("tein/modules")`). chibi caches modules after first import — re-registration does not invalidate.
+
 **dependency graph**: extension crates depend on `tein-ext` + `tein-macros`, never on `tein`. the macro emits `tein_ext::*` references resolved at extension compile time. the host (`tein`) depends on `tein-ext` for the vtable types.
 
 **thread safety**: Context is intentionally !Send + !Sync. chibi contexts are not thread-safe. one context per thread. TimeoutContext wraps a Context on a dedicated thread for wall-clock deadlines. ThreadLocalContext generalises this pattern with persistent/fresh modes. fuel counters are thread-local.
@@ -158,6 +160,18 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **`Value::Exit(i32)` is not a scheme type**: produced only by `check_exit()` when `EXIT_REQUESTED` thread-local is set. `Value::from_raw()` never produces it — do not add it to the type-checking dispatch in `from_raw`. `to_raw()` and `sexp_bridge` both return `Err` for `Exit`. used by embedders (and `tein-bin`) to distinguish an `(exit n)` escape from a normal return value.
 
 **`tein-bin` crate**: binary crate (`publish = false`), produces the `tein` executable. `rustyline` is a regular dep of `tein-bin`, not a dev-dep of `tein`.
+
+**`CONTEXT_PTR` thread-local**: raw `*const Context` set during `evaluate()`/`call()`/`evaluate_port()`/`read()` alongside `FOREIGN_STORE_PTR`. lets trampolines call `Context` methods directly (e.g. `register_module`). cleared via `ContextPtrGuard` RAII on all exit paths. NOT set during `load_extension()`.
+
+**`(tein modules)` is `default_safe: false`**: must use `.allow_dynamic_modules()` to make it available in sandboxed contexts. without it, the VFS gate blocks `(import (tein modules))`.
+
+**chibi module cache vs dynamic re-registration**: `register_module` updates the VFS entry but chibi caches module environments after first `(import ...)`. a second `(import (my tool))` in the same context returns the cached (old) version. fresh context or `ManagedContext::reset()` required for updated imports.
+
+**`register_module` collision check**: rejects if module `.sld` exists in the *static* VFS table (built-in modules). dynamic-over-dynamic is allowed (update semantics). collision check uses `tein_vfs_lookup_static` which skips the dynamic linked list.
+
+**`register_module` requires `(begin ...)`**: `(include ...)`, `(include-ci ...)`, and `(include-library-declarations ...)` are rejected. dynamically registered modules must be self-contained.
+
+**`register-module` trampoline owns source string**: the trampoline copies the scheme string arg to a rust `String` before calling `register_module`, because `register_module` calls `sexp_read` which may trigger GC and relocate the original scheme string.
 
 ## adding a new scheme type
 
