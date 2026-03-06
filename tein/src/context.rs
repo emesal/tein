@@ -1330,13 +1330,13 @@ unsafe extern "C" fn environment_trampoline(
             sym_name.as_ptr(),
             "mutable-environment".len() as ffi::sexp_sint_t,
         );
+        // sym is an interned symbol — immortal in chibi's symbol table, no root needed.
 
         // build quoted-spec list: (mutable-environment '(scheme base) '(scheme write) ...)
         // each arg is already an evaluated list like (scheme base), so we quote them
         // for evaluation.
         let quote_sym = ffi::sexp_intern(ctx, c"quote".as_ptr(), 5);
-        let mut expr_parts = ffi::get_null();
-        let _parts_root = ffi::GcRoot::new(ctx, expr_parts);
+        // quote_sym is an interned symbol — immortal, no root needed.
 
         // walk args in reverse to build the list via cons
         let mut arg_vec: Vec<ffi::sexp> = Vec::new();
@@ -1346,16 +1346,26 @@ unsafe extern "C" fn environment_trampoline(
             cursor = ffi::sexp_cdr(cursor);
         }
 
+        let mut expr_parts = ffi::get_null();
         for spec in arg_vec.iter().rev() {
-            // build (quote spec) = (list quote_sym spec)
+            // root spec (from arg_vec — Rust heap, invisible to chibi GC)
+            let _spec_root = ffi::GcRoot::new(ctx, *spec);
+            // root the accumulator before each allocation
+            let _tail_root = ffi::GcRoot::new(ctx, expr_parts);
+
+            // build (quote spec) = (quote_sym . (spec . ()))
             let quoted_inner = ffi::sexp_cons(ctx, *spec, ffi::get_null());
             if ffi::sexp_exceptionp(quoted_inner) != 0 {
                 return quoted_inner;
             }
+            let _inner_root = ffi::GcRoot::new(ctx, quoted_inner);
+
             let quoted = ffi::sexp_cons(ctx, quote_sym, quoted_inner);
             if ffi::sexp_exceptionp(quoted) != 0 {
                 return quoted;
             }
+            let _quoted_root = ffi::GcRoot::new(ctx, quoted);
+
             expr_parts = ffi::sexp_cons(ctx, quoted, expr_parts);
             if ffi::sexp_exceptionp(expr_parts) != 0 {
                 return expr_parts;
@@ -1363,6 +1373,7 @@ unsafe extern "C" fn environment_trampoline(
         }
 
         // prepend the mutable-environment symbol
+        let _parts_root = ffi::GcRoot::new(ctx, expr_parts);
         let expr = ffi::sexp_cons(ctx, sym, expr_parts);
         if ffi::sexp_exceptionp(expr) != 0 {
             return expr;
@@ -8737,6 +8748,39 @@ mod tests {
             .evaluate("(import (scheme eval)) (eval 42 (environment))")
             .expect("eval literal in empty env");
         assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_environment_trampoline_multi_spec_gc() {
+        // Multi-spec environment call — exercises the cons loop with 3+ specs.
+        // Under the GC rooting bug, the partial list could be collected mid-loop
+        // under heap pressure. Use `--features debug-chibi` for GC instrumentation.
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval))\
+                 (eval '(+ 1 2) (environment '(scheme base) '(scheme write) '(scheme cxr)))",
+            )
+            .expect("multi-spec environment should work");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_environment_trampoline_multi_spec_gc() {
+        // Same but sandboxed — allowlist check + multi-spec cons loop both exercised.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval))\
+                 (eval '(+ 10 20) (environment '(scheme base) '(scheme write) '(scheme cxr)))",
+            )
+            .expect("sandboxed multi-spec environment should work");
+        assert_eq!(result, Value::Integer(30));
     }
 
     #[test]
