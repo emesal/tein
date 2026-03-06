@@ -261,6 +261,20 @@ fn test_scheme_docs() {
     run_scheme_test_with_module(include_str!("scheme/docs.scm"));
 }
 
+#[test]
+fn test_scheme_tein_modules() {
+    use tein::sandbox::Modules;
+    let ctx = tein::Context::builder()
+        .standard_env()
+        .sandboxed(Modules::Safe)
+        .allow_dynamic_modules()
+        .build()
+        .expect("sandboxed + dynamic modules context");
+    ctx.evaluate("(import (tein test))").expect("import tein test");
+    ctx.evaluate(include_str!("scheme/register_module.scm"))
+        .expect("register_module scheme tests failed");
+}
+
 // ── ext module tests ──────────────────────────────────────────────────────────
 
 /// resolve the test extension shared library path.
