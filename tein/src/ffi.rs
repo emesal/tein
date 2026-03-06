@@ -251,6 +251,14 @@ unsafe extern "C" {
     ///
     /// returns null if the path is not registered in the VFS (static or dynamic).
     pub fn tein_vfs_lookup(full_path: *const c_char, out_length: *mut c_uint) -> *const c_char;
+    /// look up a VFS path in the static (compile-time) table only.
+    ///
+    /// skips dynamic entries — used for collision detection in register_module.
+    /// returns null if the path is not in the static VFS.
+    pub fn tein_vfs_lookup_static(
+        full_path: *const c_char,
+        out_length: *mut c_uint,
+    ) -> *const c_char;
 }
 
 // convenience wrappers that call our shim layer
@@ -675,6 +683,10 @@ pub unsafe fn sexp_release_object(ctx: sexp, x: sexp) {
 /// returns `None` if the path is not in the VFS. the returned slice borrows
 /// from static (compiled-in) or thread-local (dynamic) storage and is valid
 /// for the lifetime of the context.
+///
+/// # Safety
+/// The VFS static table and the thread-local dynamic linked list must be
+/// initialised (i.e. called from within a context that has been built).
 #[inline]
 pub unsafe fn vfs_lookup(path: &std::ffi::CStr) -> Option<&[u8]> {
     unsafe {
@@ -685,6 +697,23 @@ pub unsafe fn vfs_lookup(path: &std::ffi::CStr) -> Option<&[u8]> {
         } else {
             Some(std::slice::from_raw_parts(ptr as *const u8, len as usize))
         }
+    }
+}
+
+/// Check if a path exists in the static (compile-time) VFS table.
+///
+/// Returns `true` if the path is a built-in module. Does NOT check
+/// dynamic (runtime-registered) entries. Used by `register_module`
+/// for collision detection.
+///
+/// # Safety
+/// The VFS static table must be initialised (i.e. called from within a
+/// context that has been built via `ContextBuilder`).
+#[inline]
+pub unsafe fn vfs_static_exists(path: &std::ffi::CStr) -> bool {
+    unsafe {
+        let ptr = tein_vfs_lookup_static(path.as_ptr(), std::ptr::null_mut());
+        !ptr.is_null()
     }
 }
 

@@ -173,6 +173,16 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
+        path: "tein/modules",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: false,
+        source: VfsSource::Dynamic,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
         path: "tein/time",
         deps: &[],
         files: &["lib/tein/time.sld", "lib/tein/time.scm"],

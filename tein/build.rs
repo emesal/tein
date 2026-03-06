@@ -357,6 +357,8 @@ const DYNAMIC_MODULE_EXPORTS: &[(&str, &[&str])] = &[
             "random-float",
         ],
     ),
+    // src/context.rs — register_modules_module() trampolines
+    ("tein/modules", &["register-module", "module-registered?"]),
 ];
 
 /// extract exported binding names from each module's `.sld` file.
