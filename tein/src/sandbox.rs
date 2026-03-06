@@ -455,10 +455,10 @@ mod registry_tests {
             safe.iter().any(|m| m == "srfi/166"),
             "srfi/166 missing from safe"
         );
-        // excluded modules must not appear
+        // scheme/eval is now in safe set (#97)
         assert!(
-            !safe.iter().any(|m| m == "scheme/eval"),
-            "scheme/eval should not be in safe set"
+            safe.iter().any(|m| m == "scheme/eval"),
+            "scheme/eval should be in safe set (#97)"
         );
     }
 

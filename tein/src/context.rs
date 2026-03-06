@@ -1236,6 +1236,227 @@ unsafe extern "C" fn load_trampoline(
     }
 }
 
+// --- (scheme eval) / (scheme repl) trampolines ---
+
+/// Convert a scheme import spec list like `(scheme base)` to a path string `"scheme/base"`.
+///
+/// Each element must be a symbol (converted via `sexp_symbol_to_string`) or an
+/// integer (converted via `sexp_unbox_fixnum`). Returns `Err(error_sexp)` on
+/// malformed input.
+unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<String, ffi::sexp> {
+    unsafe {
+        let mut parts = Vec::new();
+        let mut cursor = spec;
+        while ffi::sexp_pairp(cursor) != 0 {
+            let elem = ffi::sexp_car(cursor);
+            if ffi::sexp_symbolp(elem) != 0 {
+                let s = ffi::sexp_symbol_to_string(ctx, elem);
+                let ptr = ffi::sexp_string_data(s);
+                let len = ffi::sexp_string_size(s) as usize;
+                let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                parts.push(String::from_utf8_lossy(slice).into_owned());
+            } else if ffi::sexp_integerp(elem) != 0 {
+                let n = ffi::sexp_unbox_fixnum(elem);
+                parts.push(n.to_string());
+            } else {
+                let msg = "environment: import spec elements must be symbols or integers";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                return Err(ffi::make_error(
+                    ctx,
+                    c_msg.as_ptr(),
+                    msg.len() as ffi::sexp_sint_t,
+                ));
+            }
+            cursor = ffi::sexp_cdr(cursor);
+        }
+        Ok(parts.join("/"))
+    }
+}
+
+/// Convert a path string like `"scheme/base"` to a scheme import spec list `(scheme base)`.
+///
+/// Splits on `/`; each segment becomes a symbol via `sexp_intern`, unless it
+/// parses as an integer (for SRFI numbers). Builds the list in reverse via
+/// `sexp_cons`. Returns `Err(())` on allocation failure.
+unsafe fn path_to_spec(ctx: ffi::sexp, path: &str) -> std::result::Result<ffi::sexp, ()> {
+    unsafe {
+        let segments: Vec<&str> = path.split('/').collect();
+        let mut list = ffi::get_null();
+        let _list_root = ffi::GcRoot::new(ctx, list);
+
+        // build in reverse order so cons produces the right sequence
+        for seg in segments.iter().rev() {
+            let elem = if let Ok(n) = seg.parse::<i64>() {
+                ffi::sexp_make_fixnum(n)
+            } else {
+                let c_seg = CString::new(*seg).map_err(|_| ())?;
+                ffi::sexp_intern(ctx, c_seg.as_ptr(), seg.len() as ffi::sexp_sint_t)
+            };
+            list = ffi::sexp_cons(ctx, elem, list);
+            if ffi::sexp_exceptionp(list) != 0 {
+                return Err(());
+            }
+        }
+        Ok(list)
+    }
+}
+
+/// `environment` trampoline: validates import specs against VFS allowlist, then
+/// delegates to chibi's `mutable-environment` and makes the result immutable.
+///
+/// registered as `tein-environment-internal`. used by `(scheme eval)` and
+/// `(scheme load)` VFS shadows which export it as `environment`.
+///
+/// in sandboxed contexts, each import spec is checked against `VFS_ALLOWLIST`.
+/// disallowed modules produce an error. in unsandboxed contexts, all specs are
+/// passed through unconditionally.
+unsafe extern "C" fn environment_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // in sandboxed mode, validate each spec against the VFS allowlist
+        if IS_SANDBOXED.with(|c| c.get()) {
+            let mut cursor = args;
+            while ffi::sexp_pairp(cursor) != 0 {
+                let spec = ffi::sexp_car(cursor);
+                match spec_to_path(ctx, spec) {
+                    Ok(path) => {
+                        let allowed = VFS_ALLOWLIST.with(|cell| {
+                            let list = cell.borrow();
+                            list.iter().any(|a| *a == path)
+                        });
+                        if !allowed {
+                            let msg = format!(
+                                "[sandbox:environment] module ({}) not in allowlist",
+                                path.replace('/', " ")
+                            );
+                            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                            return ffi::make_error(
+                                ctx,
+                                c_msg.as_ptr(),
+                                msg.len() as ffi::sexp_sint_t,
+                            );
+                        }
+                    }
+                    Err(e) => return e,
+                }
+                cursor = ffi::sexp_cdr(cursor);
+            }
+        }
+
+        // build expression: (mutable-environment spec1 spec2 ...)
+        // we evaluate it in the meta env where mutable-environment is defined.
+        let meta_env = ffi::sexp_global_meta_env(ctx);
+        let _meta_root = ffi::GcRoot::new(ctx, meta_env);
+
+        let sym_name = c"mutable-environment";
+        let sym = ffi::sexp_intern(
+            ctx,
+            sym_name.as_ptr(),
+            "mutable-environment".len() as ffi::sexp_sint_t,
+        );
+
+        // build quoted-spec list: (mutable-environment '(scheme base) '(scheme write) ...)
+        // each arg is already an evaluated list like (scheme base), so we quote them
+        // for evaluation.
+        let quote_sym = ffi::sexp_intern(ctx, c"quote".as_ptr(), 5);
+        let mut expr_parts = ffi::get_null();
+        let _parts_root = ffi::GcRoot::new(ctx, expr_parts);
+
+        // walk args in reverse to build the list via cons
+        let mut arg_vec: Vec<ffi::sexp> = Vec::new();
+        let mut cursor = args;
+        while ffi::sexp_pairp(cursor) != 0 {
+            arg_vec.push(ffi::sexp_car(cursor));
+            cursor = ffi::sexp_cdr(cursor);
+        }
+
+        for spec in arg_vec.iter().rev() {
+            // build (quote spec) = (list quote_sym spec)
+            let quoted_inner = ffi::sexp_cons(ctx, *spec, ffi::get_null());
+            if ffi::sexp_exceptionp(quoted_inner) != 0 {
+                return quoted_inner;
+            }
+            let quoted = ffi::sexp_cons(ctx, quote_sym, quoted_inner);
+            if ffi::sexp_exceptionp(quoted) != 0 {
+                return quoted;
+            }
+            expr_parts = ffi::sexp_cons(ctx, quoted, expr_parts);
+            if ffi::sexp_exceptionp(expr_parts) != 0 {
+                return expr_parts;
+            }
+        }
+
+        // prepend the mutable-environment symbol
+        let expr = ffi::sexp_cons(ctx, sym, expr_parts);
+        if ffi::sexp_exceptionp(expr) != 0 {
+            return expr;
+        }
+        let _expr_root = ffi::GcRoot::new(ctx, expr);
+
+        // evaluate in meta env
+        let result = ffi::sexp_evaluate(ctx, expr, meta_env);
+        if ffi::sexp_exceptionp(result) != 0 {
+            return result;
+        }
+
+        // make the resulting environment immutable (r7rs: environment returns immutable envs)
+        // note: sexp_make_immutable_op mutates in place and returns #t/#f,
+        // so we return `result` (the env), not the make_immutable return value.
+        let imm = ffi::sexp_make_immutable(ctx, result);
+        if ffi::sexp_exceptionp(imm) != 0 {
+            return imm;
+        }
+        result
+    }
+}
+
+/// `interaction-environment` trampoline: returns a persistent mutable env
+/// containing all VFS-allowlisted modules.
+///
+/// registered as `tein-interaction-environment-internal`. used by `(scheme repl)`
+/// VFS shadow which exports it as `interaction-environment`.
+///
+/// the env is lazily created on first call and cached in `INTERACTION_ENV`
+/// thread-local. subsequent calls return the same env, allowing definitions
+/// to accumulate across evals (r7rs compliance).
+unsafe extern "C" fn interaction_environment_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // return cached env if already created
+        let cached = INTERACTION_ENV.with(|cell| cell.get());
+        if !cached.is_null() {
+            return cached;
+        }
+
+        // return the current context env as the interaction environment.
+        // in sandboxed mode this is the restricted null env that already has
+        // all allowed imports available. definitions accumulate here across
+        // evals, satisfying r7rs's requirement for a mutable interaction env.
+        //
+        // r7rs technically says interaction-environment should be a separate
+        // env, but using the context env is correct for our embedding model
+        // where each Context is a single-use evaluation scope.
+        let result = ffi::sexp_context_env(ctx);
+        if ffi::sexp_exceptionp(result) != 0 {
+            return result;
+        }
+
+        // GC-root and cache
+        ffi::sexp_preserve_object(ctx, result);
+        INTERACTION_ENV.with(|cell| cell.set(result));
+
+        result
+    }
+}
+
 // --- (tein process) trampolines ---
 
 /// `get-environment-variable` trampoline: returns env var value or `#f`.
@@ -1997,6 +2218,7 @@ impl ContextBuilder {
             if self.standard_env {
                 context.register_file_module()?;
                 context.register_load_module()?;
+                context.register_eval_module()?;
                 context.register_process_module()?;
             }
 
@@ -3234,6 +3456,23 @@ impl Context {
     /// `(export (rename tein-load-vfs-internal load))` in `load.sld`.
     fn register_load_module(&self) -> Result<()> {
         self.define_fn_variadic("tein-load-vfs-internal", load_trampoline)?;
+        Ok(())
+    }
+
+    /// Register the `environment` and `interaction-environment` trampolines.
+    ///
+    /// `tein-environment-internal` validates import specs against the VFS
+    /// allowlist and delegates to chibi's `mutable-environment`. Used by
+    /// `(scheme eval)` and `(scheme load)` shadows.
+    ///
+    /// `tein-interaction-environment-internal` returns a persistent mutable env
+    /// for REPL interaction. Used by `(scheme repl)` shadow.
+    fn register_eval_module(&self) -> Result<()> {
+        self.define_fn_variadic("tein-environment-internal", environment_trampoline)?;
+        self.define_fn_variadic(
+            "tein-interaction-environment-internal",
+            interaction_environment_trampoline,
+        )?;
         Ok(())
     }
 
@@ -4524,6 +4763,22 @@ mod tests {
     // --- phase 2: restricted environments (module-level sandboxing) ---
 
     #[test]
+    fn test_env_trampoline_direct_unsandboxed() {
+        // verify the trampoline works in a non-sandboxed standard env
+        let ctx = Context::new_standard().unwrap();
+        // first, verify chibi's native environment works
+        let r1 = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 1 2) (environment '(scheme base)))")
+            .expect("native environment should work");
+        assert_eq!(r1, Value::Integer(3));
+        // now test our trampoline
+        let result = ctx
+            .evaluate("(eval '(+ 1 2) (tein-environment-internal '(scheme base)))")
+            .expect("trampoline should work unsandboxed");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
     fn test_sandboxed_modules_safe_arithmetic() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
@@ -4536,13 +4791,11 @@ mod tests {
             .evaluate("(import (scheme base)) (+ 1 2)")
             .expect("should work");
         assert_eq!(result, Value::Integer(3));
-        // modules outside safe set are blocked
-        let err = ctx.evaluate("(import (scheme eval))").unwrap_err();
-        assert!(
-            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
-            "scheme/eval should be blocked in Modules::Safe, got: {:?}",
-            err
-        );
+        // scheme/eval is now in Safe — verify it works (#97)
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 1 2) (environment '(scheme base)))")
+            .expect("scheme/eval should work in Safe");
+        assert_eq!(result, Value::Integer(3));
     }
 
     #[test]
@@ -5510,9 +5763,9 @@ mod tests {
         let r = ctx.evaluate("sandbox-sum").expect("read sum");
         assert_eq!(r, Value::Integer(6));
 
-        // eval is NOT importable (scheme/eval not in allowlist) — UX stub fires
+        // scheme/eval is NOT in this custom allowlist (only scheme/base) — should be blocked
         let err = ctx.evaluate("(import (scheme eval))");
-        assert!(err.is_err(), "scheme/eval should be blocked by sandbox");
+        assert!(err.is_err(), "scheme/eval should be blocked by Modules::only([scheme/base])");
     }
 
     #[test]
@@ -7624,10 +7877,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_eval_escape_blocked() {
-        // env-escape names are not defined in sandboxed(Modules::Safe) null env.
-        // they cannot be imported (scheme/eval is excluded from Safe), so any
-        // attempt to call them must fail — either undefined or import-blocked.
+    fn test_sandbox_eval_contained() {
+        // eval in sandbox can only access allowed modules via environment (#97)
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
@@ -7635,37 +7886,44 @@ mod tests {
             .build()
             .unwrap();
 
-        // (import (scheme eval)) must be blocked — scheme/eval is not in Safe
-        let err = ctx.evaluate("(import (scheme eval))").unwrap_err();
-        assert!(
-            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
-            "scheme/eval import should fail in Modules::Safe, got: {:?}",
-            err
-        );
+        // eval works with allowed modules
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 1 2) (environment '(scheme base)))")
+            .expect("eval with allowed module should work");
+        assert_eq!(result, Value::Integer(3));
 
-        // eval itself is not in scope (not defined in null env), so any call errors
-        let err = ctx.evaluate("(eval '(+ 1 2) #f)").unwrap_err();
+        // environment with disallowed module fails
+        // (scheme regex) is default_safe: false — not in Safe allowlist
+        let err = ctx
+            .evaluate("(import (scheme eval)) (environment '(scheme regex))")
+            .unwrap_err();
         assert!(
-            err.to_string().contains("eval") || matches!(err, Error::EvalError(_)),
-            "eval call should error in sandboxed env, got: {:?}",
+            err.to_string().contains("allowlist")
+                || err.to_string().contains("not found")
+                || matches!(err, Error::EvalError(_)),
+            "disallowed module should error, got: {:?}",
             err
         );
     }
 
     #[test]
-    fn test_sandbox_eval_escape_attempt() {
-        // the classic escape: eval via import of scheme/eval must be blocked
+    fn test_sandbox_eval_environment_disallowed_module() {
+        // environment rejects modules outside the allowlist (#97)
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
             .build()
             .unwrap();
-        // scheme/eval is not in the safe set — import must fail
-        let err = ctx.evaluate("(import (scheme eval))").unwrap_err();
+        // (scheme regex) is not in the safe set — environment should reject it
+        let err = ctx
+            .evaluate("(import (scheme eval)) (environment '(scheme regex))")
+            .unwrap_err();
         assert!(
-            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
-            "scheme/eval escape attempt should fail, got: {:?}",
+            err.to_string().contains("allowlist")
+                || err.to_string().contains("not found")
+                || matches!(err, Error::EvalError(_)),
+            "disallowed module should error, got: {:?}",
             err
         );
     }
@@ -8414,25 +8672,123 @@ mod tests {
     }
 
     #[test]
-    fn test_sandboxed_modules_safe_blocks_scheme_env_escape() {
+    fn test_sandboxed_modules_safe_eval_contained() {
+        // scheme/eval is in Safe but environment validates allowlist (#97)
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
             .build()
             .expect("build");
-        // scheme/eval is not in the safe set — import should fail
+        // import succeeds
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 10 20) (environment '(scheme base)))")
+            .expect("eval with allowed module");
+        assert_eq!(result, Value::Integer(30));
+        // but disallowed module is rejected (scheme/regex is default_safe: false)
         let err = ctx
-            .evaluate("(import (scheme eval))")
-            .expect_err("scheme/eval should be blocked");
+            .evaluate("(import (scheme eval)) (environment '(scheme regex))")
+            .expect_err("scheme/regex should be blocked");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("eval")
-                || msg.contains("module")
-                || msg.contains("import")
-                || msg.contains("not found"),
+            msg.contains("allowlist") || msg.contains("not found") || msg.contains("ast"),
             "unexpected error message: {msg}"
         );
+    }
+
+    #[test]
+    fn test_sandboxed_environment_empty() {
+        // (environment) with no args returns an empty env — eval of a literal works
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval 42 (environment))")
+            .expect("eval literal in empty env");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_sandboxed_environment_via_scheme_load() {
+        // environment accessible from (scheme load) too
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval) (scheme load)) (eval '(+ 10 20) (environment '(scheme base)))",
+            )
+            .expect("eval via scheme/load environment");
+        assert_eq!(result, Value::Integer(30));
+    }
+
+    #[test]
+    fn test_sandboxed_interaction_environment_mutable() {
+        // define a binding in interaction-environment, then retrieve it
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval) (scheme repl))\n\
+                 (eval '(define x 42) (interaction-environment))\n\
+                 (eval 'x (interaction-environment))",
+            )
+            .expect("interaction-environment should be mutable");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_sandboxed_interaction_environment_persistent() {
+        // interaction-environment persists across evaluate calls
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        // first eval: define
+        ctx.evaluate(
+            "(import (scheme eval) (scheme repl))\n\
+             (eval '(define y 99) (interaction-environment))",
+        )
+        .expect("define in interaction-environment");
+        // second eval: retrieve — should still be there
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval) (scheme repl))\n\
+                 (eval 'y (interaction-environment))",
+            )
+            .expect("y should persist");
+        assert_eq!(result, Value::Integer(99));
+    }
+
+    #[test]
+    fn test_sandboxed_interaction_environment_has_base_bindings() {
+        // interaction-environment reflects the context env — bindings are
+        // available after import. import (scheme base) then verify via eval.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme base) (scheme eval) (scheme repl))\n\
+                 (eval '(+ 1 2) (interaction-environment))",
+            )
+            .expect("interaction-environment should have base bindings");
+        assert_eq!(result, Value::Integer(3));
     }
 
     #[test]

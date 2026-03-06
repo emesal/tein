@@ -370,13 +370,15 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/eval: default_safe: false — exports eval + environment
+    // scheme/eval: Embedded entry for unsandboxed contexts. the VFS shadow (below,
+    // near scheme/file shadow) replaces this in sandboxed contexts with
+    // tein-environment-internal trampoline for allowlist validation (#97).
     VfsEntry {
         path: "scheme/eval",
         deps: &[],
         files: &["lib/scheme/eval.sld"],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -461,9 +463,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/load: VFS shadow — re-exports VFS-restricted load from (tein load).
-    // chibi's native (scheme load) exposes unrestricted file loading.
-    // this shadow provides safe load semantics via tein-load-vfs-internal.
+    // scheme/load: VFS shadow — re-exports VFS-restricted load from (tein load)
+    // and sandboxed environment via tein-environment-internal trampoline.
     // see also: tein/load.sld exports load as (rename tein-load-vfs-internal load).
     VfsEntry {
         path: "scheme/load",
@@ -473,9 +474,14 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         default_safe: true,
         source: VfsSource::Shadow,
         feature: None,
-        shadow_sld: Some(
-            "(define-library (scheme load)\n  (import (tein load))\n  (export load))\n",
-        ),
+        shadow_sld: Some("\
+(define-library (scheme load)
+  (import (tein load) (chibi))
+  (export load environment)
+  (begin
+    (define (environment . specs)
+      (apply tein-environment-internal specs))))
+"),
     },
     VfsEntry {
         path: "scheme/list",
@@ -540,15 +546,15 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/repl: default_safe: false — exports interaction-environment (unsafe in sandbox).
-    // two entries: Embedded (chibi native, unsandboxed) + Shadow (neutered, sandboxed).
-    // registry_resolve_deps unions deps across both entries.
+    // scheme/repl: Embedded entry for unsandboxed contexts. the VFS shadow (below)
+    // replaces this in sandboxed contexts with tein-interaction-environment-internal.
+    // both entries are default_safe: true since the shadow is sandbox-safe (#97).
     VfsEntry {
         path: "scheme/repl",
         deps: &[],
         files: &["lib/scheme/repl.sld"],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -755,8 +761,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
-        // r7rs "small" standard — the 14-library bundle. pulls in scheme/eval +
-        // scheme/load so it is NOT safe by default (eval/load bypass the sandbox).
+        // r7rs "small" standard — the 14-library bundle. all deps are now safe
+        // (scheme/eval, scheme/load, scheme/repl use VFS shadows with allowlist
+        // validation, closes #97).
         path: "scheme/small",
         deps: &[
             "scheme/base",
@@ -776,16 +783,14 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         ],
         files: &["lib/scheme/small.sld"],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
     },
     VfsEntry {
-        // r7rs "red" edition — comprehensive re-export bundle. marked default_safe:
-        // false because it pulls scheme/eval + scheme/load as transitive deps, which
-        // would drag them into the safe allowlist and break sandbox isolation.
-        // use .allow_module("scheme/red") to enable explicitly in sandboxed contexts.
+        // r7rs "red" edition — comprehensive re-export bundle. all deps are now
+        // safe (scheme/eval, scheme/load, scheme/repl use VFS shadows, closes #97).
         path: "scheme/red",
         deps: &[
             "scheme/base",
@@ -823,7 +828,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         ],
         files: &["lib/scheme/red.sld"],
         clib: None,
-        default_safe: false,
+        default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
@@ -852,9 +857,35 @@ const VFS_REGISTRY: &[VfsEntry] = &[
           with-input-from-file with-output-to-file))
 "),
     },
-    // scheme/repl: VFS shadow — sandboxed contexts get neutered interaction-environment.
-    // returns (current-environment) = the sandbox's restricted env.
-    // full sandboxed eval/repl tracked in GH issue #97.
+    // scheme/eval: VFS shadow — sandboxed environment validated against VFS allowlist.
+    // environment wraps tein-environment-internal (a variadic trampoline registered
+    // via define_fn_variadic). uses (begin (define ...)) to avoid "importing undefined
+    // variable" warning — the trampoline is registered after shadows are loaded.
+    // eval re-exported from (chibi). closes #97.
+    VfsEntry {
+        path: "scheme/eval",
+        deps: &[],
+        files: &[],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Shadow,
+        feature: None,
+        shadow_sld: Some("\
+(define-library (scheme eval)
+  (import (chibi))
+  (export eval environment)
+  (begin
+    (define (environment . specs)
+      (apply tein-environment-internal specs))))
+"),
+    },
+    // scheme/repl: VFS shadow — sandboxed interaction-environment returns
+    // a persistent mutable env that accumulates definitions across evals.
+    // r7rs compliant: interaction-environment is mutable per context.
+    // uses (begin (define ...)) instead of (export (rename ...)) to avoid
+    // "importing undefined variable" warning during shadow registration —
+    // the trampoline is registered after shadows are loaded.
+    // closes #97.
     VfsEntry {
         path: "scheme/repl",
         deps: &[],
@@ -868,7 +899,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
   (import (chibi))
   (export interaction-environment)
   (begin
-    (define (interaction-environment) (current-environment))))
+    (define (interaction-environment)
+      (tein-interaction-environment-internal))))
 "),
     },
     // scheme/process-context: VFS shadow — provides r7rs process-context interface.
@@ -1632,7 +1664,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/repl dep satisfied via VFS shadow (neutered interaction-environment)
+    // scheme/repl dep satisfied via VFS shadow (sandbox-safe interaction-environment, #97)
     VfsEntry {
         path: "srfi/166/base",
         deps: &[
@@ -2366,7 +2398,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         deps: &["scheme/base", "scheme/write", "scheme/eval"],
         files: &["lib/srfi/64.sld", "lib/srfi/64.scm"],
         clib: None,
-        default_safe: false, // depends on scheme/eval
+        default_safe: true, // scheme/eval is now sandbox-safe (#97)
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
