@@ -466,6 +466,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     // scheme/load: VFS shadow — re-exports VFS-restricted load from (tein load)
     // and sandboxed environment via tein-environment-internal trampoline.
     // see also: tein/load.sld exports load as (rename tein-load-vfs-internal load).
+    // tein-environment-internal is registered into the primitive env before load_standard_env
+    // so it propagates into *chibi-env* and is available via (import (chibi)). (#97)
     VfsEntry {
         path: "scheme/load",
         deps: &["tein/load"],
@@ -858,9 +860,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
 "),
     },
     // scheme/eval: VFS shadow — sandboxed environment validated against VFS allowlist.
-    // environment wraps tein-environment-internal (a variadic trampoline registered
-    // via define_fn_variadic). uses (begin (define ...)) to avoid "importing undefined
-    // variable" warning — the trampoline is registered after shadows are loaded.
+    // tein-environment-internal is registered into the primitive env before load_standard_env
+    // so it propagates into *chibi-env*; the shadow body finds it via (import (chibi)). (#97)
     // eval re-exported from (chibi). closes #97.
     VfsEntry {
         path: "scheme/eval",
@@ -882,10 +883,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     // scheme/repl: VFS shadow — sandboxed interaction-environment returns
     // a persistent mutable env that accumulates definitions across evals.
     // r7rs compliant: interaction-environment is mutable per context.
-    // uses (begin (define ...)) instead of (export (rename ...)) to avoid
-    // "importing undefined variable" warning during shadow registration —
-    // the trampoline is registered after shadows are loaded.
-    // closes #97.
+    // tein-interaction-environment-internal is registered into the primitive env before
+    // load_standard_env, propagating into *chibi-env* for (import (chibi)) access. (#97)
     VfsEntry {
         path: "scheme/repl",
         deps: &[],

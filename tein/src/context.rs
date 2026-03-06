@@ -1273,34 +1273,6 @@ unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<S
     }
 }
 
-/// Convert a path string like `"scheme/base"` to a scheme import spec list `(scheme base)`.
-///
-/// Splits on `/`; each segment becomes a symbol via `sexp_intern`, unless it
-/// parses as an integer (for SRFI numbers). Builds the list in reverse via
-/// `sexp_cons`. Returns `Err(())` on allocation failure.
-unsafe fn path_to_spec(ctx: ffi::sexp, path: &str) -> std::result::Result<ffi::sexp, ()> {
-    unsafe {
-        let segments: Vec<&str> = path.split('/').collect();
-        let mut list = ffi::get_null();
-        let _list_root = ffi::GcRoot::new(ctx, list);
-
-        // build in reverse order so cons produces the right sequence
-        for seg in segments.iter().rev() {
-            let elem = if let Ok(n) = seg.parse::<i64>() {
-                ffi::sexp_make_fixnum(n)
-            } else {
-                let c_seg = CString::new(*seg).map_err(|_| ())?;
-                ffi::sexp_intern(ctx, c_seg.as_ptr(), seg.len() as ffi::sexp_sint_t)
-            };
-            list = ffi::sexp_cons(ctx, elem, list);
-            if ffi::sexp_exceptionp(list) != 0 {
-                return Err(());
-            }
-        }
-        Ok(list)
-    }
-}
-
 /// `environment` trampoline: validates import specs against VFS allowlist, then
 /// delegates to chibi's `mutable-environment` and makes the result immutable.
 ///
@@ -1326,7 +1298,7 @@ unsafe extern "C" fn environment_trampoline(
                     Ok(path) => {
                         let allowed = VFS_ALLOWLIST.with(|cell| {
                             let list = cell.borrow();
-                            list.iter().any(|a| *a == path)
+                            list.contains(&path)
                         });
                         if !allowed {
                             let msg = format!(
@@ -1455,6 +1427,55 @@ unsafe extern "C" fn interaction_environment_trampoline(
 
         result
     }
+}
+
+/// Register `tein-environment-internal` and `tein-interaction-environment-internal`
+/// into a specific chibi env.
+///
+/// Must be called with the primitive env BEFORE `load_standard_env`. init-7.scm
+/// builds `*chibi-env*` by importing all bindings from the primitive env, so any
+/// name registered here propagates into `*chibi-env*` and is available to library
+/// bodies that `(import (chibi))` — including VFS shadow SLDs for `scheme/eval`,
+/// `scheme/load`, and `scheme/repl`. (#97)
+///
+/// Also called via `register_eval_module()` (into the context env after creation)
+/// for non-sandboxed contexts that want direct access to the trampolines.
+/// Re-registering is safe — `sexp_env_define` overwrites silently.
+fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
+    type VariadicFn =
+        unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp;
+    for (name, f) in [
+        (
+            "tein-environment-internal",
+            environment_trampoline as VariadicFn,
+        ),
+        (
+            "tein-interaction-environment-internal",
+            interaction_environment_trampoline as VariadicFn,
+        ),
+    ] {
+        let c_name = CString::new(name).map_err(|_| {
+            Error::EvalError(format!("function name contains null bytes: {}", name))
+        })?;
+        unsafe {
+            let result = ffi::sexp_define_foreign_proc(
+                ctx,
+                env,
+                c_name.as_ptr(),
+                0,
+                ffi::SEXP_PROC_VARIADIC,
+                c_name.as_ptr(),
+                Some(f),
+            );
+            if ffi::sexp_exceptionp(result) != 0 {
+                return Err(Error::EvalError(format!(
+                    "failed to define variadic function '{}'",
+                    name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // --- (tein process) trampolines ---
@@ -1981,6 +2002,14 @@ impl ContextBuilder {
             // embedded VFS, and must happen before sandbox restriction so the
             // restricted env can copy from the full standard env.
             if self.standard_env {
+                // register eval trampolines into the primitive env BEFORE load_standard_env.
+                // init-7.scm builds *chibi-env* by importing ALL bindings from the interaction
+                // env (the primitive env). any name present here ends up in *chibi-env*, making
+                // it available to library bodies that `(import (chibi))` — including our VFS
+                // shadow SLDs for scheme/eval, scheme/load, scheme/repl. (#97)
+                let prim_env = ffi::sexp_context_env(ctx);
+                register_eval_trampolines(ctx, prim_env)?;
+
                 let env = ffi::sexp_context_env(ctx);
                 // H9: chibi uses a char[128] stack buffer for the init file path
                 // and does `version + '0'` without range check. version MUST be a
@@ -3468,12 +3497,8 @@ impl Context {
     /// `tein-interaction-environment-internal` returns a persistent mutable env
     /// for REPL interaction. Used by `(scheme repl)` shadow.
     fn register_eval_module(&self) -> Result<()> {
-        self.define_fn_variadic("tein-environment-internal", environment_trampoline)?;
-        self.define_fn_variadic(
-            "tein-interaction-environment-internal",
-            interaction_environment_trampoline,
-        )?;
-        Ok(())
+        let env = unsafe { ffi::sexp_context_env(self.ctx) };
+        register_eval_trampolines(self.ctx, env)
     }
 
     /// Register `get-environment-variable`, `get-environment-variables`,
@@ -5765,7 +5790,10 @@ mod tests {
 
         // scheme/eval is NOT in this custom allowlist (only scheme/base) — should be blocked
         let err = ctx.evaluate("(import (scheme eval))");
-        assert!(err.is_err(), "scheme/eval should be blocked by Modules::only([scheme/base])");
+        assert!(
+            err.is_err(),
+            "scheme/eval should be blocked by Modules::only([scheme/base])"
+        );
     }
 
     #[test]
