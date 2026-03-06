@@ -3065,6 +3065,214 @@ impl Context {
         });
     }
 
+    /// Register a scheme module from a `define-library` source string.
+    ///
+    /// Parses the library name, validates the form, registers the source into
+    /// the dynamic VFS, and (if sandboxed) appends to the live import allowlist.
+    ///
+    /// The source must use `(begin ...)` for all definitions — `(include ...)`,
+    /// `(include-ci ...)`, and `(include-library-declarations ...)` are not
+    /// supported and will return an error.
+    ///
+    /// # collision detection
+    ///
+    /// Rejects registration if the module already exists in the static
+    /// (compile-time) VFS — prevents shadowing built-in modules like
+    /// `scheme/base` or `tein/json`. Dynamic-over-dynamic shadowing is
+    /// allowed (update semantics for re-registration).
+    ///
+    /// # chibi module caching
+    ///
+    /// Chibi caches module environments after first `(import ...)`. Re-registering
+    /// a module's VFS entry does NOT invalidate the cache. A subsequent import in
+    /// the same context returns the old version. Use a fresh context (or
+    /// `ManagedContext::reset()`) for updated imports.
+    ///
+    /// # errors
+    ///
+    /// - `Error::EvalError` if source is not a valid `define-library` form
+    /// - `Error::EvalError` if library name is empty
+    /// - `Error::EvalError` if module collides with a built-in VFS entry
+    /// - `Error::EvalError` if source contains `(include ...)` or similar
+    /// - `Error::EvalError` if VFS registration fails (OOM)
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// # use tein::{Context, Value};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// ctx.register_module(r#"
+    ///     (define-library (my tool)
+    ///       (import (scheme base))
+    ///       (export greet)
+    ///       (begin (define (greet x) (string-append "hi " x))))
+    /// "#)?;
+    /// let result = ctx.evaluate("(import (my tool)) (greet \"world\")")?;
+    /// assert_eq!(result, Value::String("hi world".into()));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_module(&self, source: &str) -> Result<()> {
+        // step 1: sexp_read the source to get the define-library form
+        let (lib_name_parts, has_forbidden_include) = unsafe {
+            let scheme_str = ffi::sexp_c_str(
+                self.ctx,
+                source.as_ptr() as *const c_char,
+                source.len() as ffi::sexp_sint_t,
+            );
+            if ffi::sexp_exceptionp(scheme_str) != 0 {
+                return Err(Error::EvalError(
+                    "register_module: failed to create scheme string".into(),
+                ));
+            }
+            let _str_root = ffi::GcRoot::new(self.ctx, scheme_str);
+
+            let port = ffi::sexp_open_input_string(self.ctx, scheme_str);
+            if ffi::sexp_exceptionp(port) != 0 {
+                return Err(Error::EvalError(
+                    "register_module: failed to open input port".into(),
+                ));
+            }
+            let _port_root = ffi::GcRoot::new(self.ctx, port);
+
+            let form = ffi::sexp_read(self.ctx, port);
+            if ffi::sexp_exceptionp(form) != 0 || ffi::sexp_eofp(form) != 0 {
+                return Err(Error::EvalError(
+                    "register_module: source is not a valid s-expression".into(),
+                ));
+            }
+            let _form_root = ffi::GcRoot::new(self.ctx, form);
+
+            // validate it's (define-library (name ...) ...)
+            if ffi::sexp_pairp(form) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: expected (define-library ...) form".into(),
+                ));
+            }
+
+            let head = ffi::sexp_car(form);
+            if ffi::sexp_symbolp(head) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: expected (define-library ...) form".into(),
+                ));
+            }
+
+            let head_str = ffi::sexp_symbol_to_string(self.ctx, head);
+            let head_ptr = ffi::sexp_string_data(head_str);
+            let head_len = ffi::sexp_string_size(head_str) as usize;
+            let head_name =
+                std::str::from_utf8(std::slice::from_raw_parts(head_ptr as *const u8, head_len))
+                    .unwrap_or("");
+            if head_name != "define-library" {
+                return Err(Error::EvalError(
+                    "register_module: expected (define-library ...) form".into(),
+                ));
+            }
+
+            // extract library name list
+            let rest = ffi::sexp_cdr(form);
+            if ffi::sexp_pairp(rest) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: define-library has no library name".into(),
+                ));
+            }
+            let name_list = ffi::sexp_car(rest);
+            if ffi::sexp_pairp(name_list) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: library name must be a list of symbols".into(),
+                ));
+            }
+
+            // walk the name list to extract parts
+            let mut parts = Vec::new();
+            let mut cursor = name_list;
+            while ffi::sexp_pairp(cursor) != 0 {
+                let elem = ffi::sexp_car(cursor);
+                if ffi::sexp_symbolp(elem) != 0 {
+                    let s = ffi::sexp_symbol_to_string(self.ctx, elem);
+                    let ptr = ffi::sexp_string_data(s);
+                    let len = ffi::sexp_string_size(s) as usize;
+                    let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                    parts.push(String::from_utf8_lossy(slice).into_owned());
+                } else if ffi::sexp_integerp(elem) != 0 {
+                    let n = ffi::sexp_unbox_fixnum(elem);
+                    parts.push(n.to_string());
+                } else {
+                    return Err(Error::EvalError(
+                        "register_module: library name elements must be symbols or integers"
+                            .into(),
+                    ));
+                }
+                cursor = ffi::sexp_cdr(cursor);
+            }
+
+            // check for forbidden include forms in the library body
+            let mut has_include = false;
+            let mut body = ffi::sexp_cdr(rest);
+            while ffi::sexp_pairp(body) != 0 {
+                let clause = ffi::sexp_car(body);
+                if ffi::sexp_pairp(clause) != 0 {
+                    let clause_head = ffi::sexp_car(clause);
+                    if ffi::sexp_symbolp(clause_head) != 0 {
+                        let s = ffi::sexp_symbol_to_string(self.ctx, clause_head);
+                        let ptr = ffi::sexp_string_data(s);
+                        let len = ffi::sexp_string_size(s) as usize;
+                        let sym = std::str::from_utf8(std::slice::from_raw_parts(
+                            ptr as *const u8,
+                            len,
+                        ))
+                        .unwrap_or("");
+                        if sym == "include"
+                            || sym == "include-ci"
+                            || sym == "include-library-declarations"
+                        {
+                            has_include = true;
+                            break;
+                        }
+                    }
+                }
+                body = ffi::sexp_cdr(body);
+            }
+
+            (parts, has_include)
+        };
+
+        if lib_name_parts.is_empty() {
+            return Err(Error::EvalError(
+                "register_module: library name is empty".into(),
+            ));
+        }
+
+        if has_forbidden_include {
+            return Err(Error::EvalError(
+                "register_module: (include ...) is not supported in dynamically registered modules; use (begin ...) instead".into(),
+            ));
+        }
+
+        // derive VFS path
+        let module_path = lib_name_parts.join("/");
+        let vfs_sld_path = format!("/vfs/lib/{module_path}.sld");
+
+        // collision check — reject if in static VFS
+        let c_vfs_path = CString::new(vfs_sld_path.as_str())
+            .map_err(|_| Error::EvalError("register_module: path contains null bytes".into()))?;
+        let collision = unsafe { ffi::vfs_static_exists(&c_vfs_path) };
+        if collision {
+            return Err(Error::EvalError(format!(
+                "register_module: module '{module_path}' already exists as a built-in module"
+            )));
+        }
+
+        // register into dynamic VFS
+        self.register_vfs_module(&format!("lib/{module_path}.sld"), source)?;
+
+        // update live allowlist
+        self.allow_module_runtime(&module_path);
+
+        Ok(())
+    }
+
     /// Set a Scheme procedure as the macro expansion hook.
     ///
     /// The hook receives `(name unexpanded expanded env)` after each macro
@@ -6027,6 +6235,98 @@ mod tests {
 
         let after = VFS_ALLOWLIST.with(|cell| cell.borrow().contains(&"my/tool".to_string()));
         assert!(after, "my/tool should be in allowlist after allow_module_runtime");
+    }
+
+    #[test]
+    fn test_register_module_basic() {
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (my tool) (import (scheme base)) (export greet) (begin (define (greet x) (string-append \"hi \" x))))",
+        )
+        .expect("register_module");
+
+        let result = ctx.evaluate("(import (my tool)) (greet \"world\")").expect("eval");
+        assert_eq!(result, Value::String("hi world".into()));
+    }
+
+    #[test]
+    fn test_register_module_collision_with_builtin() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (scheme base) (import (scheme base)) (export +) (begin))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("already exists"),
+            "should reject collision with builtin: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_rejects_include() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (my mod) (import (scheme base)) (export x) (include \"foo.scm\"))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("include"),
+            "should reject (include ...): {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_not_define_library() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx.register_module("(+ 1 2)").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("define-library"),
+            "should reject non-define-library: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_dynamic_update() {
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (my versioned) (import (scheme base)) (export val) (begin (define val 1)))",
+        )
+        .expect("first registration");
+
+        let v1 = ctx.evaluate("(import (my versioned)) val").expect("eval v1");
+        assert_eq!(v1, Value::Integer(1));
+
+        // re-register (update) — VFS entry is shadowed, but chibi caches the module
+        ctx.register_module(
+            "(define-library (my versioned) (import (scheme base)) (export val) (begin (define val 2)))",
+        )
+        .expect("second registration should succeed (dynamic-over-dynamic)");
+        // NOTE: chibi's module cache means the import still returns v1
+    }
+
+    #[test]
+    fn test_register_module_sandboxed_importable() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("sandboxed context");
+
+        ctx.register_module(
+            "(define-library (my sandboxed-tool) (import (scheme base)) (export answer) (begin (define answer 42)))",
+        )
+        .expect("register in sandboxed context");
+
+        let result = ctx
+            .evaluate("(import (my sandboxed-tool)) answer")
+            .expect("import dynamically registered module in sandbox");
+        assert_eq!(result, Value::Integer(42));
     }
 
     #[test]
