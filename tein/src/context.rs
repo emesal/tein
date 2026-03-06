@@ -1955,6 +1955,33 @@ impl ContextBuilder {
         self
     }
 
+    /// Enable dynamic module registration from Scheme code.
+    ///
+    /// Makes `(tein modules)` importable in sandboxed contexts, providing
+    /// `register-module` and `module-registered?` to Scheme code.
+    ///
+    /// Without this, `(tein modules)` is blocked by the VFS gate in sandboxed
+    /// contexts. Unsandboxed contexts can always import it.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .allow_dynamic_modules()
+    ///     .build()?;
+    /// ctx.evaluate("(import (tein modules)) #t")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_dynamic_modules(self) -> Self {
+        self.allow_module("tein/modules")
+    }
+
     /// Inject fake environment variables for sandboxed contexts.
     ///
     /// Merges with the default seed (`TEIN_SANDBOX=true`). User entries
@@ -6327,6 +6354,26 @@ mod tests {
             .evaluate("(import (my sandboxed-tool)) answer")
             .expect("import dynamically registered module in sandbox");
         assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_allow_dynamic_modules_builder() {
+        use crate::sandbox::Modules;
+        // verify the builder method doesn't panic and produces a valid context
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + allow_dynamic_modules");
+
+        // (tein modules) should be importable
+        let result = ctx.evaluate("(import (tein modules)) #t");
+        assert!(
+            result.is_ok(),
+            "(tein modules) should be importable with allow_dynamic_modules: {:?}",
+            result.unwrap_err()
+        );
     }
 
     #[test]
