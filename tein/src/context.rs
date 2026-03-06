@@ -1514,8 +1514,9 @@ fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
 /// as a new importable module.
 ///
 /// uses `CONTEXT_PTR` thread-local to call `Context::register_module` directly,
-/// avoiding any parsing duplication. CONTEXT_PTR is set by evaluate()/call()
-/// and is guaranteed valid during trampoline execution.
+/// avoiding any parsing duplication. CONTEXT_PTR is set by `evaluate()`,
+/// `call()`, `evaluate_port()`, and `read()` and is guaranteed valid during
+/// trampoline execution.
 ///
 /// returns `#t` on success, raises a scheme error on failure.
 unsafe extern "C" fn register_module_trampoline(
@@ -2397,7 +2398,7 @@ impl ContextBuilder {
                 context.register_modules_module()?;
                 context.register_vfs_module(
                     "lib/tein/modules.sld",
-                    "(define-library (tein modules) (import (chibi)) (export register-module module-registered?))",
+                    "(define-library (tein modules) (import (scheme base)) (export register-module module-registered?))",
                 )?;
             }
 
@@ -6533,6 +6534,136 @@ mod tests {
             )
             .expect("module-registered? for scheme/base");
         assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_allow_dynamic_modules_strict_sandbox() {
+        // Modules::only with only scheme/base — chibi is NOT transitively included.
+        // This is the minimal repro for the (import (chibi)) vs (scheme base) bug in
+        // the inline SLD: if the SLD imports (chibi), the VFS gate rejects it here.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .allow_dynamic_modules()
+            .build()
+            .expect("strict sandboxed + dynamic modules");
+
+        let result = ctx.evaluate("(import (tein modules)) #t");
+        assert!(
+            result.is_ok(),
+            "(import (tein modules)) should succeed in strict sandbox with allow_dynamic_modules: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_register_module_rejects_include_ci() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (my mod) (import (scheme base)) (export x) (include-ci \"foo.scm\"))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("include"),
+            "should reject (include-ci ...): {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_rejects_include_library_declarations() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (my mod) (import (scheme base)) (export x) (include-library-declarations \"foo.sld\"))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("include"),
+            "should reject (include-library-declarations ...): {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_integer_name_component() {
+        // library names may contain integers, e.g. (srfi 1)
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (srfi 999) (import (scheme base)) (export the-answer) (begin (define the-answer 42)))",
+        )
+        .expect("register module with integer name component");
+
+        let result = ctx
+            .evaluate("(import (srfi 999)) the-answer")
+            .expect("import module with integer name");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_module_invalid_name_element() {
+        // library name elements must be symbols or integers — a string should be rejected
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(r#"(define-library ("bad" name) (import (scheme base)) (export x) (begin (define x 1)))"#)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symbols or integers"),
+            "should reject non-symbol/integer name element: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_allow_module_runtime_dedup() {
+        use crate::sandbox::{Modules, VFS_ALLOWLIST};
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("sandboxed context");
+
+        ctx.allow_module_runtime("my/dedup-tool");
+        ctx.allow_module_runtime("my/dedup-tool"); // second call — must not duplicate
+
+        let count = VFS_ALLOWLIST.with(|cell| {
+            cell.borrow()
+                .iter()
+                .filter(|p| *p == "my/dedup-tool")
+                .count()
+        });
+        assert_eq!(count, 1, "allow_module_runtime should not add duplicates");
+    }
+
+    #[test]
+    fn test_register_module_dynamic_update_cache_behavior() {
+        // chibi caches module envs after first import — re-registration must NOT
+        // invalidate the cache; the old value remains visible in the same context.
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (my cached) (import (scheme base)) (export val) (begin (define val 1)))",
+        )
+        .expect("first registration");
+
+        ctx.evaluate("(import (my cached))").expect("first import");
+        let v1 = ctx.evaluate("val").expect("eval v1");
+        assert_eq!(v1, Value::Integer(1));
+
+        ctx.register_module(
+            "(define-library (my cached) (import (scheme base)) (export val) (begin (define val 2)))",
+        )
+        .expect("re-registration should succeed");
+
+        // chibi's module cache means the import still returns v1, not v2
+        let v_after = ctx.evaluate("val").expect("eval after re-registration");
+        assert_eq!(
+            v_after,
+            Value::Integer(1),
+            "chibi module cache should preserve v1 after re-registration"
+        );
     }
 
     #[test]
