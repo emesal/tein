@@ -1508,6 +1508,94 @@ fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
     Ok(())
 }
 
+// --- (tein modules) trampolines ---
+
+/// `register-module` trampoline: registers a define-library source string
+/// as a new importable module.
+///
+/// uses `CONTEXT_PTR` thread-local to call `Context::register_module` directly,
+/// avoiding any parsing duplication. CONTEXT_PTR is set by evaluate()/call()
+/// and is guaranteed valid during trampoline execution.
+///
+/// returns `#t` on success, raises a scheme error on failure.
+unsafe extern "C" fn register_module_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let source = match extract_string_arg(ctx, args, "register-module") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let context_ptr = CONTEXT_PTR.with(|c| c.get());
+        if context_ptr.is_null() {
+            let msg = "register-module: internal error — no active Context";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let context = &*context_ptr;
+
+        // source is a &str borrowed from the scheme string arg; we need an
+        // owned copy because register_module may allocate (sexp_read etc.),
+        // potentially triggering GC which could move the scheme string.
+        let source_owned = source.to_string();
+
+        match context.register_module(&source_owned) {
+            Ok(()) => ffi::get_true(),
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// `module-registered?` trampoline: checks if a module exists in the VFS.
+///
+/// takes a quoted list like `'(my tool)`, converts to path, checks VFS lookup.
+unsafe extern "C" fn module_registered_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "module-registered?: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        let spec = ffi::sexp_car(args);
+        if ffi::sexp_pairp(spec) == 0 {
+            let msg = "module-registered?: argument must be a list, e.g. '(my module)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        let module_path = match spec_to_path(ctx, spec) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        let vfs_sld_path = format!("/vfs/lib/{module_path}.sld");
+        let c_path = match CString::new(vfs_sld_path.as_str()) {
+            Ok(p) => p,
+            Err(_) => return ffi::get_false(),
+        };
+
+        if ffi::vfs_lookup(&c_path).is_some() {
+            ffi::get_true()
+        } else {
+            ffi::get_false()
+        }
+    }
+}
+
 // --- (tein process) trampolines ---
 
 /// `get-environment-variable` trampoline: returns env var value or `#f`.
@@ -2306,6 +2394,11 @@ impl ContextBuilder {
                 context.register_load_module()?;
                 context.register_eval_module()?;
                 context.register_process_module()?;
+                context.register_modules_module()?;
+                context.register_vfs_module(
+                    "lib/tein/modules.sld",
+                    "(define-library (tein modules) (import (chibi)) (export register-module module-registered?))",
+                )?;
             }
 
             // register VFS shadow modules if requested without full sandboxing.
@@ -3797,6 +3890,16 @@ impl Context {
         self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
         self.define_fn_variadic("command-line", command_line_trampoline)?;
         self.define_fn_variadic("exit", exit_trampoline)?;
+        Ok(())
+    }
+
+    /// Register `register-module` and `module-registered?` native functions.
+    ///
+    /// These form the `(tein modules)` scheme API for dynamic module registration.
+    /// Called during `build()` for standard-env contexts.
+    fn register_modules_module(&self) -> Result<()> {
+        self.define_fn_variadic("register-module", register_module_trampoline)?;
+        self.define_fn_variadic("module-registered?", module_registered_trampoline)?;
         Ok(())
     }
 
@@ -6374,6 +6477,50 @@ mod tests {
             "(tein modules) should be importable with allow_dynamic_modules: {:?}",
             result.unwrap_err()
         );
+    }
+
+    #[test]
+    fn test_register_module_from_scheme() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + dynamic modules");
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (import (scheme base))
+            (register-module
+              "(define-library (test tool) (import (scheme base)) (export val) (begin (define val 99)))")
+            (import (test tool))
+            val
+        "#).expect("scheme-side register-module");
+        assert_eq!(result, Value::Integer(99));
+    }
+
+    #[test]
+    fn test_module_registered_predicate_from_scheme() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + dynamic modules");
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (module-registered? '(nonexistent thing))
+        "#).expect("module-registered? for nonexistent");
+        assert_eq!(result, Value::Boolean(false));
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (module-registered? '(scheme base))
+        "#).expect("module-registered? for scheme/base");
+        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]
