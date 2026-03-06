@@ -55,6 +55,15 @@ use std::path::Path;
 /// Ensures the pointer is nulled on all exit paths (early returns, `?`, panic).
 struct ForeignStoreGuard;
 
+/// RAII guard that clears the CONTEXT_PTR thread-local on drop.
+struct ContextPtrGuard;
+
+impl Drop for ContextPtrGuard {
+    fn drop(&mut self) {
+        CONTEXT_PTR.with(|c| c.set(std::ptr::null()));
+    }
+}
+
 impl Drop for ForeignStoreGuard {
     fn drop(&mut self) {
         FOREIGN_STORE_PTR.with(|c| c.set(std::ptr::null()));
@@ -100,6 +109,16 @@ thread_local! {
     /// current TeinExtApi pointer — set during load_extension() so ext method dispatch
     /// can call back into the host. null outside of ext loading and ext method calls.
     pub(crate) static EXT_API: Cell<*const tein_ext::TeinExtApi> = const { Cell::new(std::ptr::null()) };
+    /// raw pointer to the active Context during evaluation.
+    ///
+    /// set by `evaluate()`, `call()`, `evaluate_port()`, and `read()` via
+    /// `ContextPtrGuard` RAII. trampolines (e.g. `register-module`) use this
+    /// to call Context methods without passing `&self` through the C FFI.
+    ///
+    /// same lifetime guarantees as `FOREIGN_STORE_PTR`: the Context outlives
+    /// any trampoline call during evaluation, and the guard clears on all
+    /// exit paths.
+    pub(crate) static CONTEXT_PTR: Cell<*const Context> = const { Cell::new(std::ptr::null()) };
 }
 
 // --- exit escape hatch thread-locals ---
@@ -2500,6 +2519,8 @@ impl Context {
         // access them. guards clear on all exit paths (early returns, `?`, panic).
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
         PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
         let _port_guard = PortStoreGuard;
         // set EXT_API so ext-type method dispatch works during evaluation
@@ -3028,6 +3049,22 @@ impl Context {
         Ok(())
     }
 
+    /// Append a module path to the live VFS allowlist.
+    ///
+    /// Only meaningful in sandboxed contexts (where `VFS_GATE` is `GATE_CHECK`).
+    /// In unsandboxed contexts this is a no-op — the gate never checks the list.
+    ///
+    /// Used by `register_module` to make dynamically registered modules importable.
+    pub(crate) fn allow_module_runtime(&self, path: &str) {
+        use crate::sandbox::VFS_ALLOWLIST;
+        VFS_ALLOWLIST.with(|cell| {
+            let mut list = cell.borrow_mut();
+            if !list.iter().any(|p| p == path) {
+                list.push(path.to_string());
+            }
+        });
+    }
+
     /// Set a Scheme procedure as the macro expansion hook.
     ///
     /// The hook receives `(name unexpanded expanded env)` after each macro
@@ -3331,6 +3368,8 @@ impl Context {
         let _port_guard = PortStoreGuard;
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
 
         unsafe {
             let result = ffi::sexp_read(self.ctx, raw_port);
@@ -3374,6 +3413,8 @@ impl Context {
         let _port_guard = PortStoreGuard;
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
         let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
             EXT_API.with(|c| c.set(api.as_ref() as *const _));
             Some(ExtApiGuard)
@@ -3554,6 +3595,8 @@ impl Context {
 
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
         PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
         let _port_guard = PortStoreGuard;
         let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
@@ -5964,6 +6007,26 @@ mod tests {
         });
 
         drop(ctx);
+    }
+
+    #[test]
+    fn test_allow_module_runtime_appends_to_allowlist() {
+        use crate::sandbox::{Modules, VFS_ALLOWLIST};
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("sandboxed context");
+
+        // verify "my/tool" is not in the allowlist
+        let before = VFS_ALLOWLIST.with(|cell| cell.borrow().contains(&"my/tool".to_string()));
+        assert!(!before, "my/tool should not be in allowlist initially");
+
+        ctx.allow_module_runtime("my/tool");
+
+        let after = VFS_ALLOWLIST.with(|cell| cell.borrow().contains(&"my/tool".to_string()));
+        assert!(after, "my/tool should be in allowlist after allow_module_runtime");
     }
 
     #[test]
