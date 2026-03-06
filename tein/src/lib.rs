@@ -65,6 +65,8 @@ mod crypto;
 mod error;
 mod ffi;
 pub mod foreign;
+#[cfg(feature = "http")]
+mod http;
 #[cfg(feature = "json")]
 mod json;
 pub mod managed;
