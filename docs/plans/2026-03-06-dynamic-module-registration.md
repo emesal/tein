@@ -4,7 +4,7 @@
 
 **Goal:** enable runtime module registration from both rust and scheme, so LLMs can create importable tools inside sandboxed environments.
 
-**Architecture:** three layers — (1) internal `allow_module_runtime` for live allowlist mutation, (2) public `Context::register_module` that parses `define-library`, registers into VFS, updates allowlist, (3) `(tein modules)` scheme API gated behind `allow_dynamic_modules()`. a new C function `tein_vfs_lookup_static` enables collision detection against built-in modules only.
+**Architecture:** three layers — (1) internal `allow_module_runtime` for live allowlist mutation, (2) public `Context::register_module` that parses `define-library`, registers into VFS, updates allowlist, (3) `(tein modules)` scheme API gated behind `allow_dynamic_modules()`. a `CONTEXT_PTR` thread-local (same pattern as `FOREIGN_STORE_PTR`) lets trampolines call `register_module` directly — zero parsing duplication. a new C function `tein_vfs_lookup_static` enables collision detection against built-in modules only.
 
 **Tech Stack:** rust, chibi-scheme C FFI, tein VFS
 
@@ -116,15 +116,80 @@ git commit -m "feat(ffi): expose tein_vfs_lookup_static for collision detection 
 
 ---
 
-### Task 3: add `allow_module_runtime` (layer 1)
+### Task 3: add `CONTEXT_PTR` thread-local + `allow_module_runtime` (layer 1)
 
-internal method on `Context` that appends to the live `VFS_ALLOWLIST` thread-local.
+add a thread-local `*const Context` pointer following the `FOREIGN_STORE_PTR` pattern. this lets scheme trampolines call methods on the live `Context` directly. also add `allow_module_runtime` for live allowlist mutation.
 
 **Files:**
-- Modify: `tein/src/context.rs` (after `register_vfs_module`, ~line 3029)
-- Test: `tein/src/context.rs` (test module, after existing VFS gate tests ~line 5950)
+- Modify: `tein/src/context.rs` (thread-locals ~line 93, RAII guards ~line 53, evaluate/call methods, after `register_vfs_module` ~line 3029)
+- Test: `tein/src/context.rs` (test module)
 
-**Step 1: write failing test**
+**Step 1: add the thread-local and RAII guard**
+
+near the existing `FOREIGN_STORE_PTR` thread-local (~line 99), add:
+
+```rust
+    /// raw pointer to the active Context during evaluation.
+    ///
+    /// set by `evaluate()`, `call()`, `evaluate_port()`, and `read()` via
+    /// `ContextPtrGuard` RAII. trampolines (e.g. `register-module`) use this
+    /// to call Context methods without passing `&self` through the C FFI.
+    ///
+    /// same lifetime guarantees as `FOREIGN_STORE_PTR`: the Context outlives
+    /// any trampoline call during evaluation, and the guard clears on all
+    /// exit paths.
+    pub(crate) static CONTEXT_PTR: Cell<*const Context> = const { Cell::new(std::ptr::null()) };
+```
+
+near the existing `ForeignStoreGuard` (~line 53), add:
+
+```rust
+/// RAII guard that clears the CONTEXT_PTR thread-local on drop.
+struct ContextPtrGuard;
+
+impl Drop for ContextPtrGuard {
+    fn drop(&mut self) {
+        CONTEXT_PTR.with(|c| c.set(std::ptr::null()));
+    }
+}
+```
+
+**Step 2: set CONTEXT_PTR in evaluate(), call(), evaluate_port(), and read()**
+
+in `evaluate()` (~line 2501, after `FOREIGN_STORE_PTR.with`), add:
+
+```rust
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
+```
+
+do the same in `call()` (after `FOREIGN_STORE_PTR.with`), `evaluate_port()` (after `FOREIGN_STORE_PTR.with`), and `read()` (after `FOREIGN_STORE_PTR.with`). each of these already sets `FOREIGN_STORE_PTR` — add the `CONTEXT_PTR` set + guard right after, following the same pattern.
+
+search for all occurrences of `FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store` to find all sites. there should be ~5 (evaluate, call, evaluate_port, read, load_extension). set `CONTEXT_PTR` at all of them except `load_extension` (which runs extension init code, not scheme evaluation — trampolines won't fire there).
+
+**Step 3: add `allow_module_runtime`**
+
+add after `register_vfs_module` (~line 3029):
+
+```rust
+    /// Append a module path to the live VFS allowlist.
+    ///
+    /// Only meaningful in sandboxed contexts (where `VFS_GATE` is `GATE_CHECK`).
+    /// In unsandboxed contexts this is a no-op — the gate never checks the list.
+    ///
+    /// Used by `register_module` to make dynamically registered modules importable.
+    pub(crate) fn allow_module_runtime(&self, path: &str) {
+        use crate::sandbox::VFS_ALLOWLIST;
+        VFS_ALLOWLIST.with(|cell| {
+            let mut list = cell.borrow_mut();
+            if !list.iter().any(|p| p == path) {
+                list.push(path.to_string());
+            }
+        });
+    }
+```
+
+**Step 4: write test for allow_module_runtime**
 
 add in the test module (after `test_vfs_gate_not_set_without_sandboxed`, ~line 5960):
 
@@ -150,49 +215,19 @@ add in the test module (after `test_vfs_gate_not_set_without_sandboxed`, ~line 5
     }
 ```
 
-**Step 2: run test — expect FAIL**
+**Step 5: run tests**
 
 ```bash
-cargo test -p tein --lib test_allow_module_runtime_appends_to_allowlist -- --nocapture 2>&1 | tail -10
-```
-
-Expected: compilation error — `allow_module_runtime` not defined.
-
-**Step 3: implement**
-
-add after `register_vfs_module` (~line 3029):
-
-```rust
-    /// Append a module path to the live VFS allowlist.
-    ///
-    /// Only meaningful in sandboxed contexts (where `VFS_GATE` is `GATE_CHECK`).
-    /// In unsandboxed contexts this is a no-op — the gate never checks the list.
-    ///
-    /// Used by `register_module` to make dynamically registered modules importable.
-    pub(crate) fn allow_module_runtime(&self, path: &str) {
-        use crate::sandbox::VFS_ALLOWLIST;
-        VFS_ALLOWLIST.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if !list.iter().any(|p| p == path) {
-                list.push(path.to_string());
-            }
-        });
-    }
-```
-
-**Step 4: run test — expect PASS**
-
-```bash
-cargo test -p tein --lib test_allow_module_runtime_appends_to_allowlist -- --nocapture 2>&1 | tail -10
+cargo test -p tein --lib test_allow_module_runtime -- --nocapture 2>&1 | tail -10
 ```
 
 Expected: PASS.
 
-**Step 5: commit**
+**Step 6: commit**
 
 ```bash
 git add tein/src/context.rs
-git commit -m "feat(context): add allow_module_runtime for live allowlist mutation (#132)"
+git commit -m "feat(context): add CONTEXT_PTR thread-local and allow_module_runtime (#132)"
 ```
 
 ---
@@ -312,7 +347,7 @@ Expected: compilation error — `register_module` not defined.
 
 **Step 3: implement `register_module`**
 
-add after `allow_module_runtime`:
+add after `allow_module_runtime`. uses `sexp_read` to parse the source, walks the sexp to extract the library name, validates, registers into VFS, updates allowlist.
 
 ```rust
     /// Register a scheme module from a `define-library` source string.
@@ -394,7 +429,7 @@ add after `allow_module_runtime`:
             }
             let _form_root = ffi::GcRoot::new(self.ctx, form);
 
-            // step 2: validate it's (define-library (name ...) ...)
+            // validate it's (define-library (name ...) ...)
             if ffi::sexp_pairp(form) == 0 {
                 return Err(Error::EvalError(
                     "register_module: expected (define-library ...) form".into(),
@@ -408,7 +443,6 @@ add after `allow_module_runtime`:
                 ));
             }
 
-            // check the symbol is "define-library"
             let head_str = ffi::sexp_symbol_to_string(self.ctx, head);
             let head_ptr = ffi::sexp_string_data(head_str);
             let head_len = ffi::sexp_string_size(head_str) as usize;
@@ -421,7 +455,7 @@ add after `allow_module_runtime`:
                 ));
             }
 
-            // extract library name list: second element of the form
+            // extract library name list
             let rest = ffi::sexp_cdr(form);
             if ffi::sexp_pairp(rest) == 0 {
                 return Err(Error::EvalError(
@@ -435,7 +469,7 @@ add after `allow_module_runtime`:
                 ));
             }
 
-            // walk the name list to extract parts
+            // walk the name list to extract parts (reuses spec_to_path logic)
             let mut parts = Vec::new();
             let mut cursor = name_list;
             while ffi::sexp_pairp(cursor) != 0 {
@@ -451,7 +485,8 @@ add after `allow_module_runtime`:
                     parts.push(n.to_string());
                 } else {
                     return Err(Error::EvalError(
-                        "register_module: library name elements must be symbols or integers".into(),
+                        "register_module: library name elements must be symbols or integers"
+                            .into(),
                     ));
                 }
                 cursor = ffi::sexp_cdr(cursor);
@@ -459,7 +494,7 @@ add after `allow_module_runtime`:
 
             // check for forbidden include forms in the library body
             let mut has_include = false;
-            let mut body = ffi::sexp_cdr(rest); // skip name list
+            let mut body = ffi::sexp_cdr(rest);
             while ffi::sexp_pairp(body) != 0 {
                 let clause = ffi::sexp_car(body);
                 if ffi::sexp_pairp(clause) != 0 {
@@ -468,10 +503,13 @@ add after `allow_module_runtime`:
                         let s = ffi::sexp_symbol_to_string(self.ctx, clause_head);
                         let ptr = ffi::sexp_string_data(s);
                         let len = ffi::sexp_string_size(s) as usize;
-                        let sym =
-                            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
-                                .unwrap_or("");
-                        if sym == "include" || sym == "include-ci"
+                        let sym = std::str::from_utf8(std::slice::from_raw_parts(
+                            ptr as *const u8,
+                            len,
+                        ))
+                        .unwrap_or("");
+                        if sym == "include"
+                            || sym == "include-ci"
                             || sym == "include-library-declarations"
                         {
                             has_include = true;
@@ -485,25 +523,23 @@ add after `allow_module_runtime`:
             (parts, has_include)
         };
 
-        // step 3: validate name is non-empty
         if lib_name_parts.is_empty() {
             return Err(Error::EvalError(
                 "register_module: library name is empty".into(),
             ));
         }
 
-        // step 4: reject include
         if has_forbidden_include {
             return Err(Error::EvalError(
                 "register_module: (include ...) is not supported in dynamically registered modules; use (begin ...) instead".into(),
             ));
         }
 
-        // step 5: derive VFS path
+        // derive VFS path
         let module_path = lib_name_parts.join("/");
         let vfs_sld_path = format!("/vfs/lib/{module_path}.sld");
 
-        // step 6: collision check — reject if in static VFS
+        // collision check — reject if in static VFS
         let c_vfs_path = CString::new(vfs_sld_path.as_str())
             .map_err(|_| Error::EvalError("register_module: path contains null bytes".into()))?;
         let collision = unsafe { ffi::vfs_static_exists(&c_vfs_path) };
@@ -513,13 +549,10 @@ add after `allow_module_runtime`:
             )));
         }
 
-        // step 7: register into dynamic VFS
-        self.register_vfs_module(
-            &format!("lib/{module_path}.sld"),
-            source,
-        )?;
+        // register into dynamic VFS
+        self.register_vfs_module(&format!("lib/{module_path}.sld"), source)?;
 
-        // step 8: update live allowlist
+        // update live allowlist
         self.allow_module_runtime(&module_path);
 
         Ok(())
@@ -642,7 +675,7 @@ git commit -m "feat(builder): add allow_dynamic_modules() convenience method (#1
 
 ### Task 6: implement `(tein modules)` scheme module (layer 3)
 
-register `register-module` and `module-registered?` trampolines + VFS registry entry + build.rs exports.
+register `register-module` and `module-registered?` trampolines + VFS registry entry + build.rs exports. the `register-module` trampoline uses `CONTEXT_PTR` to call `ctx.register_module()` directly — no parsing duplication.
 
 **Files:**
 - Modify: `tein/src/vfs_registry.rs` (add VfsEntry after other tein/ Dynamic entries, ~line 173)
@@ -675,7 +708,7 @@ in `build.rs`, add to the `DYNAMIC_MODULE_EXPORTS` array (after `tein/crypto`, ~
     ("tein/modules", &["register-module", "module-registered?"]),
 ```
 
-**Step 3: add trampolines and registration function**
+**Step 3: add trampolines**
 
 in `context.rs`, add the trampolines (before the `// --- (tein process) trampolines ---` section, ~line 1492):
 
@@ -685,7 +718,10 @@ in `context.rs`, add the trampolines (before the `// --- (tein process) trampoli
 /// `register-module` trampoline: registers a define-library source string
 /// as a new importable module.
 ///
-/// calls `Context::register_module` through the thread-local `REGISTER_MODULE_CTX`.
+/// uses `CONTEXT_PTR` thread-local to call `Context::register_module` directly,
+/// avoiding any parsing duplication. CONTEXT_PTR is set by evaluate()/call()
+/// and is guaranteed valid during trampoline execution.
+///
 /// returns `#t` on success, raises a scheme error on failure.
 unsafe extern "C" fn register_module_trampoline(
     ctx: ffi::sexp,
@@ -699,162 +735,27 @@ unsafe extern "C" fn register_module_trampoline(
             Err(e) => return e,
         };
 
-        // we need to call register_module which requires &Context, but we only
-        // have the raw ctx pointer. reconstruct the operation inline.
-        // step 1: sexp_read + parse (reuse the same parsing logic)
-        let scheme_str = ffi::sexp_c_str(
-            ctx,
-            source.as_ptr() as *const c_char,
-            source.len() as ffi::sexp_sint_t,
-        );
-        if ffi::sexp_exceptionp(scheme_str) != 0 {
-            let msg = "register-module: failed to create scheme string";
+        let context_ptr = CONTEXT_PTR.with(|c| c.get());
+        if context_ptr.is_null() {
+            let msg = "register-module: internal error — no active Context";
             let c_msg = CString::new(msg).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
-        let _str_root = ffi::GcRoot::new(ctx, scheme_str);
+        let context = &*context_ptr;
 
-        let port = ffi::sexp_open_input_string(ctx, scheme_str);
-        if ffi::sexp_exceptionp(port) != 0 {
-            let msg = "register-module: failed to open input port";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let _port_root = ffi::GcRoot::new(ctx, port);
+        // source is a &str borrowed from the scheme string arg; we need an
+        // owned copy because register_module may allocate (sexp_read etc.),
+        // potentially triggering GC which could move the scheme string.
+        let source_owned = source.to_string();
 
-        let form = ffi::sexp_read(ctx, port);
-        if ffi::sexp_exceptionp(form) != 0 || ffi::sexp_eofp(form) != 0 {
-            let msg = "register-module: source is not a valid s-expression";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-        let _form_root = ffi::GcRoot::new(ctx, form);
-
-        // validate define-library
-        if ffi::sexp_pairp(form) == 0 {
-            let msg = "register-module: expected (define-library ...) form";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let head = ffi::sexp_car(form);
-        if ffi::sexp_symbolp(head) == 0 {
-            let msg = "register-module: expected (define-library ...) form";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let head_s = ffi::sexp_symbol_to_string(ctx, head);
-        let head_ptr = ffi::sexp_string_data(head_s);
-        let head_len = ffi::sexp_string_size(head_s) as usize;
-        let head_name =
-            std::str::from_utf8(std::slice::from_raw_parts(head_ptr as *const u8, head_len))
-                .unwrap_or("");
-        if head_name != "define-library" {
-            let msg = "register-module: expected (define-library ...) form";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let rest = ffi::sexp_cdr(form);
-        if ffi::sexp_pairp(rest) == 0 {
-            let msg = "register-module: define-library has no library name";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        let name_list = ffi::sexp_car(rest);
-        let path_result = spec_to_path(ctx, name_list);
-        let module_path = match path_result {
-            Ok(p) => p,
-            Err(e) => return e,
-        };
-
-        if module_path.is_empty() {
-            let msg = "register-module: library name is empty";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        // check for include forms
-        let mut body = ffi::sexp_cdr(rest);
-        while ffi::sexp_pairp(body) != 0 {
-            let clause = ffi::sexp_car(body);
-            if ffi::sexp_pairp(clause) != 0 {
-                let clause_head = ffi::sexp_car(clause);
-                if ffi::sexp_symbolp(clause_head) != 0 {
-                    let s = ffi::sexp_symbol_to_string(ctx, clause_head);
-                    let ptr = ffi::sexp_string_data(s);
-                    let len = ffi::sexp_string_size(s) as usize;
-                    let sym =
-                        std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
-                            .unwrap_or("");
-                    if sym == "include" || sym == "include-ci"
-                        || sym == "include-library-declarations"
-                    {
-                        let msg = "register-module: (include ...) is not supported in dynamically registered modules; use (begin ...) instead";
-                        let c_msg = CString::new(msg).unwrap_or_default();
-                        return ffi::make_error(
-                            ctx,
-                            c_msg.as_ptr(),
-                            msg.len() as ffi::sexp_sint_t,
-                        );
-                    }
-                }
+        match context.register_module(&source_owned) {
+            Ok(()) => ffi::get_true(),
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
-            body = ffi::sexp_cdr(body);
         }
-
-        // collision check
-        let vfs_sld_path = format!("/vfs/lib/{module_path}.sld");
-        let c_vfs_path = match CString::new(vfs_sld_path.as_str()) {
-            Ok(p) => p,
-            Err(_) => {
-                let msg = "register-module: path contains null bytes";
-                let c_msg = CString::new(msg).unwrap_or_default();
-                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-            }
-        };
-        if ffi::vfs_static_exists(&c_vfs_path) {
-            let msg = format!(
-                "register-module: module '{}' already exists as a built-in module",
-                module_path
-            );
-            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        // register VFS entry
-        let vfs_rel_path = format!("lib/{module_path}.sld");
-        let full_vfs_path = format!("/vfs/{vfs_rel_path}");
-        let c_full_path = match CString::new(full_vfs_path.as_str()) {
-            Ok(p) => p,
-            Err(_) => {
-                let msg = "register-module: path contains null bytes";
-                let c_msg = CString::new(msg).unwrap_or_default();
-                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-            }
-        };
-        let rc = ffi::tein_vfs_register(
-            c_full_path.as_ptr(),
-            source.as_ptr() as *const c_char,
-            source.len() as std::ffi::c_uint,
-        );
-        if rc != 0 {
-            let msg = "register-module: VFS registration failed (out of memory)";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        // update allowlist
-        crate::sandbox::VFS_ALLOWLIST.with(|cell| {
-            let mut list = cell.borrow_mut();
-            if !list.iter().any(|p| p == &module_path) {
-                list.push(module_path);
-            }
-        });
-
-        ffi::get_true()
     }
 }
 
@@ -938,7 +839,64 @@ cargo test -p tein --lib test_allow_dynamic_modules_builder -- --nocapture 2>&1 
 
 Expected: all pass.
 
-**Step 7: commit**
+**Step 7: add scheme-level trampoline test**
+
+add in the test module:
+
+```rust
+    #[test]
+    fn test_register_module_from_scheme() {
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + dynamic modules");
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (import (scheme base))
+            (register-module
+              "(define-library (test tool) (import (scheme base)) (export val) (begin (define val 99)))")
+            (import (test tool))
+            val
+        "#).expect("scheme-side register-module");
+        assert_eq!(result, Value::Integer(99));
+    }
+
+    #[test]
+    fn test_module_registered_predicate_from_scheme() {
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + dynamic modules");
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (module-registered? '(nonexistent thing))
+        "#).expect("module-registered? for nonexistent");
+        assert_eq!(result, Value::Boolean(false));
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (module-registered? '(scheme base))
+        "#).expect("module-registered? for scheme/base");
+        assert_eq!(result, Value::Boolean(true));
+    }
+```
+
+**Step 8: run all tests**
+
+```bash
+cargo test -p tein --lib test_register_module -- --nocapture 2>&1 | tail -20
+cargo test -p tein --lib test_module_registered -- --nocapture 2>&1 | tail -10
+```
+
+Expected: all pass.
+
+**Step 9: commit**
 
 ```bash
 git add tein/src/context.rs tein/src/vfs_registry.rs tein/build.rs
@@ -957,7 +915,7 @@ test the full flow from scheme code: `(register-module ...)` then `(import ...)`
 
 **Step 1: check existing scheme test pattern**
 
-look at `tein/tests/scheme_tests.rs` and an existing `.scm` test file to follow the pattern.
+read `tein/tests/scheme_tests.rs` and an existing `.scm` test file to follow the pattern.
 
 **Step 2: create scheme test file**
 
@@ -1037,12 +995,14 @@ Expected: all pass, no regressions.
 add to the architecture section (under the relevant flow):
 
 ```
-**dynamic module registration flow**: `ctx.register_module(source)` → sexp_read to parse define-library → extract library name → collision check via `tein_vfs_lookup_static` (rejects built-in modules) → reject `(include ...)` → register source as `/vfs/lib/<path>.sld` via `tein_vfs_register` → append to live `VFS_ALLOWLIST`. scheme-side: `(tein modules)` exports `register-module` (trampoline) and `module-registered?`. gated in sandbox via `.allow_dynamic_modules()` (= `.allow_module("tein/modules")`). chibi caches modules after first import — re-registration does not invalidate.
+**dynamic module registration flow**: `ctx.register_module(source)` → sexp_read to parse define-library → extract library name → collision check via `tein_vfs_lookup_static` (rejects built-in modules) → reject `(include ...)` → register source as `/vfs/lib/<path>.sld` via `tein_vfs_register` → append to live `VFS_ALLOWLIST`. scheme-side: `(tein modules)` exports `register-module` (trampoline via CONTEXT_PTR → `ctx.register_module()`) and `module-registered?`. gated in sandbox via `.allow_dynamic_modules()` (= `.allow_module("tein/modules")`). chibi caches modules after first import — re-registration does not invalidate.
 ```
 
 add to critical gotchas:
 
 ```
+**`CONTEXT_PTR` thread-local**: raw `*const Context` set during `evaluate()`/`call()`/`evaluate_port()`/`read()` alongside `FOREIGN_STORE_PTR`. lets trampolines call `Context` methods directly (e.g. `register_module`). cleared via `ContextPtrGuard` RAII on all exit paths. NOT set during `load_extension()`.
+
 **`(tein modules)` is `default_safe: false`**: must use `.allow_dynamic_modules()` to make it available in sandboxed contexts. without it, the VFS gate blocks `(import (tein modules))`.
 
 **chibi module cache vs dynamic re-registration**: `register_module` updates the VFS entry but chibi caches module environments after first `(import ...)`. a second `(import (my tool))` in the same context returns the cached (old) version. fresh context or `ManagedContext::reset()` required for updated imports.
@@ -1050,6 +1010,8 @@ add to critical gotchas:
 **`register_module` collision check**: rejects if module `.sld` exists in the *static* VFS table (built-in modules). dynamic-over-dynamic is allowed (update semantics). collision check uses `tein_vfs_lookup_static` which skips the dynamic linked list.
 
 **`register_module` requires `(begin ...)`**: `(include ...)`, `(include-ci ...)`, and `(include-library-declarations ...)` are rejected. dynamically registered modules must be self-contained.
+
+**`register-module` trampoline owns source string**: the trampoline copies the scheme string arg to a rust `String` before calling `register_module`, because `register_module` calls `sexp_read` which may trigger GC and relocate the original scheme string.
 ```
 
 **Step 4: update design doc**
@@ -1092,13 +1054,9 @@ stop here. the branch is ready for code review before PR.
 ## notes for AGENTS.md collection (final step)
 
 - `tein_vfs_lookup_static` added to chibi fork `tein_shim.c` — must be documented in safety invariants
+- `CONTEXT_PTR` thread-local added — same lifecycle as `FOREIGN_STORE_PTR`, cleared via RAII guard
 - `(tein modules)` is `VfsSource::Dynamic`, `default_safe: false` — add to VFS registry docs
 - `register_module` only supports `(begin ...)`, not `(include ...)`
 - chibi module cache is not invalidated by re-registration
 - `allow_dynamic_modules()` = `allow_module("tein/modules")`
-
-## DRY concern: parsing duplication
-
-the `define-library` parsing logic is duplicated between `Context::register_module` (rust) and `register_module_trampoline` (scheme trampoline). this is intentional — the rust method returns `Result<()>` while the trampoline returns `ffi::sexp` error objects. extracting a shared core would require a helper that returns both forms, adding complexity for two callsites. if a third callsite appears, extract then.
-
-alternatively, the scheme trampoline could call `register_module` through a thread-local `&Context` pointer (similar to `FOREIGN_STORE_PTR`). this would DRY the logic but add another thread-local and lifetime concern. revisit if the duplication becomes a maintenance burden.
+- trampoline copies source string to owned `String` before calling `register_module` (GC safety)
