@@ -5996,6 +5996,61 @@ mod tests {
         drop(ctx);
     }
 
+    /// Verify that dangerous chibi primitives are unreachable in sandboxed Safe contexts.
+    ///
+    /// These were formerly blocked by `ALWAYS_STUB`; now blocked by the VFS gate
+    /// (no path through any allowlisted module exports them). Each name must be
+    /// unbound in the null env — accessing them must produce an error, not a value.
+    ///
+    /// Covers: `find-module-file`, `load-module-file`, `%import`,
+    /// `add-module-directory`, `current-module-path`, `env-parent`, `env-exports`,
+    /// `%meta-env`, `primitive-environment`, `scheme-report-environment`,
+    /// `current-environment`, `set-current-environment!`.
+    /// Closes #127.
+    #[test]
+    fn test_dangerous_chibi_primitives_blocked_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("standard + sandboxed");
+
+        // give access to scheme/base so the env is fully initialised
+        ctx.evaluate("(import (scheme base))").unwrap();
+
+        // primitives that bypass VFS gate / modify module search path
+        let vfs_escape = [
+            "find-module-file",
+            "load-module-file",
+            "%import",
+            "add-module-directory",
+            "current-module-path",
+        ];
+        // env traversal / mutation primitives
+        let env_traversal = [
+            "env-parent",
+            "env-exports",
+            "%meta-env",
+            "primitive-environment",
+            "scheme-report-environment",
+            "current-environment",
+            "set-current-environment!",
+        ];
+
+        for name in vfs_escape.iter().chain(env_traversal.iter()) {
+            // referencing an unbound name must error; a live proc would be a sandbox escape
+            let r = ctx.evaluate(name);
+            assert!(
+                r.is_err(),
+                "dangerous primitive `{name}` must be unbound in sandbox, got: {:?}",
+                r.ok()
+            );
+        }
+
+        drop(ctx);
+    }
+
     #[test]
     fn test_standard_env_sandbox_allows_vfs_import() {
         // sandboxed standard-env contexts should be able to import VFS modules.

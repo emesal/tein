@@ -191,7 +191,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
   - `chibi_diff`: `edits->string/color` needs real TERM env var
   - `chibi_weak`: `(gc)` in test body → SIGSEGV in embedded chibi
 - **excluded from harness entirely**: `chibi/regexp-test` (needs pcre), crypto/mime/memoize (fs/network), filesystem/process/system-test (OS-level), `srfi/179/231` (fuel concerns)
-- **shadow SLD rules**: never import other shadow libraries inside a shadow library body — each must be self-contained with `(chibi)` or `(scheme base)` only. never use `(define x x)` pattern — letrec* pre-binds to `#<unspecified>`.
+- **shadow SLD rules**: `VfsSource::Shadow` bodies must not import other `VfsSource::Shadow` modules (circular/ordering hazard). importing `VfsSource::Embedded` tein modules (e.g. `(tein load)`, `(tein time)`) is fine. allowed imports in shadow bodies: `(chibi)`, `(scheme base)`, and `VfsSource::Embedded` tein modules. **exception**: `scheme/file` imports `(only (chibi filesystem) ...)` — `chibi/filesystem` is a `VfsSource::Shadow` (generated safe stub in sandboxed contexts). this is intentional: the stub only exposes `delete-file` and `file-exists?` with safe semantics; no real FS access. never use `(define x x)` pattern — letrec* pre-binds to `#<unspecified>`.
 
 ## license
 - ISC
