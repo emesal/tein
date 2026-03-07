@@ -211,6 +211,15 @@ unsafe extern "C" {
     // make-immutable wrapper (chibi SEXP_API, for r7rs environment)
     pub fn tein_sexp_make_immutable(ctx: sexp, x: sexp) -> sexp;
 
+    // module search path (chibi SEXP_API — adds a dir to SEXP_G_MODULE_PATH)
+    pub fn sexp_add_module_directory(
+        ctx: sexp,
+        _self: sexp,
+        _n: sexp_sint_t,
+        dir: sexp,
+        appendp: sexp,
+    ) -> sexp;
+
     // pair/list construction (via tein shim)
     pub fn tein_sexp_cons(ctx: sexp, head: sexp, tail: sexp) -> sexp;
 
@@ -834,6 +843,20 @@ pub unsafe fn vfs_gate_set(level: i32) {
 #[inline]
 pub unsafe fn fs_policy_gate_set(level: i32) {
     unsafe { tein_fs_policy_gate_set(level as c_int) }
+}
+
+/// Prepend or append a directory string to chibi's module search path.
+///
+/// `append = false` prepends (checked first); `append = true` appends.
+/// The `dir` sexp must be a chibi string (use `sexp_c_str` to create one).
+///
+/// # Safety
+/// Must be called from the same thread as the chibi context.
+pub unsafe fn add_module_directory(ctx: sexp, dir: sexp, append: bool) -> sexp {
+    unsafe {
+        let appendp = if append { get_true() } else { get_false() };
+        sexp_add_module_directory(ctx, get_void(), 1, dir, appendp)
+    }
 }
 
 /// called from C (`tein_shim.c`) when `tein_vfs_gate == 1`.
