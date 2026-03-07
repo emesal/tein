@@ -44,8 +44,18 @@ pub enum TokenKind {
     DatumComment,
     /// integer literal
     Integer(i64),
+    /// bignum literal (integer that overflows i64)
+    Bignum(String),
+    /// rational literal (`numerator`, `denominator` as decimal strings)
+    Rational(String, String),
     /// float literal
     Float(f64),
+    /// `#u8(`
+    HashU8Paren,
+    /// complex literal (real part string, imaginary part string with sign)
+    ///
+    /// imaginary part always includes its sign: `"2"` for `+2i`, `"-2"` for `-2i`.
+    Complex(String, String),
     /// string literal (content, escapes resolved)
     String(String),
     /// symbol / identifier
@@ -412,6 +422,21 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Ok(TokenKind::HashParen)
             }
+            Some('u') => {
+                // check for #u8(
+                self.advance(); // consume u
+                if self.peek_char() == Some('8') {
+                    self.advance(); // consume 8
+                    if self.peek_char() == Some('(') {
+                        self.advance(); // consume (
+                        return Ok(TokenKind::HashU8Paren);
+                    }
+                }
+                Err(ParseError::new(
+                    "unexpected character after #: 'u'",
+                    self.span_from(start_pos, start_line, start_col),
+                ))
+            }
             Some('\\') => {
                 self.advance();
                 self.lex_char_literal(start_pos, start_line, start_col)
@@ -598,11 +623,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// lex `+` or `-` — could be a symbol or a number
+    /// lex `+` or `-` — could be a symbol, a number, or a pure imaginary complex
     fn lex_sign_or_number(&mut self) -> Result<TokenKind> {
         let next = self.peek_char2();
         match next {
-            Some(c) if c.is_ascii_digit() || c == '.' => self.lex_number(),
+            Some(c) if c.is_ascii_digit() || c == '.' => {
+                // might be +2i, -3.5i, or just a number — lex_number handles both
+                self.lex_number()
+            }
             // +inf.0, -inf.0, +nan.0
             Some('i') | Some('n') => self.lex_special_number_or_symbol(),
             _ => {
@@ -612,10 +640,22 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// lex +inf.0, -inf.0, +nan.0 or fall back to symbol
+    /// lex +inf.0, -inf.0, +nan.0, +i, -i, or fall back to symbol
     fn lex_special_number_or_symbol(&mut self) -> Result<TokenKind> {
         // peek ahead to see if this is a special float
         let remaining = &self.input[self.pos..];
+
+        // +i or -i: unit imaginary (real=0, imag=±1)
+        if (remaining.starts_with("+i") || remaining.starts_with("-i")) && remaining.len() >= 2 {
+            let after_i = remaining[2..].chars().next();
+            if after_i.is_none_or(is_delimiter) {
+                let sign = self.advance().unwrap(); // + or -
+                self.advance(); // i
+                let imag = if sign == '+' { "1" } else { "-1" };
+                return Ok(TokenKind::Complex("0".to_string(), imag.to_string()));
+            }
+        }
+
         if remaining.starts_with("+inf.0") || remaining.starts_with("-inf.0") {
             let sign = self.advance().unwrap(); // + or -
             // consume "inf.0"
@@ -722,6 +762,11 @@ impl<'a> Lexer<'a> {
 
         let text = &self.input[start..self.pos];
 
+        // check for complex suffix: `+Ni` or `-Ni` (must come before float/int finalisation)
+        if let Some(tok) = self.try_lex_complex_suffix(text) {
+            return Ok(tok);
+        }
+
         if is_float {
             let val: f64 = text.parse().map_err(|_| {
                 ParseError::new(
@@ -734,21 +779,137 @@ impl<'a> Lexer<'a> {
                     },
                 )
             })?;
-            Ok(TokenKind::Float(val))
-        } else {
-            let val: i64 = text.parse().map_err(|_| {
-                ParseError::new(
-                    format!("invalid integer literal: {text}"),
-                    Span {
-                        offset: start,
-                        len: self.pos - start,
-                        line: self.line,
-                        column: self.column,
-                    },
-                )
-            })?;
-            Ok(TokenKind::Integer(val))
+            return Ok(TokenKind::Float(val));
         }
+
+        // check for rational: integer `/` integer (no whitespace allowed)
+        if self.peek_char() == Some('/') {
+            let slash_pos = self.pos;
+            self.advance(); // consume /
+            let den_start = self.pos;
+            // optional sign on denominator
+            if self.peek_char() == Some('+') || self.peek_char() == Some('-') {
+                self.advance();
+            }
+            let den_digits_start = self.pos;
+            while let Some(c) = self.peek_char() {
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if self.pos > den_digits_start {
+                let num_str = self.input[start..slash_pos].to_string();
+                let den_str = self.input[den_start..self.pos].to_string();
+                return Ok(TokenKind::Rational(num_str, den_str));
+            } else {
+                // no digits after / — backtrack, treat / as part of next token
+                self.pos = slash_pos;
+                // revert any sign character we may have consumed
+            }
+        }
+
+        // integer or bignum
+        match text.parse::<i64>() {
+            Ok(val) => Ok(TokenKind::Integer(val)),
+            Err(_) => Ok(TokenKind::Bignum(text.to_string())),
+        }
+    }
+
+    /// check for a complex suffix (`+Ni` or `-Ni`) after a real part has been parsed.
+    ///
+    /// if the next character is `i` at a delimiter, the parsed text is pure imaginary
+    /// (e.g. `+2i` → real `"0"`, imag `"+2"`).
+    /// if the next characters are `+`/`-` followed by a magnitude and `i`, this is a
+    /// full complex literal (e.g. `1+2i` → real `"1"`, imag `"+2"`).
+    /// returns `None` if no complex suffix is found (caller should proceed normally).
+    fn try_lex_complex_suffix(&mut self, real_str: &str) -> Option<TokenKind> {
+        // case 1: pure imaginary — text is signed/unsigned number, next char is `i` at delimiter
+        if self.peek_char() == Some('i') {
+            let after_i_pos = self.pos + 1;
+            let at_delim = after_i_pos >= self.bytes.len()
+                || is_delimiter(self.input[after_i_pos..].chars().next().unwrap());
+            if at_delim {
+                self.advance(); // consume i
+                return Some(TokenKind::Complex("0".to_string(), real_str.to_string()));
+            }
+        }
+
+        // case 2: `+Ni` or `-Ni` suffix (full complex)
+        if self.peek_char() == Some('+') || self.peek_char() == Some('-') {
+            let sign_pos = self.pos;
+            let sign = self.peek_char().unwrap();
+            self.advance(); // consume sign
+
+            // special case: `+i` or `-i` (unit imaginary)
+            if self.peek_char() == Some('i') {
+                let after_i_pos = self.pos + 1;
+                let at_delim = after_i_pos >= self.bytes.len()
+                    || is_delimiter(self.input[after_i_pos..].chars().next().unwrap());
+                if at_delim {
+                    self.advance(); // consume i
+                    let imag = if sign == '+' { "1" } else { "-1" };
+                    return Some(TokenKind::Complex(real_str.to_string(), imag.to_string()));
+                }
+            }
+
+            // scan imaginary magnitude: digits, optional dot + digits, optional exponent
+            let imag_start = self.pos;
+            while let Some(c) = self.peek_char() {
+                if c.is_ascii_digit() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            // fractional part
+            if self.peek_char() == Some('.') {
+                let after_dot = self.peek_char2();
+                if after_dot.is_none_or(|c| c.is_ascii_digit() || is_delimiter(c)) {
+                    self.advance();
+                    while let Some(c) = self.peek_char() {
+                        if c.is_ascii_digit() {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            // exponent
+            if self.peek_char() == Some('e') || self.peek_char() == Some('E') {
+                self.advance();
+                if self.peek_char() == Some('+') || self.peek_char() == Some('-') {
+                    self.advance();
+                }
+                while let Some(c) = self.peek_char() {
+                    if c.is_ascii_digit() {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // must end with `i` at a delimiter
+            if self.peek_char() == Some('i') && self.pos > imag_start {
+                let after_i_pos = self.pos + 1;
+                let at_delim = after_i_pos >= self.bytes.len()
+                    || is_delimiter(self.input[after_i_pos..].chars().next().unwrap());
+                if at_delim {
+                    let magnitude = &self.input[imag_start..self.pos];
+                    self.advance(); // consume i
+                    let imag_str = format!("{sign}{magnitude}");
+                    return Some(TokenKind::Complex(real_str.to_string(), imag_str));
+                }
+            }
+
+            // not a complex suffix — backtrack
+            self.pos = sign_pos;
+        }
+
+        None
     }
 
     /// lex a bare symbol (unquoted identifier)
@@ -1215,5 +1376,76 @@ mod tests {
     fn lex_whitespace_only() {
         let kinds = lex_kinds("   \n\t  ").unwrap();
         assert!(kinds.is_empty());
+    }
+
+    // --- numeric tower ---
+
+    #[test]
+    fn lex_bignum() {
+        let kinds = lex_kinds("99999999999999999999999999").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Bignum(s) if s == "99999999999999999999999999"));
+    }
+
+    #[test]
+    fn lex_negative_bignum() {
+        let kinds = lex_kinds("-99999999999999999999999999").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Bignum(s) if s == "-99999999999999999999999999"));
+    }
+
+    #[test]
+    fn lex_rational() {
+        let kinds = lex_kinds("3/4").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Rational(n, d) if n == "3" && d == "4"));
+    }
+
+    #[test]
+    fn lex_negative_rational() {
+        let kinds = lex_kinds("-1/2").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Rational(n, d) if n == "-1" && d == "2"));
+    }
+
+    #[test]
+    fn lex_bytevector_prefix() {
+        let kinds = lex_kinds("#u8(1 2 3)").unwrap();
+        assert_eq!(kinds[0], TokenKind::HashU8Paren);
+        assert_eq!(kinds[1], TokenKind::Integer(1));
+    }
+
+    // --- complex ---
+
+    #[test]
+    fn lex_complex_integers() {
+        let kinds = lex_kinds("1+2i").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Complex(r, i) if r == "1" && i == "+2"));
+    }
+
+    #[test]
+    fn lex_complex_negative_imag() {
+        let kinds = lex_kinds("1-2i").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Complex(r, i) if r == "1" && i == "-2"));
+    }
+
+    #[test]
+    fn lex_pure_imaginary() {
+        let kinds = lex_kinds("+2i").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Complex(r, i) if r == "0" && i == "+2"));
+    }
+
+    #[test]
+    fn lex_plus_i() {
+        let kinds = lex_kinds("+i").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Complex(r, i) if r == "0" && i == "1"));
+    }
+
+    #[test]
+    fn lex_minus_i() {
+        let kinds = lex_kinds("-i").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Complex(r, i) if r == "0" && i == "-1"));
+    }
+
+    #[test]
+    fn lex_complex_floats() {
+        let kinds = lex_kinds("1.5+2.5i").unwrap();
+        assert!(matches!(&kinds[0], TokenKind::Complex(r, i) if r == "1.5" && i == "+2.5"));
     }
 }

@@ -24,8 +24,8 @@
 //!
 //! - **Sandboxing** — Restrict environments with composable [`sandbox`] presets,
 //!   step limits, wall-clock timeouts, and file IO policies via [`ContextBuilder`]
-//! - **`#[scheme_fn]`** — Define Scheme-callable functions in Rust with automatic
-//!   type conversion (see [`scheme_fn`])
+//! - **`#[tein_fn]`** — Define Scheme-callable functions in Rust with automatic
+//!   type conversion (see [`tein_fn`])
 //! - **Foreign types** — Expose Rust types as Scheme objects with method dispatch
 //!   and introspection (see [`foreign`])
 //! - **Custom ports** — Bridge Rust `Read`/`Write` into Scheme's port system
@@ -34,6 +34,19 @@
 //! - **Managed contexts** — Thread-safe evaluation via [`ThreadLocalContext`]
 //!   with persistent or fresh-per-evaluation modes (see [`managed`])
 //! - **Timeouts** — Wall-clock deadlines via [`TimeoutContext`]
+//!
+//! ## Feature flags
+//!
+//! | Feature | Default | Description |
+//! |---------|---------|-------------|
+//! | `json`  | yes     | Enables `(tein json)` module with `json-parse` and `json-stringify`. Pulls in `serde` + `serde_json`. |
+//! | `toml`  | yes     | Enables `(tein toml)` module with `toml-parse` and `toml-stringify`. Pulls in `toml` crate. |
+//! | `uuid`  | yes     | Enables `(tein uuid)` module with `make-uuid`, `uuid?`, and `uuid-nil`. Pulls in `uuid` crate. |
+//! | `time`  | yes     | Enables `(tein time)` module with `current-second`, `current-jiffy`, and `jiffies-per-second`. Pure `std::time` — no external deps. |
+//! | `regex` | yes     | Enables `(tein safe-regexp)` module with linear-time regex. Guarantees O(n) — no ReDoS. Pulls in `regex` crate. |
+//!
+//! Disable default features with `default-features = false` for a minimal build
+//! without format-module dependencies.
 //!
 //! ## Safety model
 //!
@@ -44,15 +57,33 @@
 
 #![warn(missing_docs)]
 
+extern crate self as tein;
+
 mod context;
+#[cfg(feature = "crypto")]
+mod crypto;
 mod error;
 mod ffi;
 pub mod foreign;
+#[cfg(feature = "http")]
+mod http;
+#[cfg(feature = "json")]
+mod json;
 pub mod managed;
 mod port;
+#[cfg(feature = "regex")]
+mod safe_regexp;
 pub mod sandbox;
+#[cfg(feature = "json")]
+mod sexp_bridge;
 mod thread;
+#[cfg(feature = "time")]
+mod time;
 mod timeout;
+#[cfg(feature = "toml")]
+mod toml;
+#[cfg(feature = "uuid")]
+mod uuid;
 mod value;
 
 pub use context::{Context, ContextBuilder};
@@ -62,22 +93,31 @@ pub use managed::{Mode, ThreadLocalContext};
 pub use timeout::TimeoutContext;
 pub use value::Value;
 
-/// Re-export the `#[scheme_fn]` proc macro for ergonomic foreign function definition.
-pub use tein_macros::scheme_fn;
+/// Re-export the `#[tein_fn]` proc macro for defining scheme-callable functions.
+pub use tein_macros::tein_fn;
+
+/// Re-export the `#[tein_module]` proc macro for defining scheme modules.
+pub use tein_macros::tein_module;
+
+/// Re-export the `#[tein_type]` proc macro for marking structs in a `#[tein_module]`.
+pub use tein_macros::tein_type;
+
+/// Re-export the `#[tein_methods]` proc macro for exposing impl blocks in a `#[tein_module]`.
+pub use tein_macros::tein_methods;
 
 /// Raw FFI types for advanced use (foreign functions, proc macro generated code, etc.)
 ///
-/// These are thin wrappers over Chibi's C API. The `#[scheme_fn]` proc macro
+/// These are thin wrappers over Chibi's C API. The `#[tein_fn]` proc macro
 /// generates code that references these symbols, so they must remain public.
 #[allow(missing_docs)]
 pub mod raw {
     pub use crate::ffi::{GcRoot, sexp, sexp_sint_t};
     pub use crate::ffi::{
-        get_false, get_null, get_true, get_void, sexp_booleanp, sexp_bytes_data, sexp_bytes_length,
-        sexp_bytesp, sexp_c_str, sexp_car, sexp_cdr, sexp_charp, sexp_cons, sexp_exceptionp,
-        sexp_flonum_value, sexp_flonump, sexp_integerp, sexp_make_boolean, sexp_make_bytes,
-        sexp_make_character, sexp_make_fixnum, sexp_make_flonum, sexp_nullp, sexp_pairp,
-        sexp_portp, sexp_string_data, sexp_string_size, sexp_stringp, sexp_symbolp,
+        get_false, get_null, get_true, get_void, make_error, sexp_booleanp, sexp_bytes_data,
+        sexp_bytes_length, sexp_bytesp, sexp_c_str, sexp_car, sexp_cdr, sexp_charp, sexp_cons,
+        sexp_exceptionp, sexp_flonum_value, sexp_flonump, sexp_integerp, sexp_make_boolean,
+        sexp_make_bytes, sexp_make_character, sexp_make_fixnum, sexp_make_flonum, sexp_nullp,
+        sexp_pairp, sexp_portp, sexp_string_data, sexp_string_size, sexp_stringp, sexp_symbolp,
         sexp_unbox_character, sexp_unbox_fixnum, sexp_vectorp,
     };
 }

@@ -1,0 +1,17 @@
+[package]
+name = "tein-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "standalone tein scheme interpreter and REPL"
+repository.workspace = true
+
+[[bin]]
+name = "tein"
+path = "src/main.rs"
+
+[dependencies]
+tein = { path = "../tein" }
+rustyline = { version = "17", features = ["with-file-history"] }

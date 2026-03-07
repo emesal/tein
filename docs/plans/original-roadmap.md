@@ -118,9 +118,21 @@
   - Shared channel protocol extracted to `thread.rs` (generalises `TimeoutContext`)
   - 14 tests: evaluate, state accumulation, init, call, `define_fn_variadic`, reset, error handling
 
+### Milestone 8 — Rust Ecosystem Bridge
+
+- [x] **`#[tein_module]` proc macro** — auto-generates scheme glue (VFS module, predicates, constructors, method procs) from annotated rust. `#[tein_module]`, `#[tein_type]`, `#[tein_fn]`, `#[tein_methods]` attributes. (issue #40)
+- [ ] **`(tein json)`** — bidirectional JSON ↔ scheme value conversion via serde_json. `json-parse`, `json-stringify`, `json?`. (issue #36)
+- [ ] **`(tein regex)`** — regular expression support via the `regex` crate. `make-regex`, `regex?`, `regex-is-match`, `regex-find`, `regex-replace`. Regex as ForeignType handle. (issue #37)
+- [ ] **`(tein crypto)`** — cryptographic primitives via blake3/sha2/rand. `blake3-hash`, `sha256-hash`, `random-bytes`, `random-integer`, `random-float`. (issue #38)
+- [ ] **`(tein uuid)`** — UUID generation via the `uuid` crate. `make-uuid`, `uuid?`, `uuid-nil`. (issue #39)
+- [ ] **Foreign type constructor macro** — ergonomic `define_foreign_type!` declarative macro for simple type registration. (issue #41)
+
+## Completed infrastructure
+
+- [x] **GitHub ecosystem sync** — M4–M7 milestones closed, M8–M12 + Unscheduled milestones created with tracking issues, orphaned issues migrated to correct milestones.
+- [x] **Comprehensive scheme test coverage** — 22 scheme integration tests covering control flow, binding forms, TCO, closures, continuations, error handling, records, bytevectors, I/O, macros, quasiquote, case-lambda, lazy evaluation, extended numbers, eval, reader extensions, foreign protocol. Chibi quirks documented in ARCHITECTURE.md.
+
 ## Ideas (unscheduled)
 
 - **Norse naming for modules?** core: `yggdrasil`, io: `bifrost`, macros: `galdr`, sexp: `runar`
-- **Scheme test harness** — run .scm files as cargo integration tests
-- **Context pool** — pool of `ThreadLocalContext` instances for high-throughput workloads
-- **Foreign type constructor macro** — ergonomic `make-type` registration from Rust
+- **Context pool** — pool of `ThreadLocalContext` instances for high-throughput workloads (tracked as M11 issue)

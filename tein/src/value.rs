@@ -11,6 +11,9 @@
 //! |---------|------------|-----------------|
 //! | `Integer(i64)` | fixnum | `as_integer()` |
 //! | `Float(f64)` | flonum | `as_float()` |
+//! | `Bignum(String)` | bignum (arbitrary precision) | `as_bignum()` |
+//! | `Rational(Box, Box)` | exact ratio `n/d` | `as_rational()` |
+//! | `Complex(Box, Box)` | complex `a+bi` | `as_complex()` |
 //! | `String(String)` | string | `as_str()` |
 //! | `Symbol(String)` | symbol | `as_symbol()` |
 //! | `Boolean(bool)` | `#t` / `#f` | `as_bool()` |
@@ -23,6 +26,7 @@
 //! | `HashTable(sexp)` | hash-table | `as_hash_table()` |
 //! | `Nil` | `'()` | — |
 //! | `Unspecified` | void | — |
+//! | `Exit(i32)` | — | exit code from `(exit n)` |
 //! | `Procedure(sexp)` | lambda/opcode | `as_procedure()` |
 //! | `Foreign { .. }` | foreign object | `ctx.foreign_ref::<T>()` |
 //! | `Other(String)` | unhandled type | — |
@@ -30,8 +34,9 @@
 //! # Conversion
 //!
 //! `Value::from_raw()` converts Chibi sexps to safe values. Type checking
-//! order matters: flonum is checked *before* integer because Chibi's
-//! integer predicate matches flonums like `4.0`.
+//! order matters: `complex → ratio → bignum → flonum → integer` (broadest first).
+//! Chibi's integer predicate matches flonums like `4.0`, so flonum must come
+//! before integer. Complex/ratio/bignum must precede flonum for similar reasons.
 //!
 //! `Value::to_raw()` converts back to Chibi sexps for calling into Scheme.
 
@@ -92,6 +97,25 @@ pub enum Value {
     /// Floating point value.
     Float(f64),
 
+    /// Bignum (arbitrary-precision integer, stored as decimal string).
+    ///
+    /// Chibi-scheme bignums are converted to their decimal representation
+    /// for safe transport across the FFI boundary. Use `to_raw()` to
+    /// convert back to a chibi bignum via `string->number`.
+    Bignum(String),
+
+    /// Rational number (exact ratio of two integers).
+    ///
+    /// Components are exact integers (`Integer` or `Bignum`).
+    /// Displayed as `n/d` (e.g. `1/3`).
+    Rational(Box<Value>, Box<Value>),
+
+    /// Complex number with real and imaginary parts.
+    ///
+    /// Components are real numbers (`Integer`, `Float`, `Bignum`, or `Rational`).
+    /// Displayed as `a+bi` (e.g. `1+2i`).
+    Complex(Box<Value>, Box<Value>),
+
     /// String value.
     String(String),
 
@@ -132,6 +156,21 @@ pub enum Value {
     /// Unspecified value (like void in C).
     Unspecified,
 
+    /// Exit signal from `(exit)` or `(exit n)`.
+    ///
+    /// Returned when scheme code calls `(exit)`, `(exit #t)`, `(exit #f)`,
+    /// or `(exit n)`. The `i32` is the exit code:
+    /// - `(exit)` / `(exit #t)` → 0
+    /// - `(exit #f)` → 1
+    /// - `(exit n)` (integer) → n (clamped to i32)
+    /// - `(exit other)` → 0
+    ///
+    /// Embedders who need to propagate the exit signal should match on this
+    /// variant. Embedders who don't care can treat it like any other value.
+    ///
+    /// Note: produced only by `check_exit()` — never by `Value::from_raw()`.
+    Exit(i32),
+
     /// A callable Scheme procedure or opcode (builtin like `+`).
     ///
     /// Holds a raw sexp pointer — only valid within the originating Context.
@@ -158,7 +197,10 @@ impl Value {
     ///
     /// # Safety
     /// ctx and raw must be valid pointers from Chibi-Scheme.
-    pub(crate) unsafe fn from_raw(ctx: ffi::sexp, raw: ffi::sexp) -> Result<Self> {
+    ///
+    /// `#[doc(hidden)]` — not part of the stable public API; exposed for proc-macro generated code.
+    #[doc(hidden)]
+    pub unsafe fn from_raw(ctx: ffi::sexp, raw: ffi::sexp) -> Result<Self> {
         unsafe { Self::from_raw_depth(ctx, raw, 0) }
     }
 
@@ -173,6 +215,42 @@ impl Value {
         unsafe {
             if ffi::sexp_exceptionp(raw) != 0 {
                 return Err(Self::extract_exception_error(ctx, raw));
+            }
+
+            // --- numeric tower: check broadest first ---
+
+            // complex numbers (real + imaginary)
+            if ffi::sexp_complexp(raw) != 0 {
+                // root raw — recursive from_raw_depth calls may allocate
+                let _root = ffi::GcRoot::new(ctx, raw);
+                let real_part = ffi::sexp_complex_real(raw);
+                let imag_part = ffi::sexp_complex_imag(raw);
+                let real = Value::from_raw_depth(ctx, real_part, depth + 1)?;
+                let imag = Value::from_raw_depth(ctx, imag_part, depth + 1)?;
+                return Ok(Value::Complex(Box::new(real), Box::new(imag)));
+            }
+
+            // rational numbers (numerator / denominator)
+            if ffi::sexp_ratiop(raw) != 0 {
+                // root raw — recursive from_raw_depth calls may allocate
+                let _root = ffi::GcRoot::new(ctx, raw);
+                let num = ffi::sexp_ratio_numerator(raw);
+                let den = ffi::sexp_ratio_denominator(raw);
+                let numerator = Value::from_raw_depth(ctx, num, depth + 1)?;
+                let denominator = Value::from_raw_depth(ctx, den, depth + 1)?;
+                return Ok(Value::Rational(Box::new(numerator), Box::new(denominator)));
+            }
+
+            // bignums (arbitrary-precision integers)
+            if ffi::sexp_bignump(raw) != 0 {
+                // root raw — sexp_bignum_to_string allocates (opens a string port)
+                let _root = ffi::GcRoot::new(ctx, raw);
+                let str_sexp = ffi::sexp_bignum_to_string(ctx, raw);
+                let str_ptr = ffi::sexp_string_data(str_sexp);
+                let str_len = ffi::sexp_string_size(str_sexp);
+                let bytes = std::slice::from_raw_parts(str_ptr as *const u8, str_len as usize);
+                let s = String::from_utf8(bytes.to_vec())?;
+                return Ok(Value::Bignum(s));
             }
 
             // check floats before integers because sexp_integerp matches some floats
@@ -355,7 +433,7 @@ impl Value {
     /// Extract a structured error from a Chibi exception.
     ///
     /// Detects sandbox sentinel prefixes (`[sandbox:file]`, `[sandbox:binding]`)
-    /// and module policy violations, returning `SandboxViolation` for those cases
+    /// and VFS gate violations, returning `SandboxViolation` for those cases
     /// and `EvalError` for everything else.
     unsafe fn extract_exception_error(ctx: ffi::sexp, exn: ffi::sexp) -> Error {
         unsafe {
@@ -389,8 +467,14 @@ impl Value {
                 }
             };
 
-            // sentinel: file IO policy denial
+            // sentinel: file IO policy denial (rust trampolines for file-exists?/delete-file)
             if let Some(path) = message.strip_prefix("[sandbox:file] ") {
+                return Error::SandboxViolation(format!("file access denied: {}", path));
+            }
+
+            // C-level FS policy gate denial (eval.c patches F, G)
+            if message.contains("access denied by sandbox policy") {
+                let path = irritant_str.as_deref().unwrap_or("unknown");
                 return Error::SandboxViolation(format!("file access denied: {}", path));
             }
 
@@ -399,14 +483,13 @@ impl Value {
                 return Error::SandboxViolation(rest.to_string());
             }
 
-            // module policy: detect import failures when VfsOnly is active.
+            // VFS gate: detect import failures when sandboxed.
             // chibi emits "couldn't find import" from meta-7.scm (scheme level)
             // or "couldn't find file in module path" from eval.c (C level).
             if message == "couldn't find import" || message == "couldn't find file in module path" {
-                use crate::sandbox::MODULE_POLICY;
-                use crate::sandbox::ModulePolicy;
-                let is_vfs_only = MODULE_POLICY.with(|cell| cell.get() == ModulePolicy::VfsOnly);
-                if is_vfs_only {
+                use crate::sandbox::VFS_GATE;
+                let is_gated = VFS_GATE.with(|cell| cell.get() != crate::sandbox::GATE_OFF);
+                if is_gated {
                     let module = irritant_str.as_deref().unwrap_or("unknown");
                     return Error::SandboxViolation(format!(
                         "module import blocked: {} (not available in this sandbox)",
@@ -427,7 +510,7 @@ impl Value {
     /// Convert a Rust value to a raw Chibi sexp.
     ///
     /// Useful for returning values from foreign functions registered
-    /// with [`crate::Context::define_fn_variadic`] or `#[scheme_fn]`.
+    /// with [`crate::Context::define_fn_variadic`] or `#[tein_fn]`.
     ///
     /// Supports all value types except `Other`.
     ///
@@ -450,6 +533,35 @@ impl Value {
             match self {
                 Value::Integer(n) => Ok(ffi::sexp_make_fixnum(*n as ffi::sexp_sint_t)),
                 Value::Float(f) => Ok(ffi::sexp_make_flonum(ctx, *f)),
+                Value::Bignum(s) => {
+                    let c_str = std::ffi::CString::new(s.as_str()).map_err(|_| {
+                        Error::TypeError("bignum string contains null bytes".to_string())
+                    })?;
+                    let str_sexp =
+                        ffi::sexp_c_str(ctx, c_str.as_ptr(), s.len() as ffi::sexp_sint_t);
+                    // root str_sexp — sexp_string_to_number allocates internally
+                    let _str_root = ffi::GcRoot::new(ctx, str_sexp);
+                    let result = ffi::sexp_string_to_number(ctx, str_sexp, 10);
+                    // sexp_string_to_number returns SEXP_FALSE on parse failure, not an exception
+                    if ffi::sexp_booleanp(result) != 0 {
+                        return Err(Error::TypeError(format!("invalid bignum string: {s}")));
+                    }
+                    Ok(result)
+                }
+                Value::Rational(n, d) => {
+                    let num = n.to_raw_depth(ctx, depth + 1)?;
+                    // root num — converting denominator may allocate
+                    let _num_root = ffi::GcRoot::new(ctx, num);
+                    let den = d.to_raw_depth(ctx, depth + 1)?;
+                    Ok(ffi::sexp_make_ratio(ctx, num, den))
+                }
+                Value::Complex(r, i) => {
+                    let real = r.to_raw_depth(ctx, depth + 1)?;
+                    // root real — converting imag may allocate
+                    let _real_root = ffi::GcRoot::new(ctx, real);
+                    let imag = i.to_raw_depth(ctx, depth + 1)?;
+                    Ok(ffi::sexp_make_complex(ctx, real, imag))
+                }
                 Value::Boolean(b) => Ok(ffi::sexp_make_boolean(*b)),
                 Value::String(s) => {
                     let c_str = std::ffi::CString::new(s.as_str())
@@ -517,6 +629,10 @@ impl Value {
                 Value::Port(raw) => Ok(*raw),
                 Value::HashTable(raw) => Ok(*raw),
                 Value::Procedure(raw) => Ok(*raw),
+                Value::Exit(n) => Err(Error::TypeError(format!(
+                    "cannot convert Exit({}) to raw sexp — exit is a rust-side signal only",
+                    n,
+                ))),
                 Value::Other(desc) => Err(Error::TypeError(format!(
                     "cannot convert Other({}) to raw sexp",
                     desc,
@@ -641,6 +757,30 @@ impl Value {
         }
     }
 
+    /// Extract as bignum string, if this is a `Bignum`.
+    pub fn as_bignum(&self) -> Option<&str> {
+        match self {
+            Value::Bignum(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Extract rational components, if this is a `Rational`.
+    pub fn as_rational(&self) -> Option<(&Value, &Value)> {
+        match self {
+            Value::Rational(n, d) => Some((n.as_ref(), d.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// Extract complex components, if this is a `Complex`.
+    pub fn as_complex(&self) -> Option<(&Value, &Value)> {
+        match self {
+            Value::Complex(r, i) => Some((r.as_ref(), i.as_ref())),
+            _ => None,
+        }
+    }
+
     /// Extract the raw sexp pointer, if this value is a `Port`.
     ///
     /// The returned pointer is opaque — pass it back to Scheme via [`crate::Context::call`].
@@ -736,10 +876,14 @@ impl PartialEq for Value {
             (Value::Unspecified, Value::Unspecified) => true,
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Bytevector(a), Value::Bytevector(b)) => a == b,
+            (Value::Bignum(a), Value::Bignum(b)) => a == b,
+            (Value::Rational(an, ad), Value::Rational(bn, bd)) => an == bn && ad == bd,
+            (Value::Complex(ar, ai), Value::Complex(br, bi)) => ar == br && ai == bi,
             (Value::Port(a), Value::Port(b)) => std::ptr::eq(*a, *b),
             (Value::HashTable(a), Value::HashTable(b)) => std::ptr::eq(*a, *b),
             // procedure equality is raw pointer identity (same scheme object)
             (Value::Procedure(a), Value::Procedure(b)) => std::ptr::eq(*a, *b),
+            (Value::Exit(a), Value::Exit(b)) => a == b,
             (Value::Other(a), Value::Other(b)) => a == b,
             (
                 Value::Foreign {
@@ -819,10 +963,23 @@ impl fmt::Display for Value {
                 }
                 write!(f, ")")
             }
+            Value::Bignum(s) => write!(f, "{s}"),
+            Value::Rational(n, d) => write!(f, "{n}/{d}"),
+            Value::Complex(r, i) => {
+                write!(f, "{r}")?;
+                // check if imaginary part displays with a leading sign
+                let imag_str = format!("{i}");
+                if imag_str.starts_with('-') || imag_str.starts_with('+') {
+                    write!(f, "{imag_str}i")
+                } else {
+                    write!(f, "+{imag_str}i")
+                }
+            }
             Value::Port(_) => write!(f, "#<port>"),
             Value::HashTable(_) => write!(f, "#<hash-table>"),
             Value::Nil => write!(f, "()"),
             Value::Unspecified => write!(f, "#<unspecified>"),
+            Value::Exit(n) => write!(f, "#<exit {}>", n),
             Value::Procedure(_) => write!(f, "#<procedure>"),
             Value::Other(s) => write!(f, "#<{}>", s),
             Value::Foreign {

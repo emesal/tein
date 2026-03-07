@@ -1,67 +1,33 @@
-//! Sandboxing presets and filesystem policy for restricted Scheme environments.
+//! Sandboxing and filesystem policy for restricted Scheme environments.
 //!
 //! tein's sandboxing has four independent layers:
 //!
-//! 1. **Environment restriction** — expose only selected primitives via presets
+//! 1. **Module restriction** — importable modules via [`Modules`] + [`ContextBuilder::sandboxed()`](crate::ContextBuilder::sandboxed)
 //! 2. **Step limits** — cap VM instructions per evaluation
 //! 3. **File IO policy** — allowlist filesystem paths for reading/writing
-//! 4. **Module policy** — restrict `(import ...)` to VFS-only modules
+//! 4. **VFS gate** — restrict `(import ...)` to vetted VFS modules; automatic when using `sandboxed()`
 //!
-//! # Presets
+//! # Module sets
 //!
-//! Each [`Preset`] defines a set of Chibi-Scheme primitive names. Presets are
-//! additive — combine them via [`ContextBuilder::preset()`](crate::ContextBuilder::preset).
-//! Core syntax (`define`, `lambda`, `if`, `set!`, `quote`, etc.) is always
-//! available regardless of preset selection.
+//! [`Modules`] controls which VFS modules sandboxed code can import. The registry
+//! (`VFS_REGISTRY` in `vfs_registry.rs`) declares all vetted modules with their
+//! dependencies, files, and safety tier.
 //!
 //! ```
-//! use tein::Context;
-//! use tein::sandbox::{ARITHMETIC, LISTS};
+//! use tein::{Context, sandbox::Modules};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let ctx = Context::builder()
-//!     .preset(&ARITHMETIC)
-//!     .preset(&LISTS)
-//!     .step_limit(50_000)
+//!     .standard_env()
+//!     .sandboxed(Modules::Safe)
 //!     .build()?;
 //!
-//! // arithmetic and list ops work
-//! let result = ctx.evaluate("(+ 1 (car (cons 2 3)))")?;
+//! // import and use scheme/base
+//! let result = ctx.evaluate("(import (scheme base)) (+ 1 2)")?;
 //! assert_eq!(result, tein::Value::Integer(3));
-//!
-//! // string ops are blocked
-//! assert!(ctx.evaluate(r#"(string-length "hello")"#).is_err());
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! # Preset reference
-//!
-//! | preset | primitives |
-//! |--------|-----------|
-//! | [`ARITHMETIC`] | `+`, `-`, `*`, `/`, `quotient`, `remainder`, `expt`, comparisons, exact↔inexact |
-//! | [`MATH`] | `exp`, `ln`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan1`, `sqrt`, rounding |
-//! | [`LISTS`] | `car`, `cdr`, `cons`, `null?`, `pair?`, `list?`, `length*`, `reverse`, `append2`, `memq`, `assq` |
-//! | [`VECTORS`] | `vector-ref`, `vector-set!`, `vector-length`, `make-vector`, `list->vector` |
-//! | [`STRINGS`] | `string-ref`, `string-length`, `substring`, `string?`, conversions, `make-string` |
-//! | [`CHARACTERS`] | `char?`, `char->integer`, `integer->char`, `char-upcase`, `char-downcase` |
-//! | [`TYPE_PREDICATES`] | `eq?`, `equal?`, `null?`, `symbol?`, `char?`, `fixnum?`, `flonum?`, type tests |
-//! | [`MUTATION`] | `set-car!`, `set-cdr!`, `vector-set!`, `string-set!` |
-//! | [`STRING_PORTS`] | `open-input-string`, `open-output-string`, `get-output-string` |
-//! | [`STDOUT_ONLY`] | `write`, `write-char`, `flush-output`, `current-output-port`, `current-error-port` |
-//! | [`EXCEPTIONS`] | `make-exception`, `raise`, exception accessors |
-//! | [`BYTEVECTORS`] | `bytevector-u8-ref`, `bytevector-u8-set!`, `bytevector-length`, `make-bytevector` |
-//! | [`IO_READ`] | `read`, `read-char`, `peek-char`, `char-ready?`, `current-input-port` |
-//! | [`CONTROL`] | `apply1`, `%call/cc` |
-//!
-//! # Convenience builders
-//!
-//! Two convenience methods on [`crate::ContextBuilder`] compose presets for common use cases:
-//!
-//! - [`.pure_computation()`](crate::ContextBuilder::pure_computation) — `ARITHMETIC` + `MATH` +
-//!   `LISTS` + `VECTORS` + `STRINGS` + `CHARACTERS` + `TYPE_PREDICATES`
-//! - [`.safe()`](crate::ContextBuilder::safe) — `pure_computation()` + `MUTATION` +
-//!   `STRING_PORTS` + `STDOUT_ONLY` + `EXCEPTIONS`
 //!
 //! # File IO policy
 //!
@@ -72,16 +38,25 @@
 //! Paths are canonicalised before prefix-checking, so symlink and `..`
 //! traversals are resolved.
 //!
-//! # Module policy
+//! Enforcement is at the C opcode level: `eval.c` patches F and G call
+//! `tein_fs_check_access()` before `fopen()` in `sexp_open_input_file_op`
+//! and `sexp_open_output_file_op`. The C dispatcher checks `tein_fs_policy_gate`
+//! (thread-local, 0=off, 1=check) and calls the rust callback
+//! `tein_fs_policy_check` which delegates to [`FsPolicy`] prefix matching.
+//! `file-exists?` and `delete-file` remain rust trampolines (no opcode equivalents).
 //!
-//! When a sandboxed context uses the standard environment, the module
-//! policy is automatically set to VFS-only — `(import ...)` can only
-//! load modules embedded in tein's virtual filesystem, not from the
-//! host filesystem. This prevents sandbox escapes via modules like
-//! `(chibi process)` or `(chibi filesystem)`.
+//! # VFS gate
+//!
+//! Module imports in sandboxed contexts are restricted automatically:
+//!
+//! - unsandboxed contexts — no restriction; VFS + filesystem modules all pass.
+//! - sandboxed contexts — only modules in the resolved `Modules` allowlist pass.
+//!   extend with [`.allow_module()`](crate::ContextBuilder::allow_module).
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
+
+include!("vfs_registry.rs");
 
 /// Filesystem access policy for sandboxed IO.
 ///
@@ -140,325 +115,534 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
-/// Module import policy for sandboxed standard-env contexts.
-///
-/// Controls which modules can be loaded via `(import ...)`.
-/// When a sandboxed context uses the standard environment, this is
-/// automatically set to `VfsOnly` to prevent loading filesystem-based
-/// modules (e.g. `(chibi process)`, `(chibi filesystem)`).
-///
-/// ## VFS safety contract
-///
-/// VFS modules are safe by construction: tein curates the embedded virtual
-/// filesystem to ensure no module can bypass the existing safety layers
-/// (preset allowlists, FsPolicy, fuel/timeout). capabilities exposed by
-/// VFS modules remain subject to these controls — e.g. IO operations are
-/// gated by preset availability and filesystem path policies.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ModulePolicy {
-    /// All modules allowed (unsandboxed or non-standard-env context).
-    Unrestricted = 0,
-    /// Only VFS modules allowed (sandboxed standard-env context).
-    VfsOnly = 1,
-}
+// VFS shadow modules:
+//
+// the following modules have `VfsSource::Shadow` entries in the registry.
+// in sandboxed contexts, `register_vfs_shadows()` injects replacement `.sld`
+// files that re-export from safe tein counterparts or provide neutered stubs.
+// unsandboxed contexts use chibi's native versions (no shadow registered).
+//
+// hand-written shadows (functional):
+// - `scheme/eval` — exports eval (from chibi) + environment (tein-environment-internal
+//   trampoline, validates specs against VFS_ALLOWLIST). closes #97.
+// - `scheme/load` — re-exports (tein load) VFS-restricted load + environment trampoline.
+// - `scheme/repl` — interaction-environment delegates to tein-interaction-environment-internal:
+//   a persistent mutable env (INTERACTION_ENV) that accumulates definitions across evals.
+// - `scheme/file` — re-exports (tein file), providing FsPolicy enforcement
+// - `scheme/process-context` — re-exports (tein process) with neutered env/argv
+// - `srfi/98` — neutered get-environment-variable (always #f)
+//
+// generated shadow stubs (error-on-call): chibi/filesystem, chibi/process,
+// chibi/system, chibi/shell, chibi/temp-file, chibi/stty, chibi/term/edit-line,
+// chibi/app, chibi/config, chibi/log, chibi/tar, chibi/apropos, srfi/193,
+// chibi/net, chibi/net/http, chibi/net/server, chibi/net/http-server,
+// chibi/net/server-util, chibi/net/servlet.
+//
+// modules NOT shadowed and intentionally blocked:
+//
+// - `scheme/r5rs` — re-exports scheme/eval; tracked in #106.
+
+/// numeric gate level for C interop. mirrors `tein_vfs_gate` in `tein_shim.c`.
+pub(crate) const GATE_OFF: u8 = 0;
+/// numeric gate level for C interop — rust callback checks the allowlist.
+pub(crate) const GATE_CHECK: u8 = 1;
+
+/// numeric FS policy gate level for C interop. mirrors `tein_fs_policy_gate` in `tein_shim.c`.
+pub(crate) const FS_GATE_OFF: u8 = 0;
+/// numeric FS policy gate level — rust callback checks IS_SANDBOXED + FsPolicy.
+pub(crate) const FS_GATE_CHECK: u8 = 1;
 
 thread_local! {
-    /// Active module import policy (set during build, cleared on drop).
-    pub(crate) static MODULE_POLICY: Cell<ModulePolicy> = const { Cell::new(ModulePolicy::Unrestricted) };
+    /// numeric gate level (0=off, 1=check). set during Context::build(), cleared on drop.
+    pub(crate) static VFS_GATE: Cell<u8> = const { Cell::new(GATE_OFF) };
+
+    /// the resolved allowlist, populated when gate is `Allow`.
+    /// read by the C→rust callback (`tein_vfs_gate_check`) during module resolution.
+    pub(crate) static VFS_ALLOWLIST: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+
+    /// FS policy gate level (0=off, 1=check). set during Context::build(), cleared on drop.
+    /// when armed, C-level `open-*-file` opcodes call `tein_fs_policy_check` (rust callback).
+    pub(crate) static FS_GATE: Cell<u8> = const { Cell::new(FS_GATE_OFF) };
+
+    /// canonicalised filesystem module search directories.
+    ///
+    /// populated during `Context::build()` when `module_path()` dirs or
+    /// `TEIN_MODULE_PATH` are configured. read by `tein_vfs_gate_check`
+    /// to allow imports from user-supplied directories.
+    /// cleared (restored to previous value) on `Context::drop()`.
+    pub(crate) static FS_MODULE_PATHS: RefCell<Vec<String>> =
+        const { RefCell::new(Vec::new()) };
 }
 
-/// A named set of Scheme primitives for environment restriction.
+/// resolve transitive deps from `VFS_REGISTRY`.
 ///
-/// Used with [`ContextBuilder::preset()`](crate::ContextBuilder::preset)
-/// to build allowlists. Presets are derived from Chibi's `opcodes.c`.
-pub struct Preset {
-    /// Human-readable name for this preset.
-    pub name: &'static str,
-    /// Primitive names to allow when this preset is active.
-    pub primitives: &'static [&'static str],
+/// follows `deps` recursively for each entry, returns a deduplicated flat list
+/// of all module path strings (including the inputs). unknown paths are included
+/// as-is (not expanded).
+pub fn registry_resolve_deps(paths: &[&str]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stack: Vec<&str> = paths.to_vec();
+
+    while let Some(path) = stack.pop() {
+        if !seen.insert(path) {
+            continue;
+        }
+        result.push(path.to_string());
+
+        // union deps from all entries with this path (handles Embedded + Shadow pairs)
+        for entry in VFS_REGISTRY.iter().filter(|e| e.path == path) {
+            for dep in entry.deps {
+                if !seen.contains(dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+    }
+
+    result
 }
 
-/// Basic arithmetic operations.
-pub const ARITHMETIC: Preset = Preset {
-    name: "arithmetic",
-    primitives: &[
-        "+",
-        "-",
-        "*",
-        "/",
-        "quotient",
-        "remainder",
-        "expt",
-        "<",
-        "<=",
-        ">",
-        ">=",
-        "=",
-        "exact->inexact",
-        "inexact->exact",
-    ],
-};
+/// build the default safe allowlist from `VFS_REGISTRY` (`default_safe: true` entries
+/// with their transitive deps resolved, filtered by active cargo features).
+pub(crate) fn registry_safe_allowlist() -> Vec<String> {
+    let paths: Vec<&str> = VFS_REGISTRY
+        .iter()
+        .filter(|e| e.default_safe && feature_enabled(e.feature))
+        .map(|e| e.path)
+        .collect();
+    registry_resolve_deps(&paths)
+}
 
-/// Transcendental math functions.
-pub const MATH: Preset = Preset {
-    name: "math",
-    primitives: &[
-        "exp",
-        "ln",
-        "sin",
-        "cos",
-        "tan",
-        "asin",
-        "acos",
-        "atan1",
-        "sqrt",
-        "exact-sqrt",
-        "round",
-        "truncate",
-        "floor",
-        "ceiling",
-    ],
-};
+/// build the full allowlist from `VFS_REGISTRY` (all entries with deps resolved,
+/// filtered by active cargo features).
+pub(crate) fn registry_all_allowlist() -> Vec<String> {
+    let paths: Vec<&str> = VFS_REGISTRY
+        .iter()
+        .filter(|e| feature_enabled(e.feature))
+        .map(|e| e.path)
+        .collect();
+    registry_resolve_deps(&paths)
+}
 
-/// List operations.
-pub const LISTS: Preset = Preset {
-    name: "lists",
-    primitives: &[
-        "car", "cdr", "cons", "null?", "pair?", "list?", "length*", "reverse", "append2", "memq",
-        "assq",
-    ],
-};
+/// get all VFS files to embed from `VFS_REGISTRY` (embedded + feature-gated).
+#[allow(dead_code)] // used in build.rs via include!
+fn registry_vfs_files() -> Vec<&'static str> {
+    VFS_REGISTRY
+        .iter()
+        .filter(|e| e.source == VfsSource::Embedded && feature_enabled(e.feature))
+        .flat_map(|e| e.files.iter().copied())
+        .collect()
+}
 
-/// Vector operations.
-pub const VECTORS: Preset = Preset {
-    name: "vectors",
-    primitives: &[
-        "vector-ref",
-        "vector-set!",
-        "vector-length",
-        "make-vector",
-        "list->vector",
-    ],
-};
+/// get all clib entries from `VFS_REGISTRY`.
+#[allow(dead_code)] // used in build.rs via include!
+fn registry_clib_entries() -> Vec<&'static ClibEntry> {
+    VFS_REGISTRY
+        .iter()
+        .filter_map(|e| e.clib.as_ref())
+        .collect()
+}
 
-/// String operations.
-pub const STRINGS: Preset = Preset {
-    name: "strings",
-    primitives: &[
-        "string-ref",
-        "string-length",
-        "substring",
-        "string?",
-        "string->number",
-        "string->symbol",
-        "symbol->string",
-        "string-cmp",
-        "string-concatenate",
-        "make-string",
-    ],
-};
-
-/// Character operations.
-pub const CHARACTERS: Preset = Preset {
-    name: "characters",
-    primitives: &[
-        "char?",
-        "char->integer",
-        "integer->char",
-        "char-upcase",
-        "char-downcase",
-    ],
-};
-
-/// Type checking predicates.
-pub const TYPE_PREDICATES: Preset = Preset {
-    name: "type-predicates",
-    primitives: &[
-        "eq?",
-        "equal?",
-        "null?",
-        "symbol?",
-        "char?",
-        "fixnum?",
-        "flonum?",
-        "pair?",
-        "string?",
-        "vector?",
-        "bytevector?",
-        "closure?",
-        "exception?",
-        "list?",
-    ],
-};
-
-/// Mutation operations (set-car!, set-cdr!, vector-set!, string-set!).
-pub const MUTATION: Preset = Preset {
-    name: "mutation",
-    primitives: &["set-car!", "set-cdr!", "vector-set!", "string-set!"],
-};
-
-/// String port operations (in-memory IO).
-pub const STRING_PORTS: Preset = Preset {
-    name: "string-ports",
-    primitives: &[
-        "open-input-string",
-        "open-output-string",
-        "get-output-string",
-    ],
-};
-
-/// Stdout-only output (no file IO).
-pub const STDOUT_ONLY: Preset = Preset {
-    name: "stdout-only",
-    primitives: &[
-        "write",
-        "write-char",
-        "flush-output",
-        "current-output-port",
-        "current-error-port",
-    ],
-};
-
-/// Exception handling.
-pub const EXCEPTIONS: Preset = Preset {
-    name: "exceptions",
-    primitives: &[
-        "make-exception",
-        "raise",
-        "exception-kind",
-        "exception-irritants",
-        "exception?",
-    ],
-};
-
-/// Bytevector operations.
-pub const BYTEVECTORS: Preset = Preset {
-    name: "bytevectors",
-    primitives: &[
-        "bytevector-u8-ref",
-        "bytevector-u8-set!",
-        "bytevector-length",
-        "make-bytevector",
-        "bytevector?",
-    ],
-};
-
-/// Input reading operations.
-pub const IO_READ: Preset = Preset {
-    name: "io-read",
-    primitives: &[
-        "read",
-        "read-char",
-        "peek-char",
-        "char-ready?",
-        "current-input-port",
-    ],
-};
-
-/// Control flow primitives.
-pub const CONTROL: Preset = Preset {
-    name: "control",
-    primitives: &["apply1", "%call/cc"],
-};
-
-/// Port-reading support primitives (used alongside file_read() policy).
+/// Inject VFS shadow modules for sandboxed contexts.
 ///
-/// These are the port operations needed to actually read data once a
-/// file port has been opened via the policy-checked wrapper.
-pub const FILE_READ_SUPPORT: Preset = Preset {
-    name: "file-read-support",
-    primitives: &[
-        "close-input-port",
-        "read",
-        "read-char",
-        "peek-char",
-        "char-ready?",
-        "current-input-port",
-    ],
-};
+/// Iterates `VFS_REGISTRY` for `VfsSource::Shadow` entries and registers
+/// their `.sld` content into the dynamic VFS under canonical `/vfs/lib/`
+/// paths. Hand-written shadows use `shadow_sld`; generated stubs (from
+/// `SHADOW_STUBS` via build.rs) are looked up in `GENERATED_SHADOW_SLDS`.
+///
+/// Must be called before the VFS gate is armed (before `VFS_GATE` is set
+/// to `GATE_CHECK`).
+pub(crate) fn register_vfs_shadows() -> crate::error::Result<()> {
+    use std::ffi::CString;
 
-/// Port-writing support primitives (used alongside file_write() policy).
-///
-/// These are the port operations needed to actually write data once a
-/// file port has been opened via the policy-checked wrapper.
-pub const FILE_WRITE_SUPPORT: Preset = Preset {
-    name: "file-write-support",
-    primitives: &[
-        "close-output-port",
-        "write",
-        "write-char",
-        "flush-output",
-        "current-output-port",
-        "current-error-port",
-    ],
-};
+    let register_one = |path: &str, sld: &str| -> crate::error::Result<()> {
+        let vfs_path = format!("/vfs/lib/{}.sld", path);
+        let c_path = CString::new(vfs_path)
+            .map_err(|_| crate::error::Error::InitError("VFS path contains null bytes".into()))?;
+        let rc = unsafe {
+            crate::ffi::tein_vfs_register(
+                c_path.as_ptr(),
+                sld.as_ptr() as *const std::ffi::c_char,
+                sld.len() as std::ffi::c_uint,
+            )
+        };
+        if rc != 0 {
+            return Err(crate::error::Error::InitError(
+                "VFS shadow registration failed: out of memory".into(),
+            ));
+        }
+        Ok(())
+    };
 
-/// All presets known to tein, for stub registration during sandbox build.
-///
-/// Used internally to determine which primitives should get sandbox stubs
-/// when they aren't included in a context's allowlist.
-pub(crate) const ALL_PRESETS: &[&Preset] = &[
-    &ARITHMETIC,
-    &MATH,
-    &LISTS,
-    &VECTORS,
-    &STRINGS,
-    &CHARACTERS,
-    &TYPE_PREDICATES,
-    &MUTATION,
-    &STRING_PORTS,
-    &STDOUT_ONLY,
-    &EXCEPTIONS,
-    &BYTEVECTORS,
-    &IO_READ,
-    &CONTROL,
-    &FILE_READ_SUPPORT,
-    &FILE_WRITE_SUPPORT,
-];
+    for entry in VFS_REGISTRY.iter() {
+        if entry.source != VfsSource::Shadow {
+            continue;
+        }
+        if !feature_enabled(entry.feature) {
+            continue;
+        }
+        if let Some(sld) = entry.shadow_sld {
+            // hand-written shadow (scheme/file, scheme/process-context, etc.)
+            register_one(entry.path, sld)?;
+        }
+        // generated stubs have shadow_sld: None — handled below
+    }
 
-/// Primitives that are **always** stubbed out in sandboxed contexts,
-/// regardless of preset configuration.
+    // generated stubs from SHADOW_STUBS (via build.rs)
+    for &(path, sld) in GENERATED_SHADOW_SLDS.iter() {
+        register_one(path, sld)?;
+    }
+
+    Ok(())
+}
+
+// generated by build.rs — shadow stub .sld strings for OS-touching modules
+include!(concat!(env!("OUT_DIR"), "/tein_shadow_stubs.rs"));
+
+// generated by build.rs — module path → exported binding names
+include!(concat!(env!("OUT_DIR"), "/tein_exports.rs"));
+
+/// look up the exported binding names for a VFS module by path.
 ///
-/// These provide direct access to unrestricted environments and cannot
-/// be safely exposed in any sandboxed context. Unlike [`ALL_PRESETS`],
-/// these are never allowable — there is no preset that grants them.
+/// returns `Some(&[...])` if the module is in the generated exports table,
+/// or `None` for paths not in the registry (e.g. `chibi/*` internal modules).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn module_exports(path: &str) -> Option<&'static [&'static str]> {
+    MODULE_EXPORTS
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, exports)| *exports)
+}
+
+/// collect all exports from modules NOT in the given allowlist.
 ///
-/// A sandboxed scheme program holding any of these can call
-/// `(eval code (interaction-environment))` to execute arbitrary code
-/// in the full unrestricted environment, completely defeating presets.
+/// returns `(binding_name, module_path)` pairs for registering UX stubs —
+/// informative errors that tell sandbox users which module to import.
+/// bindings from modules with empty export lists (alias modules like `scheme/bitwise`)
+/// are silently skipped since they have no top-level names to stub.
+pub(crate) fn unexported_stubs(allowed_modules: &[String]) -> Vec<(&'static str, &'static str)> {
+    // collect every binding name already provided by an allowed module.
+    // stubs must never be generated for these — doing so clobbers real bindings.
+    // this is especially important for mega re-export bundles like scheme/red and
+    // scheme/small that duplicate hundreds of names from other modules.
+    let covered: std::collections::HashSet<&str> = MODULE_EXPORTS
+        .iter()
+        .filter(|(p, _)| allowed_modules.iter().any(|a| a == p))
+        .flat_map(|(_, exports)| exports.iter().copied())
+        .collect();
+
+    let mut stubs = Vec::new();
+    for (path, exports) in MODULE_EXPORTS.iter() {
+        if !allowed_modules.iter().any(|a| a == path) {
+            for name in exports.iter() {
+                if !covered.contains(name) {
+                    stubs.push((*name, *path));
+                }
+            }
+        }
+    }
+    stubs
+}
+
+/// Module set configuration for sandboxed contexts.
 ///
-/// Note: `compile` and `generate` are NOT listed here even though they
-/// could theoretically be misused, because chibi uses `compile` internally
-/// during macro expansion. Stubbing it breaks standard library features.
-/// `eval` + environment accessors are sufficient to close the escape hatch.
+/// Controls which VFS modules are importable when using [`ContextBuilder::sandboxed()`].
+/// Dependencies are always resolved automatically from the registry.
 ///
-/// Note: `%meta-env`, `find-module-file`, `env-exports`, `env-parent`, `%import`
-/// are used by chibi's init-7 / meta-7 *during C-side initialisation*, not at
-/// runtime from Scheme. They are safe to stub once the sandbox env is built.
-pub(crate) const ALWAYS_STUB: &[&str] = &[
-    // environment escape — direct access to unrestricted or meta environments
-    "eval",
-    "interaction-environment",
-    "primitive-environment",
-    "scheme-report-environment",
-    "current-environment",
-    "set-current-environment!",
-    "%meta-env",
-    // environment introspection — allows mapping the env chain from scheme
-    "env-parent",
-    "env-exports",
-    // module system — filesystem module loading and path manipulation
-    "%load",
-    "%import",
-    "load-module-file",
-    "find-module-file",
-    "add-module-directory",
-    "current-module-path",
-    // process info — exposes binary path and arguments
-    "command-line",
-    // type/vm system mutation — could enable type confusion or VM side-channels
-    "register-simple-type",
-    "register-optimization!",
-    "print-vm-profile",
-    "reset-vm-profile",
-];
+/// # examples
+///
+/// ```
+/// use tein::{Context, sandbox::Modules};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // allow only scheme/base
+/// let ctx = Context::builder()
+///     .standard_env()
+///     .sandboxed(Modules::only(&["scheme/base"]))
+///     .build()?;
+/// let result = ctx.evaluate("(import (scheme base)) (+ 1 2)")?;
+/// assert_eq!(result, tein::Value::Integer(3));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug, Default)]
+pub enum Modules {
+    /// conservative safe set — default for sandboxed contexts.
+    ///
+    /// includes all modules marked `default_safe: true` in the registry,
+    /// with transitive deps resolved. excludes `scheme/eval` and `scheme/r5rs`.
+    /// `scheme/time` is available via a shadow re-exporting `(tein time)` (requires
+    /// feature `"time"`). `scheme/repl`, `scheme/file`, `scheme/load`,
+    /// `scheme/process-context`, and `tein/process` are included via
+    /// shadow modules or neutered trampolines.
+    #[default]
+    Safe,
+    /// all vetted modules in the registry (superset of `Safe`).
+    All,
+    /// syntax only — no modules, not even `scheme/base`.
+    ///
+    /// `import` is still available as syntax (so code can attempt imports),
+    /// but all module imports will be rejected by the VFS gate.
+    None,
+    /// custom explicit module list; transitive deps resolved automatically.
+    Only(Vec<String>),
+}
+
+impl Modules {
+    /// construct a custom module list from module path strings.
+    ///
+    /// transitive dependencies are resolved automatically at build time.
+    pub fn only(modules: &[&str]) -> Self {
+        Modules::Only(modules.iter().map(|s| s.to_string()).collect())
+    }
+}
+
+/// check whether a cargo feature gate is satisfied at compile time.
+///
+/// **keep in sync with `feature_enabled` in `build.rs`** — both must be updated
+/// when adding or removing cargo features. they can't be merged because `cfg!` resolves
+/// differently in build script vs lib contexts.
+#[inline]
+fn feature_enabled(feature: Option<&str>) -> bool {
+    match feature {
+        None => true,
+        Some("json") => cfg!(feature = "json"),
+        Some("toml") => cfg!(feature = "toml"),
+        Some("uuid") => cfg!(feature = "uuid"),
+        Some("time") => cfg!(feature = "time"),
+        Some("regex") => cfg!(feature = "regex"),
+        Some("crypto") => cfg!(feature = "crypto"),
+        Some("http") => cfg!(feature = "http"),
+        Some(f) => {
+            // unknown feature name — conservatively include (build.rs handles gating)
+            eprintln!("warning: unknown feature gate in VFS_REGISTRY: {f}");
+            true
+        }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn registry_safe_allowlist_contains_expected_modules() {
+        let safe = registry_safe_allowlist();
+        // core r7rs modules expected in safe set
+        assert!(
+            safe.iter().any(|m| m == "scheme/base"),
+            "scheme/base missing"
+        );
+        assert!(
+            safe.iter().any(|m| m == "scheme/write"),
+            "scheme/write missing"
+        );
+        assert!(safe.iter().any(|m| m == "srfi/1"), "srfi/1 missing");
+        // shadow modules — present in safe set (shadow replaces native)
+        assert!(
+            safe.iter().any(|m| m == "scheme/file"),
+            "scheme/file missing from safe (shadow)"
+        );
+        assert!(
+            safe.iter().any(|m| m == "scheme/repl"),
+            "scheme/repl missing from safe (shadow)"
+        );
+        // tein/process — safe (trampolines neuter env/argv in sandbox)
+        assert!(
+            safe.iter().any(|m| m == "tein/process"),
+            "tein/process missing from safe"
+        );
+        // scheme/process-context shadow
+        assert!(
+            safe.iter().any(|m| m == "scheme/process-context"),
+            "scheme/process-context missing from safe (shadow)"
+        );
+        // scheme/show + srfi/166
+        assert!(
+            safe.iter().any(|m| m == "scheme/show"),
+            "scheme/show missing from safe"
+        );
+        assert!(
+            safe.iter().any(|m| m == "srfi/166"),
+            "srfi/166 missing from safe"
+        );
+        // scheme/eval is now in safe set (#97)
+        assert!(
+            safe.iter().any(|m| m == "scheme/eval"),
+            "scheme/eval should be in safe set (#97)"
+        );
+    }
+
+    #[test]
+    fn registry_all_allowlist_is_superset_of_safe() {
+        let safe = registry_safe_allowlist();
+        let all = registry_all_allowlist();
+        // all must contain everything safe contains
+        for module in &safe {
+            assert!(
+                all.iter().any(|m| m == module),
+                "all_allowlist missing module from safe: {module}"
+            );
+        }
+        // all must be strictly larger (unsafe modules like scheme/eval are included)
+        assert!(
+            all.len() > safe.len(),
+            "registry_all_allowlist should be larger than safe"
+        );
+        // scheme/eval + scheme/repl must be present in all
+        assert!(
+            all.iter().any(|m| m == "scheme/eval"),
+            "scheme/eval missing from all"
+        );
+        assert!(
+            all.iter().any(|m| m == "tein/process"),
+            "tein/process missing from all"
+        );
+    }
+
+    #[test]
+    fn registry_resolve_deps_resolves_transitive() {
+        // scheme/char transitively pulls in chibi/char-set/full, chibi/iset/base, etc.
+        let resolved = registry_resolve_deps(&["scheme/char"]);
+        assert!(resolved.iter().any(|m| m == "scheme/char"));
+        assert!(
+            resolved.iter().any(|m| m == "chibi/char-set/full"),
+            "scheme/char should transitively pull chibi/char-set/full"
+        );
+        assert!(
+            resolved.iter().any(|m| m == "chibi/iset/base"),
+            "scheme/char should transitively pull chibi/iset/base"
+        );
+        // srfi/39 comes from scheme/base (via chibi chain) — verify no duplicates
+        let resolved_base = registry_resolve_deps(&["scheme/base"]);
+        let count_srfi9 = resolved_base
+            .iter()
+            .filter(|m| m.as_str() == "srfi/9")
+            .count();
+        assert_eq!(
+            count_srfi9, 1,
+            "srfi/9 should appear exactly once (no duplicates)"
+        );
+    }
+
+    #[test]
+    fn registry_resolve_deps_unknown_path_passthrough() {
+        // unknown paths should be included as-is, not panic
+        let resolved = registry_resolve_deps(&["some/unknown/module"]);
+        assert!(resolved.iter().any(|m| m == "some/unknown/module"));
+    }
+}
+
+#[cfg(test)]
+mod exports_tests {
+    use super::*;
+
+    #[test]
+    fn module_exports_scheme_base_contains_arithmetic() {
+        let exports = module_exports("scheme/base").expect("scheme/base should have exports");
+        assert!(exports.contains(&"+"), "scheme/base must export '+'");
+        assert!(exports.contains(&"map"), "scheme/base must export 'map'");
+        assert!(
+            exports.contains(&"define"),
+            "scheme/base must export 'define'"
+        );
+    }
+
+    #[test]
+    fn module_exports_nonexistent_returns_none() {
+        assert!(
+            module_exports("nonexistent/module").is_none(),
+            "unknown module should return None"
+        );
+    }
+
+    #[test]
+    fn module_exports_dynamic_module_tein_uuid() {
+        let exports = module_exports("tein/uuid").expect("tein/uuid should have exports");
+        assert!(
+            exports.contains(&"make-uuid"),
+            "tein/uuid must export 'make-uuid'"
+        );
+        assert!(exports.contains(&"uuid?"), "tein/uuid must export 'uuid?'");
+        assert!(
+            exports.contains(&"uuid-nil"),
+            "tein/uuid must export 'uuid-nil'"
+        );
+    }
+
+    #[test]
+    fn unexported_stubs_with_base_allowed_excludes_base_exports() {
+        let allowed = vec!["scheme/base".to_string()];
+        let stubs = unexported_stubs(&allowed);
+        // '+' is exported only by scheme/base — it must not appear in stubs when allowed
+        assert!(
+            !stubs.iter().any(|(name, _)| *name == "+"),
+            "'+' from allowed scheme/base must not appear in stubs"
+        );
+        // 'number->string' is scheme/base-only
+        assert!(
+            !stubs.iter().any(|(name, _)| *name == "number->string"),
+            "'number->string' from allowed scheme/base must not appear in stubs"
+        );
+    }
+
+    #[test]
+    fn unexported_stubs_with_empty_allowlist_includes_all_exports() {
+        let stubs = unexported_stubs(&[]);
+        // with nothing allowed, all module exports appear in stubs
+        assert!(
+            stubs.iter().any(|(name, _)| *name == "+"),
+            "'+' should appear in stubs when nothing allowed"
+        );
+        assert!(
+            stubs
+                .iter()
+                .any(|(name, module)| *name == "+" && *module == "scheme/base"),
+            "stub for '+' should reference 'scheme/base'"
+        );
+    }
+
+    #[test]
+    fn unexported_stubs_records_providing_module() {
+        let stubs = unexported_stubs(&[]);
+        // json-parse should be attributed to tein/json
+        if let Some((_, module)) = stubs.iter().find(|(name, _)| *name == "json-parse") {
+            assert_eq!(
+                *module, "tein/json",
+                "json-parse should be attributed to tein/json"
+            );
+        }
+        // make-uuid to tein/uuid
+        if let Some((_, module)) = stubs.iter().find(|(name, _)| *name == "make-uuid") {
+            assert_eq!(
+                *module, "tein/uuid",
+                "make-uuid should be attributed to tein/uuid"
+            );
+        }
+    }
+
+    #[test]
+    fn unexported_stubs_dedup_skips_names_covered_by_allowed_modules() {
+        // scheme/red re-exports '+' (and hundreds of other names) from scheme/base.
+        // when scheme/base is allowed, scheme/red must NOT generate a stub for '+' —
+        // that would clobber the real binding.
+        let allowed = vec!["scheme/base".to_string()];
+        let stubs = unexported_stubs(&allowed);
+        // '+' is covered by allowed scheme/base — no stub from any module
+        assert!(
+            !stubs.iter().any(|(name, _)| *name == "+"),
+            "'+' covered by allowed scheme/base must not appear in stubs from any module \
+             (e.g. scheme/red)"
+        );
+        // a binding unique to scheme/red (not in scheme/base) should still produce a stub
+        let red_unique = stubs
+            .iter()
+            .any(|(_, module)| *module == "scheme/red" || *module == "scheme/small");
+        assert!(
+            red_unique,
+            "scheme/red or scheme/small should still contribute stubs for names \
+             not covered by the allowlist"
+        );
+    }
+}

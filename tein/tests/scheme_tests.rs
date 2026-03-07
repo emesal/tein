@@ -4,7 +4,7 @@
 //! standard context. assertions in scheme raise errors on failure, which
 //! propagate as `Error::EvalError` and fail the cargo test.
 
-use tein::Context;
+use tein::{Context, tein_module};
 
 /// run a scheme test file in a fresh standard context with `(tein test)` loaded.
 fn run_scheme_test(source: &str) {
@@ -12,6 +12,47 @@ fn run_scheme_test(source: &str) {
     ctx.evaluate("(import (tein test))")
         .expect("import tein test");
     ctx.evaluate(source).expect("scheme test failed");
+}
+
+// ── module test infrastructure ───────────────────────────────────────────────
+
+#[tein_module("testmod")]
+mod testmod {
+    #[tein_fn]
+    pub fn greet(name: String) -> String {
+        format!("hello, {}!", name)
+    }
+
+    #[tein_fn]
+    pub fn add(a: i64, b: i64) -> i64 {
+        a + b
+    }
+
+    #[tein_type(name = "counter")]
+    pub struct Counter {
+        pub n: i64,
+    }
+
+    #[tein_methods]
+    impl Counter {
+        pub fn get(&self) -> i64 {
+            self.n
+        }
+        pub fn increment(&mut self) -> i64 {
+            self.n += 1;
+            self.n
+        }
+    }
+}
+
+/// run a scheme test that needs a `#[tein_module]` registered first.
+fn run_scheme_test_with_module(source: &str) {
+    let ctx = Context::new_standard().expect("context");
+    testmod::register_module_testmod(&ctx).expect("register testmod");
+    ctx.evaluate("(import (tein test))")
+        .expect("import tein test");
+    ctx.evaluate(source)
+        .expect("scheme test with module failed");
 }
 
 #[test]
@@ -111,6 +152,11 @@ fn test_scheme_numbers_extended() {
 }
 
 #[test]
+fn test_scheme_numeric_tower() {
+    run_scheme_test(include_str!("scheme/numeric_tower.scm"));
+}
+
+#[test]
 fn test_scheme_scheme_eval() {
     run_scheme_test(include_str!("scheme/scheme_eval.scm"));
 }
@@ -120,34 +166,56 @@ fn test_scheme_tein_foreign() {
     run_scheme_test(include_str!("scheme/tein_foreign.scm"));
 }
 
+#[cfg(feature = "json")]
+#[test]
+fn test_scheme_json() {
+    run_scheme_test(include_str!("scheme/json.scm"));
+}
+
+#[cfg(feature = "toml")]
+#[test]
+fn test_scheme_toml() {
+    run_scheme_test(include_str!("scheme/toml.scm"));
+}
+
+#[cfg(feature = "uuid")]
+#[test]
+fn test_scheme_tein_uuid() {
+    run_scheme_test(include_str!("scheme/tein_uuid.scm"));
+}
+
+#[cfg(feature = "time")]
+#[test]
+fn test_scheme_tein_time() {
+    run_scheme_test(include_str!("scheme/tein_time.scm"));
+}
+
+#[test]
+fn test_scheme_tein_file() {
+    run_scheme_test(include_str!("scheme/tein_file.scm"));
+}
+
+#[test]
+fn test_scheme_tein_file_open() {
+    run_scheme_test(include_str!("scheme/tein_file_open.scm"));
+}
+
+#[test]
+fn test_scheme_tein_process() {
+    run_scheme_test(include_str!("scheme/tein_process.scm"));
+}
+
 #[test]
 fn test_scheme_reader_macro_sandbox() {
     // tests issue #31 fix: reader/macro fns via import in sandboxed context
-    use tein::sandbox::*;
+    use tein::sandbox::Modules;
     let ctx = Context::builder()
         .standard_env()
-        .preset(&ARITHMETIC)
-        .preset(&LISTS)
-        .preset(&STRINGS)
-        .preset(&TYPE_PREDICATES)
-        .preset(&CHARACTERS)
-        .preset(&MUTATION)
-        .preset(&EXCEPTIONS)
-        .allow(&[
-            "import",
-            "define",
-            "define-syntax",
-            "syntax-rules",
-            "set!",
-            "if",
-            "let",
-            "lambda",
-            "begin",
-            "quote",
-        ])
+        .sandboxed(Modules::Safe)
         .step_limit(5_000_000)
         .build()
         .expect("sandboxed context");
+    ctx.evaluate("(import (scheme base))").expect("import base");
     ctx.evaluate("(import (tein test))")
         .expect("import tein test");
     ctx.evaluate("(import (tein reader))")
@@ -181,4 +249,120 @@ fn test_scheme_reader_macro_sandbox() {
         "#,
     )
     .expect("sandboxed reader/macro test failed");
+}
+
+#[test]
+fn test_scheme_tein_module() {
+    run_scheme_test_with_module(include_str!("scheme/tein_module.scm"));
+}
+
+#[test]
+fn test_scheme_docs() {
+    run_scheme_test_with_module(include_str!("scheme/docs.scm"));
+}
+
+#[test]
+fn test_scheme_tein_modules() {
+    use tein::sandbox::Modules;
+    let ctx = tein::Context::builder()
+        .standard_env()
+        .sandboxed(Modules::Safe)
+        .allow_dynamic_modules()
+        .build()
+        .expect("sandboxed + dynamic modules context");
+    ctx.evaluate("(import (tein test))")
+        .expect("import tein test");
+    ctx.evaluate(include_str!("scheme/register_module.scm"))
+        .expect("register_module scheme tests failed");
+}
+
+// ── ext module tests ──────────────────────────────────────────────────────────
+
+/// resolve the test extension shared library path.
+///
+/// prefers `CARGO_TARGET_DIR` env var (set by the project's cargo alias),
+/// falls back to `<workspace>/target/` as the conventional default.
+fn ext_lib_path() -> std::path::PathBuf {
+    let target_dir = if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+        std::path::PathBuf::from(dir)
+    } else {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.pop(); // tein/ → workspace root
+        path.push("target");
+        path
+    };
+    let mut path = target_dir;
+    path.push(if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    });
+    #[cfg(target_os = "linux")]
+    path.push("libtein_test_ext.so");
+    #[cfg(target_os = "macos")]
+    path.push("libtein_test_ext.dylib");
+    #[cfg(target_os = "windows")]
+    path.push("tein_test_ext.dll");
+    path
+}
+
+#[test]
+fn test_scheme_ext_module() {
+    let ctx = Context::new_standard().expect("context");
+    ctx.load_extension(ext_lib_path()).expect("load ext");
+    ctx.evaluate(include_str!("scheme/ext_module.scm"))
+        .expect("scheme ext module test failed");
+}
+
+#[test]
+fn test_scheme_char() {
+    run_scheme_test(include_str!("scheme/scheme_char.scm"));
+}
+
+#[test]
+fn test_scheme_division() {
+    run_scheme_test(include_str!("scheme/scheme_division.scm"));
+}
+
+#[test]
+fn test_scheme_fixnum() {
+    run_scheme_test(include_str!("scheme/scheme_fixnum.scm"));
+}
+
+#[test]
+fn test_scheme_bitwise() {
+    run_scheme_test(include_str!("scheme/scheme_bitwise.scm"));
+}
+
+#[test]
+fn test_scheme_flonum() {
+    run_scheme_test(include_str!("scheme/scheme_flonum.scm"));
+}
+
+#[test]
+fn test_srfi_18_threads() {
+    run_scheme_test(include_str!("scheme/srfi_18_threads.scm"));
+}
+
+#[cfg(feature = "time")]
+#[test]
+fn test_srfi_19() {
+    run_scheme_test(include_str!("scheme/srfi19.scm"));
+}
+
+#[cfg(feature = "regex")]
+#[test]
+fn test_safe_regexp() {
+    run_scheme_test(include_str!("scheme/safe_regexp.scm"));
+}
+
+#[cfg(feature = "crypto")]
+#[test]
+fn test_scheme_tein_crypto() {
+    run_scheme_test(include_str!("scheme/crypto.scm"));
+}
+
+#[test]
+fn test_chibi_regexp() {
+    run_scheme_test(include_str!("scheme/chibi_regexp.scm"));
 }

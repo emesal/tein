@@ -1,8 +1,10 @@
 # tein
 
-> Embeddable R7RS Scheme interpreter for Rust
+> Branch and rune-stick — embeddable R7RS Scheme for Rust
 
-**tein** wraps [chibi-scheme](https://github.com/ashinn/chibi-scheme) in a safe Rust API. Zero runtime dependencies, full r7rs-small compliance, ~200kb footprint. Evaluate Scheme from Rust, call Rust from Scheme, sandbox everything.
+**tein** is an embeddable R7RS Scheme interpreter for Rust, built on vendored chibi-scheme 0.11. Safe Rust API wrapping unsafe C FFI. Zero runtime dependencies.
+
+tein has a dual identity: **scheme embedded in rust** — add Scheme as a scripting or extension language to any Rust application, with safe sandboxing, resource limits, and bidirectional data exchange — and **scheme with rust inside** — Scheme programs get access to the Rust ecosystem via tein's module system, with high-performance crates exposed as idiomatic R7RS libraries.
 
 ## Quick start
 
@@ -19,156 +21,43 @@ let result = ctx.evaluate("(+ 1 2 3)")?;
 assert_eq!(result, Value::Integer(6));
 ```
 
-## Features
+## What tein can do today
 
-### Sandboxing & resource limits
+- **[Sandboxing](docs/sandboxing.md)** — restrict the module set, cap step counts, set wall-clock timeouts, and enforce file IO policies (allow/deny by path prefix)
+- **[Rust↔Scheme bridge](docs/rust-scheme-bridge.md)** — `#[tein_fn]` and `#[tein_module]` proc macros for zero-boilerplate Rust functions and modules; `ForeignType` protocol for first-class Rust objects in Scheme with method dispatch and introspection
+- **[Built-in modules](docs/modules.md)** — `(tein json)`, `(tein toml)`, `(tein uuid)`, `(tein time)`, `(tein process)`, `(tein docs)` ship with the crate
+- **[cdylib extensions](docs/extensions.md)** — load Rust extensions at runtime via a stable C ABI vtable; no chibi dependency in the extension crate
+- **[Managed contexts](docs/embedding.md)** — `ThreadLocalContext` (Send+Sync, persistent or fresh-per-evaluation) and `TimeoutContext` (wall-clock deadline) for multi-threaded and time-bounded evaluation
+- **[Custom ports](docs/embedding.md)** — bridge any Rust `Read`/`Write` into Scheme's port system for streaming IO
+- **[Reader extensions](docs/rust-scheme-bridge.md)** — register custom `#` dispatch characters to extend the Scheme reader at the syntax level
+- **[Macro expansion hooks](docs/rust-scheme-bridge.md)** — intercept and transform macro expansions at analysis time with replace-and-reanalyse semantics
 
-Restrict the environment to exactly the primitives you need. Combine presets, step limits, wall-clock timeouts, and file IO policies.
+## Docs
 
-```rust
-use tein::Context;
-
-let ctx = Context::builder()
-    .safe()                     // no filesystem, no eval
-    .step_limit(50_000)         // terminate infinite loops
-    .build()?;
-
-let result = ctx.evaluate("(+ 1 2)")?;
-assert_eq!(result, tein::Value::Integer(3));
-
-// file IO blocked
-assert!(ctx.evaluate(r#"(open-input-file "/etc/passwd")"#).is_err());
-```
-
-16 composable presets (`ARITHMETIC`, `LISTS`, `STRINGS`, `IO`, ...) plus convenience builders (`.pure_computation()`, `.safe()`). See the [`sandbox`](https://docs.rs/tein/latest/tein/sandbox/) module.
-
-### `#[scheme_fn]` proc macro
-
-Define Scheme-callable functions in pure Rust with automatic type conversion and error handling.
-
-```rust
-use tein::{Context, scheme_fn};
-
-#[scheme_fn]
-fn square(n: i64) -> i64 {
-    n * n
-}
-
-let ctx = Context::new()?;
-ctx.define_fn_variadic("square", __tein_square)?;
-
-let result = ctx.evaluate("(square 7)")?;
-assert_eq!(result, tein::Value::Integer(49));
-```
-
-### Foreign type protocol
-
-Expose Rust types as first-class Scheme objects with method dispatch, predicates, and introspection.
-
-```rust
-use tein::{Context, ForeignType, MethodFn, Value};
-
-struct Counter { n: i64 }
-
-impl ForeignType for Counter {
-    fn type_name() -> &'static str { "counter" }
-    fn methods() -> &'static [(&'static str, MethodFn)] {
-        &[
-            ("increment", |obj, _ctx, _args| {
-                let c = obj.downcast_mut::<Counter>().unwrap();
-                c.n += 1;
-                Ok(Value::Integer(c.n))
-            }),
-            ("get", |obj, _ctx, _args| {
-                let c = obj.downcast_ref::<Counter>().unwrap();
-                Ok(Value::Integer(c.n))
-            }),
-        ]
-    }
-}
-
-let ctx = Context::new_standard()?;
-ctx.register_foreign_type::<Counter>()?;
-// auto-generates: counter?, counter-increment, counter-get
-```
-
-### Custom ports
-
-Bridge Rust `Read`/`Write` into Scheme's port system for streaming IO.
-
-```rust
-use tein::Context;
-
-let ctx = Context::new_standard()?;
-let json = r#"{"key": "value"}"#;
-let port = ctx.open_input_port(std::io::Cursor::new(json))?;
-let datum = ctx.read(&port)?;
-```
-
-### Reader extensions
-
-Register custom `#` dispatch characters to extend Scheme's reader at the syntax level.
-
-```rust
-let ctx = Context::new_standard()?;
-ctx.register_reader('j', &ctx.evaluate(
-    "(lambda (port) (read port))"  // #j<datum> → <datum>
-)?)?;
-```
-
-Or from Scheme via `(import (tein reader))`:
-
-```scheme
-(import (tein reader))
-(set-reader! #\j (lambda (port) (read port)))
-```
-
-### Macro expansion hooks
-
-Intercept and transform macro expansions at analysis time — replace-and-reanalyse semantics.
-
-```scheme
-(import (tein macro))
-(set-macro-expand-hook!
-  (lambda (name unexpanded expanded env)
-    expanded))  ; observe or transform
-```
-
-### Managed contexts
-
-Thread-safe Scheme evaluation via `ThreadLocalContext` — persistent state or fresh-per-evaluation.
-
-```rust
-use tein::Context;
-
-let ctx = Context::builder()
-    .standard_env()
-    .step_limit(1_000_000)
-    .build_managed(|ctx| {
-        ctx.evaluate("(define counter 0)")?;
-        Ok(())
-    })?;
-
-ctx.evaluate("(set! counter (+ counter 1))")?;
-ctx.evaluate("(set! counter (+ counter 1))")?;
-let result = ctx.evaluate("counter")?;
-assert_eq!(result, tein::Value::Integer(2));
-
-ctx.reset()?; // rebuild context, re-run init
-```
+| doc | description |
+|-----|-------------|
+| [guide](docs/guide.md) | index and reading order |
+| [quickstart](docs/quickstart.md) | working code in 5 minutes |
+| [embedding](docs/embedding.md) | context types, Value enum, builder API |
+| [sandboxing](docs/sandboxing.md) | module policy, file IO, resource limits |
+| [rust-scheme bridge](docs/rust-scheme-bridge.md) | `#[tein_fn]`, `#[tein_module]`, foreign types |
+| [modules](docs/modules.md) | built-in `(tein *)` modules |
+| [extensions](docs/extensions.md) | cdylib extension system |
+| [tein for agents](docs/tein-for-agents.md) | tein as an agent execution platform |
+| [reference](docs/reference.md) | Value types, feature flags, VFS modules, quirks |
 
 ## Examples
 
 | example | description |
 |---------|-------------|
-| `basic` | Evaluate expressions, pattern-match on values |
-| `floats` | Floating-point arithmetic |
-| `ffi` | `#[scheme_fn]` proc macro, calling Rust from Scheme and vice versa |
-| `debug` | Float/integer type inspection |
-| `sandbox` | Step limits, restricted environments, timeouts, file IO policies |
-| `foreign_types` | Foreign type protocol — registration, dispatch, introspection |
+| `basic` | evaluate expressions, pattern-match on values |
+| `floats` | floating-point arithmetic |
+| `ffi` | `#[tein_fn]` proc macro, Rust↔Scheme calls |
+| `debug` | float/integer type inspection |
+| `sandbox` | step limits, restricted environments, timeouts, file IO policies |
+| `foreign_types` | foreign type protocol — registration, dispatch, introspection |
 | `managed` | `ThreadLocalContext` persistent and fresh modes |
-| `repl` | Interactive Scheme REPL with readline |
+| `repl` | interactive Scheme REPL with readline |
 
 ```bash
 cargo run --example sandbox
@@ -176,12 +65,18 @@ cargo run --example sandbox
 
 ## About
 
-From Old Norse *tein* (teinn): **branch** — like the branches of an abstract syntax tree; **rune-stick** — carved wood for writing magical symbols. Code as data, data as runes.
+from Old Norse *tein* (teinn): **branch** — like the branches of an abstract syntax tree; **rune-stick** — carved wood for writing magical symbols. code as data, data as runes.
 
-**Why Scheme?** Homoiconic syntax, proper tail calls, hygienic macros, minimalist elegance. **Why Chibi?** Tiny (~200kb), zero external deps, full r7rs-small, designed for embedding.
+**why Scheme?** homoiconic syntax, proper tail calls, hygienic macros, minimalist elegance. **why Chibi?** tiny (~200kb), zero external deps, full R7RS-small, designed for embedding.
 
-**Why tein?** Because embedding Scheme in Rust shouldn't require wrestling with raw FFI.
+**why tein?** because embedding Scheme in Rust shouldn't require wrestling with raw FFI. and because a language that can carry intent deserves a host that can carry it faithfully.
+
+*carved with care, grown with intention*
 
 ---
 
-*carved with care, grown with intention*
+## License
+
+ISC
+
+make meow, not rawr

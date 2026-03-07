@@ -120,6 +120,30 @@ impl<'a> Parser<'a> {
                 self.parse_list_or_dotted(tok.span, &tok.kind)?
             }
             TokenKind::HashParen => self.parse_vector(tok.span)?,
+            TokenKind::HashU8Paren => self.parse_bytevector(tok.span)?,
+            TokenKind::Bignum(s) => Sexp {
+                kind: SexpKind::Bignum(s),
+                span: tok.span,
+                comments: Vec::new(),
+            },
+            TokenKind::Rational(n, d) => {
+                let num = parse_number_string(&n);
+                let den = parse_number_string(&d);
+                Sexp {
+                    kind: SexpKind::Rational(Box::new(num), Box::new(den)),
+                    span: tok.span,
+                    comments: Vec::new(),
+                }
+            }
+            TokenKind::Complex(real_str, imag_str) => {
+                let real = parse_number_string(&real_str);
+                let imag = parse_number_string(&imag_str);
+                Sexp {
+                    kind: SexpKind::Complex(Box::new(real), Box::new(imag)),
+                    span: tok.span,
+                    comments: Vec::new(),
+                }
+            }
             TokenKind::Quote => self.parse_sugar("quote", tok.span)?,
             TokenKind::Quasiquote => self.parse_sugar("quasiquote", tok.span)?,
             TokenKind::Unquote => self.parse_sugar("unquote", tok.span)?,
@@ -244,6 +268,47 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// parse a bytevector after consuming `#u8(`
+    fn parse_bytevector(&mut self, open_span: Span) -> Result<Sexp> {
+        let mut bytes = Vec::new();
+
+        loop {
+            self.skip_or_collect_comments()?;
+
+            if self.peek_is(&TokenKind::RightParen)? {
+                let close_tok = self.lexer.next_token()?;
+                return Ok(Sexp {
+                    kind: SexpKind::Bytevector(bytes),
+                    span: open_span.merge(close_tok.span),
+                    comments: Vec::new(),
+                });
+            }
+
+            if self.at_eof()? {
+                return Err(ParseError::new("unterminated bytevector", open_span));
+            }
+
+            let elem_tok = self.lexer.next_token()?;
+            match elem_tok.kind {
+                TokenKind::Integer(n) if (0..=255).contains(&n) => {
+                    bytes.push(n as u8);
+                }
+                TokenKind::Integer(n) => {
+                    return Err(ParseError::new(
+                        format!("bytevector element out of range: {n}"),
+                        elem_tok.span,
+                    ));
+                }
+                _ => {
+                    return Err(ParseError::new(
+                        "expected integer in bytevector",
+                        elem_tok.span,
+                    ));
+                }
+            }
+        }
+    }
+
     /// parse quote sugar: `'x` → `(quote x)`, etc.
     fn parse_sugar(&mut self, name: &str, prefix_span: Span) -> Result<Sexp> {
         let inner = self.parse_expr()?;
@@ -311,6 +376,20 @@ impl<'a> Parser<'a> {
             ))
         }
     }
+}
+
+/// parse a numeric string (from rational/complex components) as Integer, Float, or Bignum Sexp
+fn parse_number_string(s: &str) -> Sexp {
+    if let Ok(n) = s.parse::<i64>() {
+        return Sexp::integer(n);
+    }
+    // only try f64 for strings that look like floats; integer-shaped strings that
+    // overflow i64 are bignums, not floats (e.g. "99999999999999999999999999")
+    let looks_like_float = s.contains('.') || s.contains('e') || s.contains('E');
+    if looks_like_float && let Ok(f) = s.parse::<f64>() {
+        return Sexp::float(f);
+    }
+    Sexp::bignum(s)
 }
 
 #[cfg(test)]
@@ -621,6 +700,108 @@ mod tests {
         // quote sugar expands, so round-trip is the expanded form
         let s = parse("'x").unwrap();
         assert_eq!(s.to_string(), "(quote x)");
+    }
+
+    // --- numeric tower ---
+
+    #[test]
+    fn parse_bignum() {
+        let sexp = parse("99999999999999999999999999").unwrap();
+        assert_eq!(sexp.as_bignum(), Some("99999999999999999999999999"));
+    }
+
+    #[test]
+    fn parse_rational() {
+        let sexp = parse("3/4").unwrap();
+        let (n, d) = sexp.as_rational().unwrap();
+        assert_eq!(n.as_integer(), Some(3));
+        assert_eq!(d.as_integer(), Some(4));
+    }
+
+    #[test]
+    fn parse_rational_negative_numerator() {
+        let sexp = parse("-1/2").unwrap();
+        let (n, d) = sexp.as_rational().unwrap();
+        assert_eq!(n.as_integer(), Some(-1));
+        assert_eq!(d.as_integer(), Some(2));
+    }
+
+    #[test]
+    fn parse_bytevector() {
+        let sexp = parse("#u8(1 2 3)").unwrap();
+        assert_eq!(sexp.as_bytevector(), Some([1u8, 2, 3].as_slice()));
+    }
+
+    #[test]
+    fn parse_bytevector_empty() {
+        let sexp = parse("#u8()").unwrap();
+        assert_eq!(sexp.as_bytevector(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn roundtrip_bignum() {
+        assert_eq!(
+            parse("99999999999999999999999999").unwrap().to_string(),
+            "99999999999999999999999999"
+        );
+    }
+
+    #[test]
+    fn roundtrip_rational() {
+        assert_eq!(parse("3/4").unwrap().to_string(), "3/4");
+    }
+
+    #[test]
+    fn roundtrip_bytevector() {
+        assert_eq!(parse("#u8(1 2 3)").unwrap().to_string(), "#u8(1 2 3)");
+    }
+
+    // --- complex numbers ---
+
+    #[test]
+    fn parse_complex_integers() {
+        let sexp = parse("1+2i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(1));
+        assert_eq!(i.as_integer(), Some(2));
+    }
+
+    #[test]
+    fn parse_complex_negative_imag() {
+        let sexp = parse("1-2i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(1));
+        assert_eq!(i.as_integer(), Some(-2));
+    }
+
+    #[test]
+    fn parse_pure_imaginary() {
+        let sexp = parse("+2i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(0));
+        assert_eq!(i.as_integer(), Some(2));
+    }
+
+    #[test]
+    fn parse_plus_i() {
+        let sexp = parse("+i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(0));
+        assert_eq!(i.as_integer(), Some(1));
+    }
+
+    #[test]
+    fn parse_minus_i() {
+        let sexp = parse("-i").unwrap();
+        let (r, i) = sexp.as_complex().unwrap();
+        assert_eq!(r.as_integer(), Some(0));
+        assert_eq!(i.as_integer(), Some(-1));
+    }
+
+    #[test]
+    fn roundtrip_complex() {
+        assert_eq!(parse("1+2i").unwrap().to_string(), "1+2i");
+        assert_eq!(parse("1-2i").unwrap().to_string(), "1-2i");
     }
 
     // --- complex expressions ---

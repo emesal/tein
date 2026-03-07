@@ -20,7 +20,7 @@
 - Procedures as values via `sexp_applicablep`
 - `ctx.call(proc, &[args])` for Rust→Scheme callbacks
 - `define_fn_variadic` for registering Rust functions
-- `#[scheme_fn]` proc macro for ergonomic FFI
+- `#[tein_fn]` / `#[tein_module]` proc macros for ergonomic FFI
 - Panic safety at FFI boundary
 
 **Milestone 3 — tein-sexp pure Rust s-expression crate**
@@ -33,29 +33,76 @@
 **Milestone 4a — sandboxing & resource limits**
 - `ContextBuilder` with fluent API for heap sizes, step limits, and environment restriction
 - Fuel-based step limiting via thread-local counters + vm.c patch
-- Allowlist-based sandbox presets using Chibi's null env (14 presets)
+- `Modules` enum (`Safe`, `All`, `None`, `only(&[...])`) for module-based sandbox configuration
+- VFS gate allowlist with transitive dep resolution via `VFS_REGISTRY`
 - `TimeoutContext` for wall-clock deadlines via dedicated thread
 - `Error::StepLimitExceeded` and `Error::Timeout` variants
 
-**Milestone 4b — parameterised IO presets**
+**Milestone 4b — parameterised IO policy**
 - `FsPolicy` with path prefix matching and canonicalisation
 - Wrapper foreign functions for all 4 file-open primitives
 - `.file_read(&[...])` / `.file_write(&[...])` builder API
-- Support presets (`FILE_READ_SUPPORT`, `FILE_WRITE_SUPPORT`) for port operations
+- IO wrappers injected directly — no `(scheme file)` import required
 - Path traversal and symlink protection via `canonicalize()`
 
 **R7RS standard environment**
 - VFS + static libs + eval.c patches for embedded module loading
 - `Context::new_standard()` / `ContextBuilder::standard_env()` API
 - ~200 bindings (map, for-each, values, dynamic-wind, etc.)
-- `ModulePolicy`: VFS-only import restriction in sandboxed standard-env contexts
+- VFS gate: automatic VFS-only import restriction in sandboxed standard-env contexts
 - C-level interception in `sexp_find_module_file_raw` via `tein_module_allowed()`
+
+**Milestone 6 — Foreign type protocol** (completed)
+- `ForeignType` trait + `ForeignStore` handle-map per context
+- `Value::Foreign { handle_id, type_name }` with tagged-list wire format
+- `(tein foreign)` VFS module: `foreign?`, `foreign-type`, `foreign-handle-id`
+- Auto-generated `type-name?` predicates + `type-name-method` convenience procs
+- `ctx.foreign_value(v)`, `ctx.foreign_ref::<T>(&val)` Rust-side API
+
+**Milestone 7 — Managed contexts** (completed)
+- `ThreadLocalContext`: `Send + Sync` managed context on a dedicated thread
+- Persistent mode (state accumulates) and fresh mode (rebuilt per call)
+- `ContextBuilder::build_managed(init)` / `build_managed_fresh(init)`
+- Shared channel protocol in `thread.rs` (generalises `TimeoutContext`)
+
+**Milestone 8 — Rust Ecosystem Bridge** (completed)
+- `#[tein_module]` / `#[tein_const]` proc macros for rust→scheme module generation
+- Doc-attr scraping in `#[tein_module]` → runtime doc alists via `(tein docs)`
+- `(tein json)` — JSON via serde_json, bidirectional scheme↔JSON
+- `(tein toml)` — TOML parsing and serialisation
+- `(tein uuid)` — UUID generation
+- `(tein time)` — r7rs `current-second`, `current-jiffy`, `jiffies-per-second`
+- `(tein process)` — exit escape hatch + neutered env/argv trampolines for sandbox
+- `(tein file)` — R7RS file IO with FsPolicy enforcement
+- `(tein load)` — VFS-restricted `load`
+- Feature-gated format modules: `json`/`toml`/`uuid`/`time` cargo feature flags
+- cdylib extension system: `tein-ext` vtable, `tein-test-ext`, `ctx.load_extension()`
+- Type parity: `Value::Vector`, `Value::Char`, `Value::Bytevector` fully bridged
+
+**Remaining in M8 (still open):**
+- `(tein regex)` / SRFI-115 — issues #85, #37
+- `(tein crypto)` — issue #38
+- Cross-platform cdylib (.dylib, .dll) — issue #66
+- SRFI-19 time data types via rust trampolines — issue #84
+- Foreign type constructor macro — issue #41
+
+### Current milestone
+
+**Milestone 9 — tein as a Scheme** (planned)
 
 ### Known limitations
 
 1. **Limited type coverage**
    - Hash tables and ports are opaque (`Value::HashTable`, `Value::Port`) — no rich Rust API
    - Continuations surface as `Value::Procedure` (Chibi uses the same type tag)
+2. **`(tein foreign)` module requires `fixnum?`** — `foreign.scm` uses `fixnum?` which is available in the standard toplevel but is not exported by `(scheme base)`. `(import (tein foreign))` works in unsandboxed contexts where `fixnum?` is in the toplevel. See the Scheme environment quirks section below.
+
+### User-facing docs
+
+User-facing documentation lives in [`docs/`](docs/). For contributors:
+- [`docs/guide.md`](docs/guide.md) — index and reading order
+- [`AGENTS.md`](AGENTS.md) — coding conventions, workflow, gotchas
+- [`ROADMAP.md`](ROADMAP.md) — milestone plan and github issues
 
 ## Architecture
 
@@ -63,37 +110,47 @@
 ```
 tein/
   src/
-    lib.rs       — public API re-exports
-    context.rs   — Context, ContextBuilder, evaluation, fuel mgmt, all tests
-    value.rs     — Value enum: scheme↔rust conversion, cycle detection, Display
-    error.rs     — Error enum (EvalError, TypeError, InitError, Utf8Error,
-                   IoError, StepLimitExceeded, Timeout, SandboxViolation)
-    ffi.rs       — unsafe C bindings + safe wrappers, `raw` module
-    foreign.rs   — ForeignType trait, MethodFn/MethodContext, ForeignStore, dispatch
-    managed.rs   — ThreadLocalContext: persistent/fresh managed context on dedicated thread
-    port.rs      — PortStore: Read/Write bridge via thread-local trampoline
-    sandbox.rs   — Preset type, FsPolicy, ModulePolicy, 16 const preset definitions
-    thread.rs    — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
-    timeout.rs   — TimeoutContext: wall-clock timeout via dedicated thread
+    lib.rs         — public API re-exports
+    context.rs     — Context, ContextBuilder, evaluation, fuel mgmt, all tests;
+                     load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII
+    value.rs       — Value enum: scheme↔rust conversion, cycle detection, Display
+    error.rs       — Error enum (EvalError, TypeError, InitError, Utf8Error,
+                     IoError, StepLimitExceeded, Timeout, SandboxViolation)
+    ffi.rs         — unsafe C bindings + safe wrappers, GcRoot, `raw` module
+    foreign.rs     — ForeignType trait, ForeignStore, dispatch_foreign_call;
+                     ExtMethodEntry/ExtTypeEntry, MethodLookup (Static | Ext)
+    managed.rs     — ThreadLocalContext: persistent/fresh managed context on dedicated thread
+    port.rs        — PortStore: Read/Write bridge via thread-local trampoline
+    sandbox.rs     — Modules enum, FsPolicy, VFS_REGISTRY helpers, UX stub generation
+    sexp_bridge.rs — Value ↔ Sexp; shared layer for format modules
+    thread.rs      — shared channel protocol (Request, Response, SendableValue, ForeignFnPtr)
+    timeout.rs     — TimeoutContext: wall-clock timeout via dedicated thread
+    json.rs        — json_parse + json_stringify_raw (raw sexp level, preserves alist)
+    toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso")
+    uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
+    time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second. feature=time
+    vfs_registry.rs — VFS module registry; single source of truth for all VFS entries,
+                     safe/all allowlists, transitive dep resolution
   target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) by build.rs
     tein_shim.c  — exports chibi C macros as real functions, fuel control,
-                   environment manipulation, module import policy,
-                   custom port creation, reader dispatch table,
-                   macro expansion hook
-    eval.c       — 4 patches: VFS module lookup (A + policy gate), VFS load (B),
-                   VFS open-input-file (C), macro expansion hook (D)
-    sexp.c       — 1 patch: reader dispatch table check before hardcoded # switch
-    vm.c         — 2-line patch: fuel budget consumption at timeslice boundary
-    lib/tein/foreign.sld/.scm — (tein foreign) predicates
-    lib/tein/reader.sld/.scm/.c — (tein reader) C-backed dispatch fns via static lib init
-    lib/tein/macro.sld/.scm/.c  — (tein macro) C-backed expansion hook fns via static lib init
-    lib/tein/test.sld/.scm     — (tein test) pure-scheme assertion framework
+                   env_copy_named, VFS gate, FS policy gate, custom ports,
+                   reader dispatch table, macro expansion hook
+    eval.c       — 7 patches: VFS lookup+gate (A), VFS load (B), VFS open-input-file (C),
+                   macro hook in analyze_macro_once (D), suppress false import warning (E),
+                   FS policy gate in open-input-file (F), FS policy gate in open-output-file (G)
+    sexp.c       — 1 patch: reader dispatch before hardcoded # switch
+    vm.c         — 2-line patch: fuel consumption at timeslice boundary
+    lib/tein/    — tein scheme modules: foreign, reader, macro, test, docs,
+                   json, toml, uuid, time, file, load, process (see each .sld/.scm for exports)
   build.rs       — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h,
                    tein_clibs.c into OUT_DIR
   examples/      — basic.rs, floats.rs, ffi.rs, debug.rs, sandbox.rs,
                    foreign_types.rs, managed.rs, repl.rs
-tein-macros/     — #[scheme_fn] proc macro crate
+  tests/         — scheme_tests.rs (integration runner), scheme/*.scm
+tein-ext/        — stable C ABI vtable for cdylib extensions (no chibi dependency)
+tein-macros/     — #[tein_fn], #[tein_module], #[tein_type], #[tein_methods], #[tein_const] proc macros
 tein-sexp/       — pure Rust s-expression parser/printer
+tein-test-ext/   — in-tree test extension (publish=false); used by tests/ext_loading.rs
 ```
 
 ### Data flow
@@ -110,11 +167,17 @@ rust code → Context::evaluate()
 ### Sandboxing flow
 
 ```
-ContextBuilder::build() with presets:
-  1. create context with full primitive env
-  2. create null env (syntax-only: define, if, lambda, begin, quote)
-  3. for each allowed primitive: look up in primitive env, copy to null env
-  4. set null env as active → only allowed primitives accessible
+ContextBuilder::build() with sandboxed(modules):
+  1. set IS_SANDBOXED thread-local → controls FsPolicy + VFS gate activation
+  2. resolve module allowlist from Modules variant via VFS_REGISTRY
+     (Modules::Safe → registry_safe_allowlist, Modules::All → registry_all_allowlist,
+      Modules::None → empty, Modules::Only(v) → registry_resolve_deps(&v))
+  3. set VFS_GATE (Allow(allowlist) or Off) + VFS_ALLOWLIST thread-locals
+  4. build full standard env (sexp_load_standard_env) — VFS gate active during load
+  5. create null env (syntax-only: define, if, lambda, begin, quote)
+  6. copy allowed bindings from full env → null env via env_copy_named
+  7. register UX stubs for bindings NOT in the allowlist (Modules::None: all modules)
+  8. set null env as active → only allowed bindings accessible
 ```
 
 ### IO policy flow
@@ -133,14 +196,44 @@ ContextBuilder with file_read/file_write:
 ### Module import policy
 
 ```
-ContextBuilder with standard_env + presets:
-  1. set MODULE_POLICY thread-local = VfsOnly
-  2. set C-level tein_module_policy = 1 (vfs-only)
-  3. load standard env (init-7, meta-7 via VFS — allowed under VfsOnly)
-  4. apply sandbox restrictions (presets, IO wrappers)
+ContextBuilder with standard_env + sandboxed(modules):
+  1. resolve allowlist from Modules variant via VFS_REGISTRY
+  2. set VFS_GATE thread-local = Allow(allowlist) → C-level tein_vfs_gate = 1
+  3. load standard env (init-7, meta-7 via VFS — pass allowlist check)
+  4. apply sandbox restrictions (module bindings, IO wrappers)
   5. on (import ...): sexp_find_module_file_raw calls tein_module_allowed()
-     → VFS paths (/vfs/lib/...) pass, filesystem paths blocked
-  6. on Context::drop(): reset both thread-local and C-level to Unrestricted
+     → VFS paths (/vfs/lib/...) checked against allowlist; filesystem paths blocked
+  6. on Context::drop(): restore VFS_GATE + VFS_ALLOWLIST + IS_SANDBOXED to prior values
+```
+
+### VFS shadow injection flow
+
+```
+ContextBuilder with sandboxed():
+  1. register_vfs_shadows() called after standard env built
+  2. for each shadow entry in VFS_REGISTRY (source: VfsSource::Shadow):
+     a. generate a synthetic .sld in memory from shadow_sld field
+     b. insert into VFS under the module's path (/vfs/lib/<path>.sld)
+  3. shadows override chibi's native modules at the VFS level —
+     e.g. (scheme file) → redirects to (tein file); (scheme process-context) → neutered trampolines
+  4. VFS gate allowlist includes shadow paths (they count as safe by default_safe flag)
+  5. importer sees the shadow, not the original chibi module
+```
+
+### Exit escape hatch flow
+
+```
+Scheme code calls (exit) or (exit obj):
+  1. (tein process) exit trampoline sets EXIT_REQUESTED + EXIT_VALUE thread-locals
+  2. returns an exception sexp to stop VM immediately (emergency-exit semantics)
+  3. evaluate() / evaluate_port() / call() intercepts via check_exit() after each eval step
+  4. check_exit(): reads EXIT_REQUESTED → clears flags → converts EXIT_VALUE → returns Ok(value)
+  5. (exit) → Ok(Value::Integer(0))
+  6. (exit #t) → Ok(Value::Integer(0))
+  7. (exit #f) → Ok(Value::Integer(1))
+  8. (exit obj) → Ok(Value::from(obj))
+  9. EXIT_REQUESTED + EXIT_VALUE cleared on Context::drop()
+  r7rs deviation: dynamic-wind "after" thunks NOT run — emergency-exit semantics only (see GH #101)
 ```
 
 **VFS safety contract**: VFS modules are safe by construction — tein curates
@@ -152,8 +245,8 @@ exposed by VFS modules remain subject to these controls.
 
 | layer              | gates                                    |
 |--------------------|------------------------------------------|
-| module allowlist   | which libraries can be `import`ed        |
-| preset allowlist   | which primitives/bindings are in scope   |
+| VFS gate           | which libraries can be `import`ed        |
+| module allowlist   | which bindings are in scope              |
 | FsPolicy           | which filesystem paths can be opened     |
 | fuel/timeout       | resource exhaustion                      |
 
@@ -201,7 +294,7 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 **Rename bindings in standard env**: the standard env stores most bindings as *renames* (via `SEXP_USE_RENAME_BINDINGS`), not direct bindings. `sexp_env_ref` with a bare symbol won't find them. `tein_env_copy_named` in `tein_shim.c` handles this by walking both direct bindings and renames with synclo unwrapping. Note: the env parent chain terminates with NULL, and `sexp_envp(NULL)` segfaults because `sexp_pointerp(NULL)` returns true (`SEXP_POINTER_TAG == 0`). The env walk loop must guard against NULL explicitly.
 
-**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. It can be copied into the restricted null env via `.allow(&["import"])` like any other binding. The module policy (VFS-only) still applies, so only curated VFS modules are importable. Both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
+**`import` in sandboxed envs**: `import` is not core syntax — it's a binding from `repl-import` in the meta env, spliced into the standard env during `sexp_load_standard_env`. The `sandboxed()` builder always copies `import` into the restricted null env so Scheme code can use idiomatic `(import ...)` forms. The VFS gate (active for all sandboxed contexts) restricts which modules pass — only allowlisted VFS modules are importable. Both `source_env` and `null_env` must be GC-rooted during sandbox build, since `sexp_intern`, `env_copy_named`, and `sexp_define_foreign_proc` all allocate.
 
 **`let` in sandboxed standard env**: closures from the standard env (e.g. `for-each`) reference the full env internally, but `let`-bound variables in user code live in the restricted null env. Using `define` for top-level bindings works; `let` inside `for-each` callbacks does not. This is a scope chain issue specific to the null env sandbox approach.
 
@@ -209,14 +302,18 @@ C-side equivalent: use `sexp_gc_var` / `sexp_gc_preserve` / `sexp_gc_release` (s
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme)
-cargo test                         # all tests (208 lib + 12 scheme_fn + 6 scheme + 24 doc)
+just test                          # all tests (356 lib + 12 tein_fn + 3 tein_fn_value_arg +
+                                   #   32 scheme + 8 tein_module_const + 4 tein_module_naming +
+                                   #   1 tein_module_parse + 11 tein_module_docs + 25 tein-macros +
+                                   #   14 ext_loading + 9 tein_uuid + 8 tein_time + doc-tests)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
-cargo clippy                       # lint
-cargo fmt --check                  # format check
+just lint                          # cargo fmt + cargo clippy
+cargo fmt --check                  # format check only
 cargo run --example basic          # run an example
 cargo run --example sandbox        # sandboxing demo
-cargo clean && cargo build         # nuclear option if ffi gets weird
+cargo build -p tein-test-ext       # build test cdylib extension
+just clean && cargo build          # nuclear option if ffi gets weird
 ```
 
 ## Adding a new Scheme type
@@ -231,9 +328,21 @@ cargo clean && cargo build         # nuclear option if ffi gets weird
 
 ## Registering Rust functions in Scheme
 
-**Via proc macro (recommended):**
+**Via `#[tein_module]` (recommended for grouped functionality):**
 ```rust
-#[scheme_fn]
+#[tein_module("mymod")]
+mod mymod {
+    #[tein_fn]
+    pub fn add(a: i64, b: i64) -> i64 { a + b }
+}
+
+// registers VFS entries + bindings; scheme code can (import (tein mymod))
+mymod::register_module_mymod(&ctx)?;
+```
+
+**Via `#[tein_fn]` standalone (for individual functions):**
+```rust
+#[tein_fn]
 fn add(a: i64, b: i64) -> i64 { a + b }
 
 ctx.define_fn_variadic("add", __tein_add)?;
@@ -366,7 +475,7 @@ Extends Chibi's `#` reader syntax with user-defined handlers via a C-level dispa
 ```rust
 // from rust
 let handler = ctx.evaluate("(lambda (port) 42)")?;
-ctx.register_reader('j', &handler)?;
+ctx.register_reader(b'j', &handler)?;
 assert_eq!(ctx.evaluate("#j")?, Value::Integer(42));
 ```
 

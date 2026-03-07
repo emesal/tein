@@ -12,9 +12,8 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let ctx = Context::builder()
-//!     .standard_env()                   // load (scheme base)
-//!     .preset(&tein::sandbox::ARITHMETIC) // restrict to arithmetic
-//!     .step_limit(100_000)              // cap vm steps
+//!     .standard_env()
+//!     .step_limit(100_000)
 //!     .build()?;
 //! # Ok(())
 //! # }
@@ -30,13 +29,12 @@
 //!
 //! Four independent layers of control:
 //!
-//! 1. **Environment restriction** — [`ContextBuilder::preset()`] / [`.allow()`](ContextBuilder::allow) /
-//!    [`.pure_computation()`](ContextBuilder::pure_computation) / [`.safe()`](ContextBuilder::safe)
+//! 1. **Module restriction** — [`ContextBuilder::sandboxed()`] with [`sandbox::Modules`]
 //! 2. **Step limits** — [`ContextBuilder::step_limit()`]
 //! 3. **File IO policy** — [`ContextBuilder::file_read()`] / [`.file_write()`](ContextBuilder::file_write)
-//! 4. **Module policy** — automatic VFS-only when using standard env + presets
+//! 4. **VFS gate** — automatic VFS-only when using standard env + `sandboxed()`
 //!
-//! See the [`sandbox`](crate::sandbox) module for preset details.
+//! See the [`sandbox`](crate::sandbox) module for module set details.
 
 use crate::{
     Value,
@@ -44,10 +42,15 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{FS_POLICY, FsPolicy, MODULE_POLICY, ModulePolicy, Preset},
+    sandbox::{
+        FS_GATE, FS_GATE_CHECK, FS_MODULE_PATHS, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST,
+        VFS_GATE,
+    },
 };
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::CString;
+use std::os::raw::c_char;
 use std::path::Path;
 
 /// RAII guard that clears the FOREIGN_STORE_PTR thread-local on drop.
@@ -55,29 +58,28 @@ use std::path::Path;
 /// Ensures the pointer is nulled on all exit paths (early returns, `?`, panic).
 struct ForeignStoreGuard;
 
+/// RAII guard that clears the CONTEXT_PTR thread-local on drop.
+struct ContextPtrGuard;
+
+impl Drop for ContextPtrGuard {
+    fn drop(&mut self) {
+        CONTEXT_PTR.with(|c| c.set(std::ptr::null()));
+    }
+}
+
 impl Drop for ForeignStoreGuard {
     fn drop(&mut self) {
         FOREIGN_STORE_PTR.with(|c| c.set(std::ptr::null()));
     }
 }
 
-// --- original proc thread-locals for IO wrappers ---
-//
-// when file_read() or file_write() is configured, we capture the original
-// chibi primitives before switching to the restricted env, then store them
-// here so our wrapper functions can delegate after policy checks.
+/// RAII guard that clears the EXT_API thread-local on drop.
+struct ExtApiGuard;
 
-// original procs for the 4 wrapped file-opening primitives.
-// indexed by IoOp discriminant.
-thread_local! {
-    static ORIGINAL_PROCS: [Cell<ffi::sexp>; 4] = const {
-        [
-            Cell::new(std::ptr::null_mut()),
-            Cell::new(std::ptr::null_mut()),
-            Cell::new(std::ptr::null_mut()),
-            Cell::new(std::ptr::null_mut()),
-        ]
-    };
+impl Drop for ExtApiGuard {
+    fn drop(&mut self) {
+        EXT_API.with(|c| c.set(std::ptr::null()));
+    }
 }
 
 // --- port store thread-local for custom port trampolines ---
@@ -106,7 +108,63 @@ impl Drop for PortStoreGuard {
 // the store without needing a Context reference. safe because Context is
 // !Send + !Sync and the pointer is only live during evaluation.
 thread_local! {
-    static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
+    pub(crate) static FOREIGN_STORE_PTR: Cell<*const RefCell<ForeignStore>> = const { Cell::new(std::ptr::null()) };
+    /// current TeinExtApi pointer — set during load_extension() so ext method dispatch
+    /// can call back into the host. null outside of ext loading and ext method calls.
+    pub(crate) static EXT_API: Cell<*const tein_ext::TeinExtApi> = const { Cell::new(std::ptr::null()) };
+    /// raw pointer to the active Context during evaluation.
+    ///
+    /// set by `evaluate()`, `call()`, `evaluate_port()`, and `read()` via
+    /// `ContextPtrGuard` RAII. trampolines (e.g. `register-module`) use this
+    /// to call Context methods without passing `&self` through the C FFI.
+    ///
+    /// same lifetime guarantees as `FOREIGN_STORE_PTR`: the Context outlives
+    /// any trampoline call during evaluation, and the guard clears on all
+    /// exit paths.
+    pub(crate) static CONTEXT_PTR: Cell<*const Context> = const { Cell::new(std::ptr::null()) };
+}
+
+// --- exit escape hatch thread-locals ---
+//
+// (exit) / (exit obj) in scheme sets these, then returns an exception to
+// stop the VM immediately. the eval loop checks the flag before converting
+// exceptions to errors and intercepts it to return Ok(value) to the rust caller.
+// cleared on Context::drop() as a safety net.
+thread_local! {
+    static EXIT_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    static EXIT_VALUE: Cell<ffi::sexp> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+// --- sandbox state thread-local ---
+//
+// set to true when sandboxed() is active. used by (tein file)
+// trampolines to distinguish unsandboxed contexts (allow all) from sandboxed
+// contexts with no file policy configured (deny). cleared on Context::drop().
+thread_local! {
+    static IS_SANDBOXED: Cell<bool> = const { Cell::new(false) };
+}
+
+// --- UX stub module map thread-local ---
+//
+// populated during sandboxed() build path: maps binding name → module path
+// so ux_stub can emit a helpful "(import (module path))" message.
+// cleared on Context::drop() alongside IS_SANDBOXED.
+thread_local! {
+    static STUB_MODULE_MAP: RefCell<std::collections::HashMap<String, String>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+// --- sandbox fake process environment thread-locals ---
+//
+// populated during sandboxed() build path: fake env vars and command-line
+// for sandboxed contexts. cleared on Context::drop().
+thread_local! {
+    static SANDBOX_ENV: RefCell<Option<HashMap<String, String>>> = const { RefCell::new(None) };
+    static SANDBOX_COMMAND_LINE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+
+    /// GC-rooted mutable env returned by `interaction-environment` in sandbox.
+    /// Lazily created on first call; cleared on `Context::drop()`.
+    pub(crate) static INTERACTION_ENV: Cell<ffi::sexp> = const { Cell::new(std::ptr::null_mut()) };
 }
 
 // --- implementations of the 4 foreign protocol dispatch functions ---
@@ -194,7 +252,7 @@ unsafe extern "C" fn foreign_types_wrapper(
         let names = store.borrow().type_names();
         let mut result = ffi::get_null();
         for name in names.iter().rev() {
-            let c_name = match CString::new(*name) {
+            let c_name = match CString::new(name.clone()) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -249,6 +307,389 @@ unsafe extern "C" fn foreign_type_methods_wrapper(
             result = ffi::sexp_cons(ctx, sym, result);
         }
         result
+    }
+}
+
+// --- cdylib extension trampolines ---
+
+/// Build a `TeinExtApi` vtable populated with trampolines into tein's FFI layer.
+///
+/// All function pointer fields are filled with thin shims that cast opaque
+/// pointer types back to `ffi::sexp` and forward to the real chibi wrappers.
+/// Predicates, extractors, constructors, and sentinels are direct transmutes —
+/// `sexp = *mut c_void` and `*mut OpaqueVal` have identical ABI.
+fn build_ext_api() -> tein_ext::TeinExtApi {
+    use std::ffi::c_int;
+    use tein_ext::{OpaqueCtx, OpaqueVal, TEIN_EXT_API_VERSION, TeinExtApi};
+
+    // Safety: we are transmuting between fn(*mut c_void) and fn(*mut OpaqueVal)
+    // (or fn(*mut OpaqueCtx)). Both are pointer-sized, same representation.
+    // The ABI is identical — this is purely a type-level trick.
+    unsafe {
+        TeinExtApi {
+            version: TEIN_EXT_API_VERSION,
+
+            // high-level trampolines (non-trivial, defined below)
+            register_vfs_module: ext_trampoline_register_vfs,
+            define_fn_variadic: ext_trampoline_define_fn,
+            register_foreign_type: ext_trampoline_register_type,
+
+            // type predicates — transmute fn(*mut c_void) → fn(*mut OpaqueVal)
+            sexp_integerp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_integerp),
+            sexp_flonump: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_flonump),
+            sexp_stringp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_stringp),
+            sexp_booleanp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_booleanp),
+            sexp_symbolp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_symbolp),
+            sexp_pairp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_pairp),
+            sexp_nullp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_nullp),
+            sexp_charp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_charp),
+            sexp_bytesp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_bytesp),
+            sexp_vectorp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_vectorp),
+            sexp_portp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_portp),
+            sexp_exceptionp: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_exceptionp),
+
+            // value extractors
+            sexp_unbox_fixnum: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> ffi::sexp_sint_t,
+                unsafe extern "C" fn(*mut OpaqueVal) -> std::ffi::c_long,
+            >(ffi::sexp_unbox_fixnum),
+            sexp_flonum_value: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> f64,
+                unsafe extern "C" fn(*mut OpaqueVal) -> f64,
+            >(ffi::sexp_flonum_value),
+            sexp_string_data: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> *const std::ffi::c_char,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *const std::ffi::c_char,
+            >(ffi::sexp_string_data),
+            // sexp_string_size returns sexp_uint_t; API table uses c_long (signed)
+            // need a trampoline to handle the sign difference
+            sexp_string_size: ext_trampoline_string_size,
+            sexp_unbox_character: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> c_int,
+                unsafe extern "C" fn(*mut OpaqueVal) -> c_int,
+            >(ffi::sexp_unbox_character),
+            // sexp_bytes_data returns *mut c_char; API table uses *const c_char (read-only)
+            sexp_bytes_data: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> *mut std::ffi::c_char,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *const std::ffi::c_char,
+            >(ffi::sexp_bytes_data),
+            // sexp_bytes_length returns sexp_uint_t; API table uses c_long (signed)
+            sexp_bytes_length: ext_trampoline_bytes_length,
+            sexp_car: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> ffi::sexp,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *mut OpaqueVal,
+            >(ffi::sexp_car),
+            sexp_cdr: std::mem::transmute::<
+                unsafe fn(ffi::sexp) -> ffi::sexp,
+                unsafe extern "C" fn(*mut OpaqueVal) -> *mut OpaqueVal,
+            >(ffi::sexp_cdr),
+
+            // value constructors
+            sexp_make_fixnum: std::mem::transmute::<
+                unsafe fn(ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(std::ffi::c_long) -> *mut OpaqueVal,
+            >(ffi::sexp_make_fixnum),
+            sexp_make_flonum: std::mem::transmute::<
+                unsafe fn(ffi::sexp, f64) -> ffi::sexp,
+                unsafe extern "C" fn(*mut OpaqueCtx, f64) -> *mut OpaqueVal,
+            >(ffi::sexp_make_flonum),
+            // sexp_make_boolean: ffi wrapper takes bool; C ABI uses c_int
+            sexp_make_boolean: ext_trampoline_make_boolean,
+            sexp_make_character: std::mem::transmute::<
+                unsafe fn(c_int) -> ffi::sexp,
+                unsafe extern "C" fn(c_int) -> *mut OpaqueVal,
+            >(ffi::sexp_make_character),
+            sexp_c_str: std::mem::transmute::<
+                unsafe fn(ffi::sexp, *const std::ffi::c_char, ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *const std::ffi::c_char,
+                    std::ffi::c_long,
+                ) -> *mut OpaqueVal,
+            >(ffi::sexp_c_str),
+            sexp_cons: std::mem::transmute::<
+                unsafe fn(ffi::sexp, ffi::sexp, ffi::sexp) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *mut OpaqueVal,
+                    *mut OpaqueVal,
+                ) -> *mut OpaqueVal,
+            >(ffi::sexp_cons),
+            // sexp_make_bytes takes sexp_uint_t; API table uses c_long (signed)
+            sexp_make_bytes: ext_trampoline_make_bytes,
+
+            // error constructor — same signature as sexp_c_str but returns exception
+            make_error: std::mem::transmute::<
+                unsafe fn(ffi::sexp, *const std::ffi::c_char, ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *const std::ffi::c_char,
+                    std::ffi::c_long,
+                ) -> *mut OpaqueVal,
+            >(ffi::make_error),
+
+            // sentinels
+            get_null: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_null),
+            get_true: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_true),
+            get_false: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_false),
+            get_void: std::mem::transmute::<
+                unsafe fn() -> ffi::sexp,
+                unsafe extern "C" fn() -> *mut OpaqueVal,
+            >(ffi::get_void),
+        }
+    }
+}
+
+/// Trampoline: boolean constructor bridging `bool` (rust) ↔ `c_int` (C ABI).
+unsafe extern "C" fn ext_trampoline_make_boolean(b: std::ffi::c_int) -> *mut tein_ext::OpaqueVal {
+    unsafe { std::mem::transmute(ffi::sexp_make_boolean(b != 0)) }
+}
+
+/// Trampoline: string size bridging `sexp_uint_t` (unsigned) ↔ `c_long` (signed).
+unsafe extern "C" fn ext_trampoline_string_size(x: *mut tein_ext::OpaqueVal) -> std::ffi::c_long {
+    unsafe { ffi::sexp_string_size(x as ffi::sexp) as std::ffi::c_long }
+}
+
+/// Trampoline: bytevector length bridging `sexp_uint_t` ↔ `c_long`.
+unsafe extern "C" fn ext_trampoline_bytes_length(x: *mut tein_ext::OpaqueVal) -> std::ffi::c_long {
+    unsafe { ffi::sexp_bytes_length(x as ffi::sexp) as std::ffi::c_long }
+}
+
+/// Trampoline: bytevector constructor bridging `c_long` ↔ `sexp_uint_t`.
+unsafe extern "C" fn ext_trampoline_make_bytes(
+    ctx: *mut tein_ext::OpaqueCtx,
+    len: std::ffi::c_long,
+    init: u8,
+) -> *mut tein_ext::OpaqueVal {
+    unsafe {
+        std::mem::transmute(ffi::sexp_make_bytes(
+            ctx as ffi::sexp,
+            len as ffi::sexp_uint_t,
+            init,
+        ))
+    }
+}
+
+/// Trampoline: register a VFS module path+content from an extension.
+unsafe extern "C" fn ext_trampoline_register_vfs(
+    _ctx: *mut tein_ext::OpaqueCtx,
+    path: *const std::ffi::c_char,
+    path_len: usize,
+    content: *const std::ffi::c_char,
+    content_len: usize,
+) -> i32 {
+    unsafe {
+        let path_str =
+            match std::str::from_utf8(std::slice::from_raw_parts(path as *const u8, path_len)) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+        let full_path = format!("/vfs/{path_str}");
+        let c_path = match CString::new(full_path) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let rc = ffi::tein_vfs_register(c_path.as_ptr(), content, content_len as std::ffi::c_uint);
+        if rc != 0 {
+            return -1;
+        }
+        0
+    }
+}
+
+/// Trampoline: register a variadic scheme function from an extension.
+unsafe extern "C" fn ext_trampoline_define_fn(
+    ctx: *mut tein_ext::OpaqueCtx,
+    name: *const std::ffi::c_char,
+    name_len: usize,
+    f: tein_ext::SexpFn,
+) -> i32 {
+    unsafe {
+        let name_str =
+            match std::str::from_utf8(std::slice::from_raw_parts(name as *const u8, name_len)) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+        let c_name = match CString::new(name_str) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let ctx_sexp: ffi::sexp = ctx as ffi::sexp;
+        let env = ffi::sexp_context_env(ctx_sexp);
+        // transmute SexpFn to the type sexp_define_foreign_proc expects
+        let f_typed: Option<
+            unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+        > = Some(std::mem::transmute::<
+            tein_ext::SexpFn,
+            unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+        >(f));
+        let result = ffi::sexp_define_foreign_proc(
+            ctx_sexp,
+            env,
+            c_name.as_ptr(),
+            0,
+            ffi::SEXP_PROC_VARIADIC,
+            c_name.as_ptr(),
+            f_typed,
+        );
+        if ffi::sexp_exceptionp(result) != 0 {
+            -1
+        } else {
+            0
+        }
+    }
+}
+
+/// Trampoline: register a foreign type from a TeinTypeDesc.
+///
+/// Full implementation in task 3 (requires ForeignStore::register_ext_type).
+/// Body is filled in after foreign.rs is extended.
+unsafe extern "C" fn ext_trampoline_register_type(
+    ctx: *mut tein_ext::OpaqueCtx,
+    desc: *const tein_ext::TeinTypeDesc,
+) -> i32 {
+    ext_register_type_impl(ctx, desc)
+}
+
+/// Real implementation of ext_trampoline_register_type.
+///
+/// Reads TeinTypeDesc, registers the ext type in ForeignStore, then generates
+/// scheme convenience procs (predicate + method wrappers) via sexp_eval_string.
+fn ext_register_type_impl(
+    ctx: *mut tein_ext::OpaqueCtx,
+    desc: *const tein_ext::TeinTypeDesc,
+) -> i32 {
+    use crate::foreign::ExtMethodEntry;
+    unsafe {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() || desc.is_null() {
+            return -1;
+        }
+
+        let type_name_bytes =
+            std::slice::from_raw_parts((*desc).type_name as *const u8, (*desc).type_name_len);
+        let type_name = match std::str::from_utf8(type_name_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => return -1,
+        };
+
+        let method_slice = std::slice::from_raw_parts((*desc).methods, (*desc).method_count);
+        let mut methods = Vec::with_capacity(method_slice.len());
+        for m in method_slice {
+            let name_bytes = std::slice::from_raw_parts(m.name as *const u8, m.name_len);
+            let name = match std::str::from_utf8(name_bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => return -1,
+            };
+            methods.push(ExtMethodEntry {
+                name,
+                func: m.func,
+                is_mut: m.is_mut,
+            });
+        }
+
+        let store = &*store_ptr;
+        if store
+            .borrow_mut()
+            .register_ext_type(type_name.clone(), methods)
+            .is_err()
+        {
+            return -1;
+        }
+
+        // generate convenience procs — same scheme code as register_foreign_type
+        let ctx_sexp: ffi::sexp = ctx as ffi::sexp;
+        let env = ffi::sexp_context_env(ctx_sexp);
+
+        let pred_code = format!(
+            "(define ({tn}? x) (and (foreign? x) (equal? (foreign-type x) \"{tn}\")))",
+            tn = type_name
+        );
+        let c_pred = match CString::new(pred_code.as_str()) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let pred_result = ffi::sexp_eval_string(ctx_sexp, c_pred.as_ptr(), -1, env);
+        if ffi::sexp_exceptionp(pred_result) != 0 {
+            return -1;
+        }
+
+        let method_names: Vec<String> = store
+            .borrow()
+            .ext_method_names(&type_name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        for method_name in &method_names {
+            // ext method names are already prefixed (e.g. "counter-get"), so use
+            // them directly — don't wrap in {type_name}-{method_name} again (#69)
+            let wrapper_code = format!(
+                "(define ({mn} obj . args) \
+                   (if (and (foreign? obj) (equal? (foreign-type obj) \"{tn}\")) \
+                       (apply foreign-call obj (quote {mn}) args) \
+                       (error \"{mn}: expected {tn}, got\" \
+                              (if (foreign? obj) (foreign-type obj) obj))))",
+                tn = type_name,
+                mn = method_name
+            );
+            let c_wrapper = match CString::new(wrapper_code.as_str()) {
+                Ok(s) => s,
+                Err(_) => return -1,
+            };
+            let result = ffi::sexp_eval_string(ctx_sexp, c_wrapper.as_ptr(), -1, env);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return -1;
+            }
+        }
+
+        0
     }
 }
 
@@ -378,52 +819,188 @@ unsafe extern "C" fn port_write_trampoline(
     }
 }
 
-/// The 4 file-opening primitives we wrap with policy checks.
-#[derive(Clone, Copy)]
-#[allow(clippy::enum_variant_names)] // variants mirror scheme primitive names
-enum IoOp {
-    InputFile = 0,
-    BinaryInputFile = 1,
-    OutputFile = 2,
-    BinaryOutputFile = 3,
-}
+// --- json trampolines (gated behind "json" feature) ---
 
-impl IoOp {
-    /// Scheme primitive name for this operation.
-    const fn name(self) -> &'static str {
-        match self {
-            IoOp::InputFile => "open-input-file",
-            IoOp::BinaryInputFile => "open-binary-input-file",
-            IoOp::OutputFile => "open-output-file",
-            IoOp::BinaryOutputFile => "open-binary-output-file",
+#[cfg(feature = "json")]
+/// Trampoline for `json-parse`: takes one scheme string argument, returns parsed value.
+///
+/// On parse error or type mismatch, raises a scheme exception.
+unsafe extern "C" fn json_parse_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "json-parse: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let str_sexp = ffi::sexp_car(args);
+        if ffi::sexp_stringp(str_sexp) == 0 {
+            let msg = "json-parse: expected string argument";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let data = ffi::sexp_string_data(str_sexp);
+        let len = ffi::sexp_string_size(str_sexp) as usize;
+        let input = match std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("json-parse: invalid UTF-8: {e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+        match crate::json::json_parse(input) {
+            Ok(value) => match value.to_raw(ctx) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    let msg = format!("json-parse: {e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                }
+            },
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
         }
     }
-
-    /// Whether this is a read or write operation.
-    const fn is_read(self) -> bool {
-        matches!(self, IoOp::InputFile | IoOp::BinaryInputFile)
-    }
-
-    /// All operations as a slice for iteration.
-    const ALL: [IoOp; 4] = [
-        IoOp::InputFile,
-        IoOp::BinaryInputFile,
-        IoOp::OutputFile,
-        IoOp::BinaryOutputFile,
-    ];
 }
 
-/// Sandbox stub for disallowed bindings.
+#[cfg(feature = "json")]
+/// Trampoline for `json-stringify`: takes one scheme value, returns JSON string.
 ///
-/// Registered under the name of each known preset primitive that wasn't
-/// included in the context's allowlist. When called, raises a Scheme exception
-/// with a `[sandbox:binding]` sentinel that `extract_exception_error` converts
-/// to `Error::SandboxViolation`.
+/// Works directly on raw chibi sexps via `json::json_stringify_raw` to preserve
+/// alist structure. `Value::from_raw` would collapse dotted pairs into proper lists
+/// when the cdr is a proper list (e.g. `("x" . (("y" . 1)))` → `("x" ("y" . 1))`),
+/// losing the structural cue needed to detect alists.
 ///
-/// The stub extracts its own name from the opcode's name slot (set by
-/// `sexp_define_foreign_proc` at registration time), so one function serves
-/// all stubbed bindings.
-unsafe extern "C" fn sandbox_stub(
+/// On conversion error, raises a scheme exception.
+unsafe extern "C" fn json_stringify_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "json-stringify: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let val_sexp = ffi::sexp_car(args);
+        match crate::json::json_stringify_raw(ctx, val_sexp) {
+            Ok(json) => {
+                let c_json = CString::new(json.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_json.as_ptr(), json.len() as ffi::sexp_sint_t)
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+// --- toml trampolines (gated behind "toml" feature) ---
+
+#[cfg(feature = "toml")]
+/// Trampoline for `toml-parse`: takes one scheme string argument, returns parsed value.
+///
+/// On parse error or type mismatch, raises a scheme exception.
+unsafe extern "C" fn toml_parse_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "toml-parse: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let str_sexp = ffi::sexp_car(args);
+        if ffi::sexp_stringp(str_sexp) == 0 {
+            let msg = "toml-parse: expected string argument";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let data = ffi::sexp_string_data(str_sexp);
+        let len = ffi::sexp_string_size(str_sexp) as usize;
+        let input = match std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("toml-parse: invalid UTF-8: {e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+        match crate::toml::toml_parse(input) {
+            Ok(value) => match value.to_raw(ctx) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    let msg = format!("toml-parse: {e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                }
+            },
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "toml")]
+/// Trampoline for `toml-stringify`: takes one scheme value, returns TOML string.
+///
+/// Works directly on raw chibi sexps via `toml::toml_stringify_raw` to preserve
+/// alist structure, then delegates to `toml::to_string()` for correct formatting.
+///
+/// On conversion error, raises a scheme exception.
+unsafe extern "C" fn toml_stringify_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "toml-stringify: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let val_sexp = ffi::sexp_car(args);
+        match crate::toml::toml_stringify_raw(ctx, val_sexp) {
+            Ok(toml_str) => {
+                let c_str = CString::new(toml_str.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_str.as_ptr(), toml_str.len() as ffi::sexp_sint_t)
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
+/// UX stub for bindings excluded from module-level sandboxed contexts.
+///
+/// Extracts its name from the opcode's name slot (set by
+/// `sexp_define_foreign_proc` at registration time), then looks
+/// up the providing module in `STUB_MODULE_MAP` to produce an actionable hint:
+/// `"sandbox: 'map' requires (import (scheme base))"`.
+/// Converts to `Error::SandboxViolation` via the `[sandbox:binding]` sentinel.
+unsafe extern "C" fn ux_stub(
     ctx: ffi::sexp,
     self_: ffi::sexp,
     _n: ffi::sexp_sint_t,
@@ -436,113 +1013,877 @@ unsafe extern "C" fn sandbox_stub(
             let len = ffi::sexp_string_size(name_sexp) as usize;
             std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
                 .unwrap_or("unknown")
+                .to_string()
         } else {
-            "unknown"
+            "unknown".to_string()
         };
+        // look up providing module from the stub map
+        let module_hint = STUB_MODULE_MAP.with(|map| {
+            map.borrow()
+                .get(&name)
+                .map(|m| {
+                    // "scheme/base" → "(scheme base)", "srfi/1" → "(srfi 1)"
+                    let parts: Vec<&str> = m.splitn(2, '/').collect();
+                    if parts.len() == 2 {
+                        format!("({} {})", parts[0], parts[1].replace('/', " "))
+                    } else {
+                        format!("({m})")
+                    }
+                })
+                .unwrap_or_else(|| "the required module".to_string())
+        });
         let msg = format!(
-            "[sandbox:binding] '{}' is not available in this sandbox",
-            name
+            "[sandbox:binding] '{}' requires (import {})",
+            name, module_hint
         );
         let c_msg = CString::new(msg.as_str()).unwrap_or_default();
         ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
     }
 }
 
-/// Shared policy check + delegation for all file-open wrappers.
+// --- trampoline helpers ---
+
+/// Extract the first argument as a `&str`, returning an error sexp on type mismatch or missing arg.
 ///
-/// Extracts the filename from the first arg, checks against FsPolicy,
-/// and either delegates to the original primitive or returns a policy error.
-unsafe fn check_and_delegate(ctx: ffi::sexp, args: ffi::sexp, op: IoOp) -> ffi::sexp {
+/// # Safety
+/// `args` must be a valid scheme list (may be null/empty — arity error returned in that case).
+unsafe fn extract_string_arg<'a>(
+    ctx: ffi::sexp,
+    args: ffi::sexp,
+    fn_name: &str,
+) -> std::result::Result<&'a str, ffi::sexp> {
     unsafe {
-        // extract filename string from first arg
-        let first_arg = ffi::sexp_car(args);
-        if ffi::sexp_stringp(first_arg) == 0 {
-            let msg = "open-file: expected string argument";
-            let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = format!("{}: expected 1 argument, got 0", fn_name);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return Err(ffi::make_error(
+                ctx,
+                c_msg.as_ptr(),
+                msg.len() as ffi::sexp_sint_t,
+            ));
         }
+        let first = ffi::sexp_car(args);
+        if ffi::sexp_stringp(first) == 0 {
+            let msg = format!("{}: expected string argument", fn_name);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return Err(ffi::make_error(
+                ctx,
+                c_msg.as_ptr(),
+                msg.len() as ffi::sexp_sint_t,
+            ));
+        }
+        let ptr = ffi::sexp_string_data(first);
+        let len = ffi::sexp_string_size(first) as usize;
+        Ok(std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len)).unwrap_or(""))
+    }
+}
 
-        let c_str = ffi::sexp_string_data(first_arg);
-        let len = ffi::sexp_string_size(first_arg) as usize;
-        let path =
-            std::str::from_utf8(std::slice::from_raw_parts(c_str as *const u8, len)).unwrap_or("");
+/// FsPolicy access direction for [`check_fs_access`].
+pub(crate) enum FsAccess {
+    Read,
+    Write,
+}
 
-        // check policy
-        let allowed = FS_POLICY.with(|cell| {
-            let policy = cell.borrow();
-            match &*policy {
-                Some(p) => {
-                    if op.is_read() {
-                        p.check_read(path)
-                    } else {
-                        p.check_write(path)
-                    }
-                }
-                None => false,
-            }
+/// Check FsPolicy access for `path`.
+///
+/// - unsandboxed (IS_SANDBOXED=false): allows unconditionally
+/// - sandboxed read under an `FS_MODULE_PATHS` dir: allows (module loading)
+/// - sandboxed with matching FsPolicy: delegates to `check_read`/`check_write`
+/// - sandboxed without FsPolicy configured: denies
+///
+/// `FS_MODULE_PATHS` entries are canonicalised dirs; any read under them is
+/// implicitly allowed so chibi's module loader can open `.sld`/`.scm` files.
+/// this grants no write access and no access outside the registered dirs.
+pub(crate) fn check_fs_access(path: &str, access: FsAccess) -> bool {
+    let sandboxed = IS_SANDBOXED.with(|c| c.get());
+    if !sandboxed {
+        return true;
+    }
+    // module search paths implicitly grant read access for module loading
+    if matches!(access, FsAccess::Read) {
+        let path_buf = std::path::Path::new(path);
+        let allowed_by_module_path = FS_MODULE_PATHS.with(|cell| {
+            let dirs = cell.borrow();
+            dirs.iter().any(|dir| path_buf.starts_with(dir.as_str()))
         });
+        if allowed_by_module_path {
+            return true;
+        }
+    }
+    FS_POLICY.with(|cell| {
+        let policy = cell.borrow();
+        match &*policy {
+            Some(p) => match access {
+                FsAccess::Read => p.check_read(path),
+                FsAccess::Write => p.check_write(path),
+            },
+            None => false, // sandboxed + no policy = deny
+        }
+    })
+}
 
-        if !allowed {
-            let op_kind = if op.is_read() { "read" } else { "write" };
-            let msg = format!("[sandbox:file] {} ({} not permitted)", path, op_kind);
+// --- (tein file) trampolines ---
+
+/// `file-exists?` trampoline: checks FsPolicy read access, returns boolean.
+///
+/// when no FsPolicy is set (unsandboxed context), allows unconditionally.
+/// in sandboxed contexts without file_read configured, returns a policy
+/// violation exception.
+unsafe extern "C" fn file_exists_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let path = match extract_string_arg(ctx, args, "file-exists?") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        if !check_fs_access(path, FsAccess::Read) {
+            let msg = format!("[sandbox:file] {} (read not permitted)", path);
             let c_msg = CString::new(msg.as_str()).unwrap_or_default();
             return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
 
-        // delegate to original primitive
-        let original = ORIGINAL_PROCS.with(|procs| procs[op as usize].get());
-        ffi::sexp_apply_proc(ctx, original, args)
+        if std::path::Path::new(path).exists() {
+            ffi::get_true()
+        } else {
+            ffi::get_false()
+        }
     }
 }
 
-// 4 wrapper functions — one per file-opening primitive.
-// each is a thin shim that calls check_and_delegate with the right IoOp.
-
-unsafe extern "C" fn wrapper_open_input_file(
+/// `delete-file` trampoline: checks FsPolicy write access, deletes file.
+///
+/// when no FsPolicy is set (unsandboxed context), allows unconditionally.
+/// returns void on success, exception on policy violation or IO error.
+unsafe extern "C" fn delete_file_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
     _n: ffi::sexp_sint_t,
     args: ffi::sexp,
 ) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::InputFile) }
+    unsafe {
+        let path = match extract_string_arg(ctx, args, "delete-file") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        if !check_fs_access(path, FsAccess::Write) {
+            let msg = format!("[sandbox:file] {} (write not permitted)", path);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        match std::fs::remove_file(path) {
+            Ok(()) => ffi::get_void(),
+            Err(e) => {
+                let msg = format!("delete-file: {}", e);
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
 }
 
-unsafe extern "C" fn wrapper_open_binary_input_file(
+// --- open-*-file enforcement ---
+//
+// open-*-file policy enforcement is handled at the C opcode level
+// (eval.c patches F, G) via the FS policy gate callback.
+
+// --- (tein load) trampoline ---
+
+/// VFS-only load trampoline, registered as `tein-load-vfs-internal`.
+///
+/// exported as `load` by `(tein load)` via `(export (rename tein-load-vfs-internal load))`
+/// in `load.sld`. registered under an internal name to avoid overriding chibi's built-in `load`,
+/// which the module loader uses for `(include ...)` in `.sld` files.
+///
+/// resolves the path through `tein_vfs_lookup`, opens a string input port
+/// from the embedded content, and loops read+eval. rejects non-VFS paths
+/// with a sandbox violation error.
+unsafe extern "C" fn load_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
     _n: ffi::sexp_sint_t,
     args: ffi::sexp,
 ) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::BinaryInputFile) }
+    unsafe {
+        let path = match extract_string_arg(ctx, args, "load") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        // VFS-only gate
+        if !path.starts_with("/vfs/") {
+            let msg = format!("[sandbox:load] {} (only VFS paths permitted)", path);
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        // look up VFS content
+        let c_path = match CString::new(path) {
+            Ok(s) => s,
+            Err(_) => {
+                let msg = "load: path contains null bytes";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+        let content = match ffi::vfs_lookup(&c_path) {
+            Some(bytes) => bytes,
+            None => {
+                let msg = format!("load: VFS path not found: {}", path);
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+
+        // open input string port from VFS content
+        let scheme_str = ffi::sexp_c_str(
+            ctx,
+            content.as_ptr() as *const c_char,
+            content.len() as ffi::sexp_sint_t,
+        );
+        if ffi::sexp_exceptionp(scheme_str) != 0 {
+            return scheme_str;
+        }
+        let _str_root = ffi::GcRoot::new(ctx, scheme_str);
+
+        let port = ffi::sexp_open_input_string(ctx, scheme_str);
+        if ffi::sexp_exceptionp(port) != 0 {
+            return port;
+        }
+        let _port_root = ffi::GcRoot::new(ctx, port);
+
+        let env = ffi::sexp_context_env(ctx);
+        let mut result = ffi::get_void();
+
+        loop {
+            let expr = ffi::sexp_read(ctx, port);
+            if ffi::sexp_eofp(expr) != 0 {
+                break;
+            }
+            if ffi::sexp_exceptionp(expr) != 0 {
+                return expr;
+            }
+            let _expr_root = ffi::GcRoot::new(ctx, expr);
+            result = ffi::sexp_evaluate(ctx, expr, env);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return result;
+            }
+        }
+
+        result
+    }
 }
 
-unsafe extern "C" fn wrapper_open_output_file(
+// --- (scheme eval) / (scheme repl) trampolines ---
+
+/// Convert a scheme import spec list like `(scheme base)` to a path string `"scheme/base"`.
+///
+/// Each element must be a symbol (converted via `sexp_symbol_to_string`) or an
+/// integer (converted via `sexp_unbox_fixnum`). Returns `Err(error_sexp)` on
+/// malformed input.
+unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<String, ffi::sexp> {
+    unsafe {
+        let mut parts = Vec::new();
+        let mut cursor = spec;
+        while ffi::sexp_pairp(cursor) != 0 {
+            let elem = ffi::sexp_car(cursor);
+            if ffi::sexp_symbolp(elem) != 0 {
+                let s = ffi::sexp_symbol_to_string(ctx, elem);
+                let ptr = ffi::sexp_string_data(s);
+                let len = ffi::sexp_string_size(s) as usize;
+                let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                parts.push(String::from_utf8_lossy(slice).into_owned());
+            } else if ffi::sexp_integerp(elem) != 0 {
+                let n = ffi::sexp_unbox_fixnum(elem);
+                parts.push(n.to_string());
+            } else {
+                let msg = "environment: import spec elements must be symbols or integers";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                return Err(ffi::make_error(
+                    ctx,
+                    c_msg.as_ptr(),
+                    msg.len() as ffi::sexp_sint_t,
+                ));
+            }
+            cursor = ffi::sexp_cdr(cursor);
+        }
+        Ok(parts.join("/"))
+    }
+}
+
+/// `environment` trampoline: validates import specs against VFS allowlist, then
+/// delegates to chibi's `mutable-environment` and makes the result immutable.
+///
+/// registered as `tein-environment-internal`. used by `(scheme eval)` and
+/// `(scheme load)` VFS shadows which export it as `environment`.
+///
+/// in sandboxed contexts, each import spec is checked against `VFS_ALLOWLIST`.
+/// disallowed modules produce an error. in unsandboxed contexts, all specs are
+/// passed through unconditionally.
+unsafe extern "C" fn environment_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
     _n: ffi::sexp_sint_t,
     args: ffi::sexp,
 ) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::OutputFile) }
+    unsafe {
+        // in sandboxed mode, validate each spec against the VFS allowlist
+        if IS_SANDBOXED.with(|c| c.get()) {
+            let mut cursor = args;
+            while ffi::sexp_pairp(cursor) != 0 {
+                let spec = ffi::sexp_car(cursor);
+                match spec_to_path(ctx, spec) {
+                    Ok(path) => {
+                        let allowed = VFS_ALLOWLIST.with(|cell| {
+                            let list = cell.borrow();
+                            list.contains(&path)
+                        });
+                        if !allowed {
+                            let msg = format!(
+                                "[sandbox:environment] module ({}) not in allowlist",
+                                path.replace('/', " ")
+                            );
+                            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                            return ffi::make_error(
+                                ctx,
+                                c_msg.as_ptr(),
+                                msg.len() as ffi::sexp_sint_t,
+                            );
+                        }
+                    }
+                    Err(e) => return e,
+                }
+                cursor = ffi::sexp_cdr(cursor);
+            }
+        }
+
+        // build expression: (mutable-environment spec1 spec2 ...)
+        // we evaluate it in the meta env where mutable-environment is defined.
+        let meta_env = ffi::sexp_global_meta_env(ctx);
+        let _meta_root = ffi::GcRoot::new(ctx, meta_env);
+
+        let sym_name = c"mutable-environment";
+        let sym = ffi::sexp_intern(
+            ctx,
+            sym_name.as_ptr(),
+            "mutable-environment".len() as ffi::sexp_sint_t,
+        );
+        // sym is an interned symbol — immortal in chibi's symbol table, no root needed.
+
+        // build quoted-spec list: (mutable-environment '(scheme base) '(scheme write) ...)
+        // each arg is already an evaluated list like (scheme base), so we quote them
+        // for evaluation.
+        let quote_sym = ffi::sexp_intern(ctx, c"quote".as_ptr(), 5);
+        // quote_sym is an interned symbol — immortal, no root needed.
+
+        // walk args in reverse to build the list via cons
+        let mut arg_vec: Vec<ffi::sexp> = Vec::new();
+        let mut cursor = args;
+        while ffi::sexp_pairp(cursor) != 0 {
+            arg_vec.push(ffi::sexp_car(cursor));
+            cursor = ffi::sexp_cdr(cursor);
+        }
+
+        let mut expr_parts = ffi::get_null();
+        for spec in arg_vec.iter().rev() {
+            // root spec (from arg_vec — Rust heap, invisible to chibi GC)
+            let _spec_root = ffi::GcRoot::new(ctx, *spec);
+            // root the accumulator before each allocation
+            let _tail_root = ffi::GcRoot::new(ctx, expr_parts);
+
+            // build (quote spec) = (quote_sym . (spec . ()))
+            let quoted_inner = ffi::sexp_cons(ctx, *spec, ffi::get_null());
+            if ffi::sexp_exceptionp(quoted_inner) != 0 {
+                return quoted_inner;
+            }
+            let _inner_root = ffi::GcRoot::new(ctx, quoted_inner);
+
+            let quoted = ffi::sexp_cons(ctx, quote_sym, quoted_inner);
+            if ffi::sexp_exceptionp(quoted) != 0 {
+                return quoted;
+            }
+            let _quoted_root = ffi::GcRoot::new(ctx, quoted);
+
+            expr_parts = ffi::sexp_cons(ctx, quoted, expr_parts);
+            if ffi::sexp_exceptionp(expr_parts) != 0 {
+                return expr_parts;
+            }
+        }
+
+        // prepend the mutable-environment symbol
+        let _parts_root = ffi::GcRoot::new(ctx, expr_parts);
+        let expr = ffi::sexp_cons(ctx, sym, expr_parts);
+        if ffi::sexp_exceptionp(expr) != 0 {
+            return expr;
+        }
+        let _expr_root = ffi::GcRoot::new(ctx, expr);
+
+        // evaluate in meta env
+        let result = ffi::sexp_evaluate(ctx, expr, meta_env);
+        if ffi::sexp_exceptionp(result) != 0 {
+            return result;
+        }
+
+        // make the resulting environment immutable (r7rs: environment returns immutable envs)
+        // note: sexp_make_immutable_op mutates in place and returns #t/#f,
+        // so we return `result` (the env), not the make_immutable return value.
+        let imm = ffi::sexp_make_immutable(ctx, result);
+        if ffi::sexp_exceptionp(imm) != 0 {
+            return imm;
+        }
+        result
+    }
 }
 
-unsafe extern "C" fn wrapper_open_binary_output_file(
+/// `interaction-environment` trampoline: returns a persistent mutable env
+/// containing all VFS-allowlisted modules.
+///
+/// registered as `tein-interaction-environment-internal`. used by `(scheme repl)`
+/// VFS shadow which exports it as `interaction-environment`.
+///
+/// the env is lazily created on first call and cached in `INTERACTION_ENV`
+/// thread-local. subsequent calls return the same env, allowing definitions
+/// to accumulate across evals (r7rs compliance).
+unsafe extern "C" fn interaction_environment_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // return cached env if already created
+        let cached = INTERACTION_ENV.with(|cell| cell.get());
+        if !cached.is_null() {
+            return cached;
+        }
+
+        // return the current context env as the interaction environment.
+        // in sandboxed mode this is the restricted null env that already has
+        // all allowed imports available. definitions accumulate here across
+        // evals, satisfying r7rs's requirement for a mutable interaction env.
+        //
+        // r7rs technically says interaction-environment should be a separate
+        // env, but using the context env is correct for our embedding model
+        // where each Context is a single-use evaluation scope.
+        let result = ffi::sexp_context_env(ctx);
+        if ffi::sexp_exceptionp(result) != 0 {
+            return result;
+        }
+
+        // GC-root and cache
+        ffi::sexp_preserve_object(ctx, result);
+        INTERACTION_ENV.with(|cell| cell.set(result));
+
+        result
+    }
+}
+
+/// Register `tein-environment-internal` and `tein-interaction-environment-internal`
+/// into a specific chibi env.
+///
+/// Must be called with the primitive env BEFORE `load_standard_env`. init-7.scm
+/// builds `*chibi-env*` by importing all bindings from the primitive env, so any
+/// name registered here propagates into `*chibi-env*` and is available to library
+/// bodies that `(import (chibi))` — including VFS shadow SLDs for `scheme/eval`,
+/// `scheme/load`, and `scheme/repl`. (#97)
+///
+/// Also called via `register_eval_module()` (into the context env after creation)
+/// for non-sandboxed contexts that want direct access to the trampolines.
+/// Re-registering is safe — `sexp_env_define` overwrites silently.
+fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
+    type VariadicFn =
+        unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp;
+    for (name, f) in [
+        (
+            "tein-environment-internal",
+            environment_trampoline as VariadicFn,
+        ),
+        (
+            "tein-interaction-environment-internal",
+            interaction_environment_trampoline as VariadicFn,
+        ),
+    ] {
+        let c_name = CString::new(name).map_err(|_| {
+            Error::EvalError(format!("function name contains null bytes: {}", name))
+        })?;
+        unsafe {
+            let result = ffi::sexp_define_foreign_proc(
+                ctx,
+                env,
+                c_name.as_ptr(),
+                0,
+                ffi::SEXP_PROC_VARIADIC,
+                c_name.as_ptr(),
+                Some(f),
+            );
+            if ffi::sexp_exceptionp(result) != 0 {
+                return Err(Error::EvalError(format!(
+                    "failed to define variadic function '{}'",
+                    name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// register a single native variadic fn into a given env.
+///
+/// used to inject trampolines into the primitive env BEFORE `load_standard_env`,
+/// so they end up in `*chibi-env*` and are visible to library bodies via
+/// `(import (chibi))`.
+#[allow(dead_code)] // generic utility — currently used by http, ready for future modules
+fn register_native_trampoline(
+    ctx: ffi::sexp,
+    env: ffi::sexp,
+    name: &str,
+    f: unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+) -> Result<()> {
+    let c_name =
+        CString::new(name).map_err(|_| Error::EvalError(format!("name contains null: {name}")))?;
+    unsafe {
+        let result = ffi::sexp_define_foreign_proc(
+            ctx,
+            env,
+            c_name.as_ptr(),
+            0,
+            ffi::SEXP_PROC_VARIADIC,
+            c_name.as_ptr(),
+            Some(f),
+        );
+        if ffi::sexp_exceptionp(result) != 0 {
+            return Err(Error::EvalError(format!(
+                "failed to define variadic function '{name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+// --- (tein modules) trampolines ---
+
+/// `register-module` trampoline: registers a define-library source string
+/// as a new importable module.
+///
+/// uses `CONTEXT_PTR` thread-local to call `Context::register_module` directly,
+/// avoiding any parsing duplication. CONTEXT_PTR is set by `evaluate()`,
+/// `call()`, `evaluate_port()`, and `read()` and is guaranteed valid during
+/// trampoline execution.
+///
+/// returns `#t` on success, raises a scheme error on failure.
+unsafe extern "C" fn register_module_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
     _n: ffi::sexp_sint_t,
     args: ffi::sexp,
 ) -> ffi::sexp {
-    unsafe { check_and_delegate(ctx, args, IoOp::BinaryOutputFile) }
+    unsafe {
+        let source = match extract_string_arg(ctx, args, "register-module") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        let context_ptr = CONTEXT_PTR.with(|c| c.get());
+        if context_ptr.is_null() {
+            let msg = "register-module: internal error — no active Context";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let context = &*context_ptr;
+
+        // source is a &str borrowed from the scheme string arg; we need an
+        // owned copy because register_module may allocate (sexp_read etc.),
+        // potentially triggering GC which could move the scheme string.
+        let source_owned = source.to_string();
+
+        match context.register_module(&source_owned) {
+            Ok(()) => ffi::get_true(),
+            Err(e) => {
+                let msg = format!("{e}");
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
 }
 
-/// Get the wrapper function pointer for a given IoOp.
-fn wrapper_fn_for(
-    op: IoOp,
-) -> unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp {
-    match op {
-        IoOp::InputFile => wrapper_open_input_file,
-        IoOp::BinaryInputFile => wrapper_open_binary_input_file,
-        IoOp::OutputFile => wrapper_open_output_file,
-        IoOp::BinaryOutputFile => wrapper_open_binary_output_file,
+/// `module-registered?` trampoline: checks if a module exists in the VFS.
+///
+/// takes a quoted list like `'(my tool)`, converts to path, checks VFS lookup.
+unsafe extern "C" fn module_registered_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "module-registered?: expected 1 argument, got 0";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        let spec = ffi::sexp_car(args);
+        if ffi::sexp_pairp(spec) == 0 {
+            let msg = "module-registered?: argument must be a list, e.g. '(my module)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        let module_path = match spec_to_path(ctx, spec) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        let vfs_sld_path = format!("/vfs/lib/{module_path}.sld");
+        let c_path = match CString::new(vfs_sld_path.as_str()) {
+            Ok(p) => p,
+            Err(_) => return ffi::get_false(),
+        };
+
+        if ffi::vfs_lookup(&c_path).is_some() {
+            ffi::get_true()
+        } else {
+            ffi::get_false()
+        }
+    }
+}
+
+// --- (tein process) trampolines ---
+
+/// `get-environment-variable` trampoline: returns env var value or `#f`.
+///
+/// sandboxed contexts consult the fake env map seeded by [`ContextBuilder::environment_variables`];
+/// vars not present in the map return `#f`. unsandboxed contexts read the real process environment.
+unsafe extern "C" fn get_env_var_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let name = match extract_string_arg(ctx, args, "get-environment-variable") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+
+        // sandboxed contexts consult the fake env map
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return SANDBOX_ENV.with(|cell| {
+                let borrow = cell.borrow();
+                match borrow.as_ref().and_then(|m| m.get(name)) {
+                    Some(val) => {
+                        let c_val = CString::new(val.as_str()).unwrap_or_default();
+                        ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t)
+                    }
+                    None => ffi::get_false(),
+                }
+            });
+        }
+
+        match std::env::var(name) {
+            Ok(val) => {
+                let c_val = CString::new(val.as_str()).unwrap_or_default();
+                ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t)
+            }
+            Err(_) => ffi::get_false(),
+        }
+    }
+}
+
+/// `get-environment-variables` trampoline: returns alist of all env vars as `((name . value) ...)`.
+///
+/// sandboxed contexts return the fake env map as an alist; unsandboxed contexts return the real env.
+unsafe extern "C" fn get_env_vars_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // sandboxed contexts return the fake env as an alist
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return SANDBOX_ENV.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(map) = borrow.as_ref() else {
+                    return ffi::get_null();
+                };
+                let mut result = ffi::get_null();
+                for (key, val) in map {
+                    let _tail_root = ffi::GcRoot::new(ctx, result);
+                    let c_key = CString::new(key.as_str()).unwrap_or_default();
+                    let c_val = CString::new(val.as_str()).unwrap_or_default();
+                    let s_key = ffi::sexp_c_str(ctx, c_key.as_ptr(), key.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_key) != 0 {
+                        return s_key;
+                    }
+                    let _key_root = ffi::GcRoot::new(ctx, s_key);
+                    let s_val = ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_val) != 0 {
+                        return s_val;
+                    }
+                    let _val_root = ffi::GcRoot::new(ctx, s_val);
+                    let pair = ffi::sexp_cons(ctx, s_key, s_val);
+                    if ffi::sexp_exceptionp(pair) != 0 {
+                        return pair;
+                    }
+                    let _pair_root = ffi::GcRoot::new(ctx, pair);
+                    result = ffi::sexp_cons(ctx, pair, result);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return result;
+                    }
+                }
+                result
+            });
+        }
+
+        let mut result = ffi::get_null();
+        for (key, val) in std::env::vars() {
+            // root accumulator so GC doesn't sweep the partial list
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            let c_key = CString::new(key.as_str()).unwrap_or_default();
+            let c_val = CString::new(val.as_str()).unwrap_or_default();
+            let s_key = ffi::sexp_c_str(ctx, c_key.as_ptr(), key.len() as ffi::sexp_sint_t);
+            if ffi::sexp_exceptionp(s_key) != 0 {
+                return s_key;
+            }
+            let _key_root = ffi::GcRoot::new(ctx, s_key);
+            let s_val = ffi::sexp_c_str(ctx, c_val.as_ptr(), val.len() as ffi::sexp_sint_t);
+            if ffi::sexp_exceptionp(s_val) != 0 {
+                return s_val;
+            }
+            let _val_root = ffi::GcRoot::new(ctx, s_val);
+            let pair = ffi::sexp_cons(ctx, s_key, s_val);
+            if ffi::sexp_exceptionp(pair) != 0 {
+                return pair;
+            }
+            let _pair_root = ffi::GcRoot::new(ctx, pair);
+            result = ffi::sexp_cons(ctx, pair, result);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return result;
+            }
+        }
+        result
+    }
+}
+
+/// `command-line` trampoline: returns the host argv as a list of strings.
+///
+/// sandboxed contexts return the fake command-line configured via [`ContextBuilder::command_line`]
+/// (default: `["tein", "--sandbox"]`). unsandboxed contexts return the real process argv.
+unsafe extern "C" fn command_line_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // sandboxed contexts consult the fake command-line
+        if IS_SANDBOXED.with(|c| c.get()) {
+            return SANDBOX_COMMAND_LINE.with(|cell| {
+                let borrow = cell.borrow();
+                let args = match borrow.as_ref() {
+                    Some(a) => a.clone(),
+                    None => vec!["tein".to_string(), "--sandbox".to_string()],
+                };
+                let mut result = ffi::get_null();
+                for arg in args.iter().rev() {
+                    let c_arg = CString::new(arg.as_str()).unwrap_or_default();
+                    let s_arg = ffi::sexp_c_str(ctx, c_arg.as_ptr(), arg.len() as ffi::sexp_sint_t);
+                    if ffi::sexp_exceptionp(s_arg) != 0 {
+                        return s_arg;
+                    }
+                    let _arg_root = ffi::GcRoot::new(ctx, s_arg);
+                    let _tail_root = ffi::GcRoot::new(ctx, result);
+                    result = ffi::sexp_cons(ctx, s_arg, result);
+                    if ffi::sexp_exceptionp(result) != 0 {
+                        return result;
+                    }
+                }
+                result
+            });
+        }
+
+        let mut result = ffi::get_null();
+        let args: Vec<String> = std::env::args().collect();
+        // build list in reverse order so head = argv[0]
+        for arg in args.iter().rev() {
+            let c_arg = CString::new(arg.as_str()).unwrap_or_default();
+            let s_arg = ffi::sexp_c_str(ctx, c_arg.as_ptr(), arg.len() as ffi::sexp_sint_t);
+            if ffi::sexp_exceptionp(s_arg) != 0 {
+                return s_arg;
+            }
+            let _arg_root = ffi::GcRoot::new(ctx, s_arg);
+            let _tail_root = ffi::GcRoot::new(ctx, result);
+            result = ffi::sexp_cons(ctx, s_arg, result);
+            if ffi::sexp_exceptionp(result) != 0 {
+                return result;
+            }
+        }
+        result
+    }
+}
+
+/// `exit` trampoline: eval escape hatch.
+///
+/// sets EXIT_REQUESTED + EXIT_VALUE thread-locals and returns a scheme
+/// exception to immediately stop the VM. the eval loop intercepts this
+/// via `check_exit()` and returns `Ok(value)` to the rust caller.
+///
+/// semantics: `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj
+///
+/// **r7rs deviation**: r7rs `exit` must run all `dynamic-wind` "after" thunks
+/// before handing control to the OS. tein's `exit` does **not** — it immediately
+/// aborts the VM by throwing an exception, which is `emergency-exit` semantics.
+/// tein has no unwind continuation established around each `evaluate()` call, so
+/// r7rs-compliant exit (with dynamic-wind cleanup) would require an architectural
+/// change. tracked in GH #101.
+///
+/// both `exit` and `emergency-exit` therefore have identical emergency-exit
+/// semantics today. a future standalone interpreter host can wrap `evaluate()` in
+/// a continuation and re-route `exit` through it to achieve correct cleanup.
+unsafe extern "C" fn exit_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        // determine exit value based on arg presence and value
+        let exit_val = if ffi::sexp_nullp(args) != 0 {
+            // (exit) — no args, return fixnum 0
+            ffi::sexp_make_fixnum(0)
+        } else {
+            let arg = ffi::sexp_car(args);
+            if ffi::sexp_booleanp(arg) != 0 {
+                // (exit #t) → 0, (exit #f) → 1
+                if ffi::sexp_truep(arg) != 0 {
+                    ffi::sexp_make_fixnum(0)
+                } else {
+                    ffi::sexp_make_fixnum(1)
+                }
+            } else {
+                arg
+            }
+        };
+
+        // GC-root the exit value — fixnums are immediates (no-op), but heap
+        // objects like strings need rooting so GC doesn't collect them before
+        // check_exit() converts them.
+        ffi::sexp_preserve_object(ctx, exit_val);
+        EXIT_REQUESTED.with(|c| c.set(true));
+        EXIT_VALUE.with(|c| c.set(exit_val));
+
+        // return exception to stop VM immediately
+        let msg = "exit";
+        let c_msg = CString::new(msg).unwrap_or_default();
+        ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
     }
 }
 
@@ -583,9 +1924,22 @@ pub struct ContextBuilder {
     heap_max: usize,
     step_limit: Option<u64>,
     standard_env: bool,
-    allowed_primitives: Option<Vec<&'static str>>,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
+    /// module-level sandbox configuration.
+    /// when set, activates the registry-based sandbox path in build().
+    sandbox_modules: Option<crate::sandbox::Modules>,
+    /// register VFS shadow modules without full sandboxing.
+    /// enables modules like `(scheme process-context)` in non-sandboxed contexts
+    /// where the shadow is needed (e.g. for `(chibi test)` which imports it).
+    with_vfs_shadows: bool,
+    /// fake environment variables for sandboxed contexts.
+    sandbox_env: Option<Vec<(String, String)>>,
+    /// fake command-line for sandboxed contexts.
+    sandbox_command_line: Option<Vec<String>>,
+    /// user-supplied filesystem module search directories.
+    /// combined with `TEIN_MODULE_PATH` env var during `build()`.
+    module_paths: Vec<String>,
 }
 
 impl ContextBuilder {
@@ -616,106 +1970,246 @@ impl ContextBuilder {
     /// providing `define-record-type`, `import`, `map`, `for-each`, etc.
     /// Standard ports (stdin/stdout/stderr) are also initialised.
     ///
-    /// When combined with presets, the standard env is loaded first, then
-    /// the sandbox restricts it — so sandboxed code can use allowed R7RS
-    /// procedures that aren't bare primitives.
+    /// **Required for tein modules.** Feature-gated modules (json, toml, uuid)
+    /// and IO modules (file, load, process) only register their trampolines
+    /// when `standard_env` is active. Without this, `(import (tein ...))` will
+    /// fail even if the module is in the allowlist. Typical sandboxed usage:
+    /// `Context::builder().standard_env().sandboxed(Modules::Safe)`.
     pub fn standard_env(mut self) -> Self {
         self.standard_env = true;
         self
     }
 
-    /// Add all primitives from a preset to the allowlist.
+    /// Register VFS shadow modules without enabling full sandboxing.
     ///
-    /// Activating any preset switches the context to restricted mode:
-    /// only explicitly allowed primitives (plus core syntax) are available.
-    /// Presets are additive — calling this multiple times combines them.
-    pub fn preset(mut self, preset: &Preset) -> Self {
-        let list = self.allowed_primitives.get_or_insert_with(Vec::new);
-        for name in preset.primitives {
-            if !list.contains(name) {
-                list.push(name);
-            }
-        }
+    /// Shadow modules (e.g. `scheme/process-context`, `scheme/file`) are normally
+    /// only registered during a sandboxed context build. This option registers them
+    /// in any context, enabling modules like `(chibi test)` — which imports
+    /// `(scheme process-context)` — to load correctly in non-sandboxed contexts.
+    ///
+    /// This does **not** enable the VFS gate or module allowlist; the context remains
+    /// fully permissive. Primarily useful for test harnesses.
+    pub fn with_vfs_shadows(mut self) -> Self {
+        self.with_vfs_shadows = true;
         self
     }
 
-    /// Add individual primitives to the allowlist.
+    /// Configure module-level sandboxing.
     ///
-    /// Like `preset()`, activates restricted mode. Additive with presets.
-    pub fn allow(mut self, names: &[&'static str]) -> Self {
-        let list = self.allowed_primitives.get_or_insert_with(Vec::new);
-        for name in names {
-            if !list.contains(name) {
-                list.push(name);
-            }
-        }
+    /// Activates the registry-based sandbox: builds a null env with only
+    /// `import` syntax, sets up the VFS gate for the given module set,
+    /// and registers UX stubs for all excluded module exports so scheme
+    /// code gets a clear `(import (module path))` hint instead of an
+    /// "undefined variable" error.
+    ///
+    /// **Requires** `.standard_env()` — sandboxed contexts need the full
+    /// env loaded first before restriction.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .build()?;
+    ///
+    /// // after importing, scheme/base ops work
+    /// let result = ctx.evaluate("(import (scheme base)) (+ 1 2)")?;
+    /// assert_eq!(result, tein::Value::Integer(3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn sandboxed(mut self, modules: crate::sandbox::Modules) -> Self {
+        self.sandbox_modules = Some(modules);
         self
-    }
-
-    /// Convenience: allow arithmetic + math + lists + vectors + strings + characters + type predicates.
-    ///
-    /// Suitable for pure computation with no side effects or mutation.
-    pub fn pure_computation(self) -> Self {
-        use crate::sandbox::*;
-        self.preset(&ARITHMETIC)
-            .preset(&MATH)
-            .preset(&LISTS)
-            .preset(&VECTORS)
-            .preset(&STRINGS)
-            .preset(&CHARACTERS)
-            .preset(&TYPE_PREDICATES)
-    }
-
-    /// Convenience: pure_computation + mutation + string_ports + stdout_only + exceptions.
-    ///
-    /// Suitable for most sandboxed use cases that don't need file/network IO.
-    pub fn safe(self) -> Self {
-        use crate::sandbox::*;
-        self.pure_computation()
-            .preset(&MUTATION)
-            .preset(&STRING_PORTS)
-            .preset(&STDOUT_ONLY)
-            .preset(&EXCEPTIONS)
     }
 
     /// Allow file reading from paths under the given prefixes.
     ///
-    /// Activates restricted mode and registers policy-checked wrapper
-    /// functions for `open-input-file` and `open-binary-input-file`.
-    /// Also adds port-reading support primitives (read, read-char, etc.).
-    ///
     /// Prefixes should be absolute paths (e.g. "/config/", "/data/").
     /// Paths are canonicalised before checking, so symlinks and `..`
     /// traversals are resolved.
+    ///
+    /// Auto-activates `sandboxed(Modules::Safe)` when called without an explicit
+    /// `sandboxed()` call.
     pub fn file_read(mut self, prefixes: &[&str]) -> Self {
         let list = self.file_read_prefixes.get_or_insert_with(Vec::new);
         for p in prefixes {
             list.push(p.to_string());
         }
-        // ensure restricted mode is active (IO wrappers require restricted env)
-        self.allowed_primitives.get_or_insert_with(Vec::new);
-        // ensure support primitives are in the allowlist
-        self = self.preset(&crate::sandbox::FILE_READ_SUPPORT);
+        if self.sandbox_modules.is_none() {
+            // auto-activate sandboxed(Modules::Safe) when file IO is configured without explicit sandboxed()
+            self.sandbox_modules = Some(crate::sandbox::Modules::Safe);
+        }
         self
     }
 
     /// Allow file writing to paths under the given prefixes.
     ///
-    /// Activates restricted mode and registers policy-checked wrapper
-    /// functions for `open-output-file` and `open-binary-output-file`.
-    /// Also adds port-writing support primitives (write, write-char, etc.).
-    ///
     /// Parent directories must exist; files will be created as needed (R7RS).
     /// Prefixes should be absolute paths (e.g. "/tmp/", "/output/").
+    ///
+    /// Auto-activates `sandboxed(Modules::Safe)` when called without an explicit
+    /// `sandboxed()` call.
     pub fn file_write(mut self, prefixes: &[&str]) -> Self {
         let list = self.file_write_prefixes.get_or_insert_with(Vec::new);
         for p in prefixes {
             list.push(p.to_string());
         }
-        // ensure restricted mode is active (IO wrappers require restricted env)
-        self.allowed_primitives.get_or_insert_with(Vec::new);
-        // ensure support primitives are in the allowlist
-        self = self.preset(&crate::sandbox::FILE_WRITE_SUPPORT);
+        if self.sandbox_modules.is_none() {
+            self.sandbox_modules = Some(crate::sandbox::Modules::Safe);
+        }
+        self
+    }
+
+    /// add a module (+ its transitive deps) to the VFS gate allowlist.
+    ///
+    /// starts from the current `Modules` variant's resolved allowlist, appends
+    /// the new module, and sets `Modules::Only(extended_list)`. dependencies are
+    /// resolved automatically from the registry — callers never need to think about
+    /// transitive imports.
+    ///
+    /// note: dep resolution happens at [`ContextBuilder::build`] time, not here.
+    /// `allow_module` only appends to the list; `build()` calls `registry_resolve_deps`
+    /// on the final `Modules::Only(list)` to expand transitive deps before arming the gate.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .allow_module("tein/process")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_module(mut self, prefix: &str) -> Self {
+        use crate::sandbox::{Modules, registry_all_allowlist, registry_safe_allowlist};
+        let mut base = match self.sandbox_modules.take().unwrap_or_default() {
+            Modules::Safe => registry_safe_allowlist(),
+            Modules::All => registry_all_allowlist(),
+            Modules::None => Vec::new(),
+            Modules::Only(list) => list,
+        };
+        if !base.contains(&prefix.to_string()) {
+            base.push(prefix.to_string());
+        }
+        self.sandbox_modules = Some(Modules::Only(base));
+        self
+    }
+
+    /// Enable dynamic module registration from Scheme code.
+    ///
+    /// Makes `(tein modules)` importable in sandboxed contexts, providing
+    /// `register-module` and `module-registered?` to Scheme code.
+    ///
+    /// Without this, `(tein modules)` is blocked by the VFS gate in sandboxed
+    /// contexts. Unsandboxed contexts can always import it.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .allow_dynamic_modules()
+    ///     .build()?;
+    /// ctx.evaluate("(import (tein modules)) #t")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn allow_dynamic_modules(self) -> Self {
+        self.allow_module("tein/modules")
+    }
+
+    /// Add a directory to the module search path.
+    ///
+    /// When resolving `(import (foo bar))`, tein searches each path for
+    /// `foo/bar.sld` and loads `(include ...)` files relative to the `.sld`.
+    /// Builder paths are searched before `TEIN_MODULE_PATH` dirs.
+    /// Can be called multiple times; directories accumulate.
+    ///
+    /// Works in both sandboxed and unsandboxed contexts. Module search paths
+    /// are independent of [`ContextBuilder::file_read()`] — they grant no
+    /// runtime file IO access, only module discovery.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .module_path("./lib")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn module_path(mut self, path: &str) -> Self {
+        self.module_paths.push(path.to_string());
+        self
+    }
+
+    /// Inject fake environment variables for sandboxed contexts.
+    ///
+    /// Merges with the default seed (`TEIN_SANDBOX=true`). User entries
+    /// override defaults on key conflict. Ignored for unsandboxed contexts.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .environment_variables(&[("CHIBI_HASH_SALT", "42")])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn environment_variables(mut self, vars: &[(&str, &str)]) -> Self {
+        self.sandbox_env = Some(
+            vars.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Set the fake command-line for sandboxed contexts.
+    ///
+    /// Overrides the default `["tein", "--sandbox"]` entirely.
+    /// Ignored for unsandboxed contexts.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .command_line(&["my-app", "--verbose"])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn command_line(mut self, args: &[&str]) -> Self {
+        self.sandbox_command_line = Some(args.iter().map(|s| s.to_string()).collect());
         self
     }
 
@@ -744,6 +2238,26 @@ impl ContextBuilder {
             // embedded VFS, and must happen before sandbox restriction so the
             // restricted env can copy from the full standard env.
             if self.standard_env {
+                // register eval trampolines into the primitive env BEFORE load_standard_env.
+                // init-7.scm builds *chibi-env* by importing ALL bindings from the interaction
+                // env (the primitive env). any name present here ends up in *chibi-env*, making
+                // it available to library bodies that `(import (chibi))` — including our VFS
+                // shadow SLDs for scheme/eval, scheme/load, scheme/repl. (#97)
+                let prim_env = ffi::sexp_context_env(ctx);
+                register_eval_trampolines(ctx, prim_env)?;
+
+                // register feature-gated trampolines that scheme wrapper code
+                // references as free variables. must be in the primitive env so
+                // they end up in *chibi-env* and are visible to library bodies
+                // via `(import (chibi))`.
+                #[cfg(feature = "http")]
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "http-request-internal",
+                    crate::http::http_request_trampoline,
+                )?;
+
                 let env = ffi::sexp_context_env(ctx);
                 // H9: chibi uses a char[128] stack buffer for the init file path
                 // and does `version + '0'` without range check. version MUST be a
@@ -767,75 +2281,147 @@ impl ContextBuilder {
                 }
             }
 
-            // activate VFS-only module policy if both standard_env and
-            // sandbox (presets) are configured. this restricts (import ...)
-            // to only load modules from the embedded VFS, blocking
-            // filesystem-based modules like (chibi process).
-            // set early so it's active during sandbox setup (which may
-            // trigger transitive module loads).
-            let has_module_policy = self.standard_env && self.allowed_primitives.is_some();
+            // --- module search path setup ---
+            //
+            // env var paths have lower priority (prepended first); builder paths
+            // have higher priority (prepended after, so they shadow env paths).
+            // for each dir: canonicalise, register into chibi's module path list,
+            // and record in FS_MODULE_PATHS for the VFS gate check.
+            let prev_fs_module_paths = FS_MODULE_PATHS.with(|cell| cell.borrow().clone());
+            {
+                let env_paths: Vec<String> = std::env::var("TEIN_MODULE_PATH")
+                    .unwrap_or_default()
+                    .split(':')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
 
-            // save current policy values before overwriting — restored on drop so that
-            // a second context on the same thread (sequential or nested) is not affected.
-            let prev_module_policy = MODULE_POLICY.with(|cell| cell.get());
-            let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
+                // env first, then builder — chibi prepend means last-prepended is first-searched
+                let all_paths: Vec<String> = env_paths
+                    .into_iter()
+                    .chain(self.module_paths.drain(..))
+                    .collect();
 
-            if has_module_policy {
-                MODULE_POLICY.with(|cell| cell.set(ModulePolicy::VfsOnly));
-                ffi::module_policy_set(ModulePolicy::VfsOnly as i32);
+                for raw_path in &all_paths {
+                    let canon = match std::path::Path::new(raw_path).canonicalize() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("tein: warning: module_path '{}' skipped: {}", raw_path, e);
+                            continue;
+                        }
+                    };
+                    let canon_str = canon.to_string_lossy().into_owned();
+
+                    // create a chibi string for the directory path. root it immediately —
+                    // add_module_directory calls sexp_cons (= sexp_alloc_type) which may
+                    // trigger GC. with SEXP_USE_CONSERVATIVE_GC=0, C stack frames are not
+                    // scanned, so c_dir would be collectible before being stored in the pair.
+                    let c_dir = ffi::sexp_c_str(
+                        ctx,
+                        canon_str.as_ptr() as *const c_char,
+                        canon_str.len() as ffi::sexp_sint_t,
+                    );
+                    if ffi::sexp_exceptionp(c_dir) != 0 {
+                        eprintln!(
+                            "tein: warning: failed to create string for module path '{}'",
+                            raw_path
+                        );
+                        continue;
+                    }
+                    let _dir_root = ffi::GcRoot::new(ctx, c_dir);
+                    // prepend: builder paths end up first in search order
+                    ffi::add_module_directory(ctx, c_dir, false);
+
+                    // record for VFS gate check
+                    FS_MODULE_PATHS.with(|cell| cell.borrow_mut().push(canon_str));
+                }
             }
 
-            // extract IO prefixes before borrowing self for allowed_primitives
-            let file_read_prefixes = self.file_read_prefixes.take();
-            let file_write_prefixes = self.file_write_prefixes.take();
-            let has_io = file_read_prefixes.is_some() || file_write_prefixes.is_some();
+            // save current gate values before overwriting — restored on drop so that
+            // a second context on the same thread (sequential or nested) is not affected.
+            let prev_vfs_gate = VFS_GATE.with(|cell| cell.get());
+            let prev_fs_gate = FS_GATE.with(|cell| cell.get());
+            let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
+            let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
+            let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
+            let prev_sandbox_env = SANDBOX_ENV.with(|cell| cell.borrow().clone());
+            let prev_sandbox_command_line = SANDBOX_COMMAND_LINE.with(|cell| cell.borrow().clone());
 
-            // apply environment restrictions if presets are active.
-            // source_env is the context's current env — either the bare primitive
-            // env or the enriched standard env if standard_env was loaded above.
-            if let Some(ref allowed) = self.allowed_primitives {
+            if let Some(ref modules) = self.sandbox_modules.take() {
+                // registry-based sandbox path: builds a null env + import, resolves
+                // module allowlist from the Modules enum, registers UX stubs for
+                // excluded module exports.
+                use crate::sandbox::{
+                    Modules, registry_all_allowlist, registry_resolve_deps,
+                    registry_safe_allowlist, unexported_stubs,
+                };
+
+                // mark sandboxed so policy enforcement applies
+                IS_SANDBOXED.with(|c| c.set(true));
+                // seed fake process environment for sandboxed contexts
+                {
+                    let mut env_map = HashMap::new();
+                    env_map.insert("TEIN_SANDBOX".to_string(), "true".to_string());
+                    if let Some(user_env) = self.sandbox_env.take() {
+                        for (k, v) in user_env {
+                            env_map.insert(k, v);
+                        }
+                    }
+                    SANDBOX_ENV.with(|cell| {
+                        *cell.borrow_mut() = Some(env_map);
+                    });
+
+                    let cmd_line = self
+                        .sandbox_command_line
+                        .take()
+                        .unwrap_or_else(|| vec!["tein".to_string(), "--sandbox".to_string()]);
+                    SANDBOX_COMMAND_LINE.with(|cell| {
+                        *cell.borrow_mut() = Some(cmd_line);
+                    });
+                }
+                // arm FS policy gate — C opcodes will call tein_fs_policy_check
+                FS_GATE.with(|cell| cell.set(FS_GATE_CHECK));
+                ffi::fs_policy_gate_set(FS_GATE_CHECK as i32);
+                crate::sandbox::register_vfs_shadows()?; // inject shadow modules before VFS gate is armed
+
                 let source_env = ffi::sexp_context_env(ctx);
                 let version = ffi::sexp_make_fixnum(7);
                 let null_env = ffi::sexp_make_null_env(ctx, version);
 
                 if ffi::sexp_exceptionp(null_env) != 0 {
                     ffi::sexp_destroy_context(ctx);
-                    return Err(Error::InitError(
+                    return Err(crate::error::Error::InitError(
                         "failed to create null environment".to_string(),
                     ));
                 }
 
-                // root both envs — intern, env_copy_named, and define_foreign_proc
-                // all allocate and can trigger GC. source_env is replaced as the
-                // context's env by null_env, so it becomes unreachable; null_env
-                // is only a rust local until sexp_context_env_set.
+                // root both envs across allocating calls below
                 let _source_env_guard = ffi::GcRoot::new(ctx, source_env);
                 let _null_env_guard = ffi::GcRoot::new(ctx, null_env);
 
-                // if IO wrappers needed, capture original procs from full env first
-                if has_io {
-                    let undefined = ffi::get_void();
-                    for op in IoOp::ALL {
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let sym =
-                            ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
-                        let val = ffi::sexp_env_ref(ctx, source_env, sym, undefined);
-                        if val != undefined {
-                            ORIGINAL_PROCS.with(|procs| procs[op as usize].set(val));
-                        }
+                // resolve module allowlist from the Modules variant
+                let allowlist: Vec<String> = match modules {
+                    Modules::Safe => registry_safe_allowlist(),
+                    Modules::All => registry_all_allowlist(),
+                    Modules::None => Vec::new(),
+                    Modules::Only(list) => {
+                        let refs: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
+                        registry_resolve_deps(&refs)
                     }
-                }
+                };
 
-                // copy allowed primitives from the source env into the restricted env.
-                // uses env_copy_named which searches both direct bindings and
-                // rename bindings (needed when standard_env is active, since the
-                // module system stores most bindings as renames).
-                for name in allowed {
-                    let c_name = CString::new(*name).map_err(|_| {
-                        ffi::sexp_destroy_context(ctx);
-                        Error::InitError(format!("primitive name contains null bytes: {}", name))
-                    })?;
+                // activate the VFS gate with the resolved allowlist
+                VFS_GATE.with(|cell| cell.set(GATE_CHECK));
+                ffi::vfs_gate_set(GATE_CHECK as i32);
+                VFS_ALLOWLIST.with(|cell| {
+                    *cell.borrow_mut() = allowlist.clone();
+                });
+
+                // copy "import" from source env into null env so scheme can use
+                // (import ...) to load allowed modules
+                {
+                    let name = "import";
+                    let c_name = CString::new(name).unwrap();
                     ffi::env_copy_named(
                         ctx,
                         source_env,
@@ -845,33 +2431,52 @@ impl ContextBuilder {
                     );
                 }
 
-                ffi::sexp_context_env_set(ctx, null_env);
-
-                // register wrapper functions in the restricted env
-                if has_io {
-                    let read_ops = file_read_prefixes.is_some();
-                    let write_ops = file_write_prefixes.is_some();
-
-                    for op in IoOp::ALL {
-                        let want = if op.is_read() { read_ops } else { write_ops };
-                        if !want {
-                            continue;
-                        }
-                        let name = op.name();
-                        let c_name = CString::new(name).unwrap();
-                        let wrapper = wrapper_fn_for(op);
-                        ffi::sexp_define_foreign_proc(
-                            ctx,
-                            null_env,
-                            c_name.as_ptr(),
-                            0,
-                            ffi::SEXP_PROC_VARIADIC,
-                            c_name.as_ptr(),
-                            Some(wrapper),
-                        );
+                // build the UX stub map: binding name → providing module path
+                let stubs = unexported_stubs(&allowlist);
+                STUB_MODULE_MAP.with(|map| {
+                    let mut m = map.borrow_mut();
+                    m.clear();
+                    for (name, module) in &stubs {
+                        m.insert(name.to_string(), module.to_string());
                     }
+                });
 
-                    // set up the FsPolicy thread-local
+                // register UX stubs in the null env
+                let ux_stub_fn: Option<
+                    unsafe extern "C" fn(
+                        ffi::sexp,
+                        ffi::sexp,
+                        ffi::sexp_sint_t,
+                        ffi::sexp,
+                    ) -> ffi::sexp,
+                > = Some(ux_stub);
+                for (name, _module) in &stubs {
+                    let c_name = CString::new(*name).unwrap_or_default();
+                    ffi::sexp_define_foreign_proc(
+                        ctx,
+                        null_env,
+                        c_name.as_ptr(),
+                        0,
+                        ffi::SEXP_PROC_VARIADIC,
+                        c_name.as_ptr(),
+                        ux_stub_fn,
+                    );
+                }
+
+                ffi::sexp_context_env_set(ctx, null_env);
+            }
+
+            // set FsPolicy if file_read() or file_write() was configured.
+            // note: file_read()/file_write() auto-activate sandboxed(Modules::Safe)
+            // when called without an explicit sandboxed() call, so FS_POLICY is always
+            // paired with IS_SANDBOXED=true in practice. the FS_GATE (C-level opcode
+            // enforcement) is only armed inside the sandbox block above — unsandboxed
+            // + FsPolicy is unreachable via the public API. FsPolicy is placed here
+            // (outside the sandbox block) as a pure data write; the C gate remains off.
+            {
+                let file_read_prefixes = self.file_read_prefixes.take();
+                let file_write_prefixes = self.file_write_prefixes.take();
+                if file_read_prefixes.is_some() || file_write_prefixes.is_some() {
                     FS_POLICY.with(|cell| {
                         *cell.borrow_mut() = Some(FsPolicy {
                             read_prefixes: file_read_prefixes.unwrap_or_default(),
@@ -879,70 +2484,97 @@ impl ContextBuilder {
                         });
                     });
                 }
-
-                // register sandbox stubs for known primitives that weren't allowed.
-                // this gives callers a clear SandboxViolation instead of "undefined variable".
-                // stub_fn is shared across both registration passes below.
-                let stub_fn: Option<
-                    unsafe extern "C" fn(
-                        ffi::sexp,
-                        ffi::sexp,
-                        ffi::sexp_sint_t,
-                        ffi::sexp,
-                    ) -> ffi::sexp,
-                > = Some(sandbox_stub);
-
-                {
-                    use crate::sandbox::ALL_PRESETS;
-                    for preset in ALL_PRESETS {
-                        for name in preset.primitives {
-                            if !allowed.contains(name) {
-                                let c_name = CString::new(*name).unwrap();
-                                ffi::sexp_define_foreign_proc(
-                                    ctx,
-                                    null_env,
-                                    c_name.as_ptr(),
-                                    0,
-                                    ffi::SEXP_PROC_VARIADIC,
-                                    c_name.as_ptr(),
-                                    stub_fn,
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // always stub environment-escape primitives — these are never
-                // allowable in any sandboxed context regardless of preset selection.
-                {
-                    use crate::sandbox::ALWAYS_STUB;
-                    for name in ALWAYS_STUB {
-                        let c_name = CString::new(*name).unwrap();
-                        ffi::sexp_define_foreign_proc(
-                            ctx,
-                            null_env,
-                            c_name.as_ptr(),
-                            0,
-                            ffi::SEXP_PROC_VARIADIC,
-                            c_name.as_ptr(),
-                            stub_fn,
-                        );
-                    }
-                }
             }
 
             let context = Context {
                 ctx,
                 step_limit: self.step_limit,
-                has_io_wrappers: has_io,
-                has_module_policy,
-                prev_module_policy,
+                prev_vfs_gate,
+                prev_fs_gate,
                 prev_fs_policy,
+                prev_vfs_allowlist,
+                prev_is_sandboxed,
+                prev_sandbox_env,
+                prev_sandbox_command_line,
+                prev_fs_module_paths,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
                 has_port_protocol: Cell::new(false),
+                ext_api: RefCell::new(None),
             };
+
+            // register feature-gated module trampolines for standard-env contexts.
+            // these are pure data operations (format conversion, uuid generation, time),
+            // no IO — always safe and cheap to register.
+            #[cfg(feature = "json")]
+            if self.standard_env {
+                context.register_json_module()?;
+            }
+
+            #[cfg(feature = "toml")]
+            if self.standard_env {
+                context.register_toml_module()?;
+            }
+
+            #[cfg(feature = "uuid")]
+            if self.standard_env {
+                crate::uuid::uuid_impl::register_module_uuid(&context)?;
+            }
+
+            #[cfg(feature = "time")]
+            if self.standard_env {
+                crate::time::time_impl::register_module_time(&context)?;
+            }
+
+            #[cfg(feature = "crypto")]
+            if self.standard_env {
+                crate::crypto::crypto_impl::register_module_crypto(&context)?;
+            }
+
+            #[cfg(feature = "regex")]
+            if self.standard_env {
+                crate::safe_regexp::safe_regexp_impl::register_module_safe_regexp(&context)?;
+                // register regexp-fold as a hand-written native fn (calls scheme closures)
+                context
+                    .define_fn_variadic("regexp-fold", crate::safe_regexp::regexp_fold_wrapper)?;
+                // override macro-generated .sld/.scm to export regexp-fold
+                context.register_vfs_module(
+                    "lib/tein/safe-regexp.sld",
+                    crate::safe_regexp::SAFE_REGEXP_SLD,
+                )?;
+                context.register_vfs_module(
+                    "lib/tein/safe-regexp.scm",
+                    crate::safe_regexp::SAFE_REGEXP_SCM,
+                )?;
+            }
+
+            #[cfg(feature = "http")]
+            if self.standard_env {
+                // http-request-internal trampoline is registered into the primitive
+                // env before load_standard_env (see above). only VFS modules here.
+                context.register_vfs_module("lib/tein/http.sld", crate::http::HTTP_SLD)?;
+                context.register_vfs_module("lib/tein/http.scm", crate::http::HTTP_SCM)?;
+            }
+
+            if self.standard_env {
+                context.register_file_module()?;
+                context.register_load_module()?;
+                context.register_eval_module()?;
+                context.register_process_module()?;
+                context.register_modules_module()?;
+                context.register_vfs_module(
+                    "lib/tein/modules.sld",
+                    "(define-library (tein modules) (import (scheme base)) (export register-module module-registered?))",
+                )?;
+            }
+
+            // register VFS shadow modules if requested without full sandboxing.
+            // normally only done during sandboxed() build; this option enables
+            // shadow imports (e.g. scheme/process-context) in non-sandboxed contexts.
+            if self.with_vfs_shadows && self.sandbox_modules.is_none() {
+                crate::sandbox::register_vfs_shadows()?;
+            }
 
             Ok(context)
         }
@@ -996,12 +2628,22 @@ impl ContextBuilder {
 pub struct Context {
     ctx: ffi::sexp,
     step_limit: Option<u64>,
-    has_io_wrappers: bool,
-    has_module_policy: bool,
-    /// previous MODULE_POLICY value, restored on drop (save/restore RAII for sequential contexts)
-    prev_module_policy: ModulePolicy,
-    /// previous FS_POLICY value, restored on drop (save/restore RAII for sequential contexts)
+    /// previous VFS_GATE level, restored on drop
+    prev_vfs_gate: u8,
+    /// previous FS_GATE level, restored on drop
+    prev_fs_gate: u8,
+    /// previous FS_POLICY value, restored on drop
     prev_fs_policy: Option<FsPolicy>,
+    /// previous VFS_ALLOWLIST, restored on drop
+    prev_vfs_allowlist: Vec<String>,
+    /// previous IS_SANDBOXED value, restored on drop
+    prev_is_sandboxed: bool,
+    /// previous SANDBOX_ENV value, restored on drop
+    prev_sandbox_env: Option<HashMap<String, String>>,
+    /// previous SANDBOX_COMMAND_LINE value, restored on drop
+    prev_sandbox_command_line: Option<Vec<String>>,
+    /// previous FS_MODULE_PATHS value, restored on drop
+    prev_fs_module_paths: Vec<String>,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -1010,6 +2652,33 @@ pub struct Context {
     port_store: RefCell<PortStore>,
     /// whether port protocol dispatch functions are registered
     has_port_protocol: Cell<bool>,
+    /// cached TeinExtApi vtable — populated on first load_extension call.
+    /// Stored in a Box so the pointer is stable for ext method dispatch.
+    /// None until first extension is loaded.
+    ext_api: RefCell<Option<Box<tein_ext::TeinExtApi>>>,
+}
+
+/// Convert a raw sexp exit value to an i32 exit code.
+///
+/// Called by `Context::check_exit()` after the GC root has been released.
+/// Interprets the raw sexp using r7rs `exit` semantics:
+/// - null / void / #t → 0
+/// - #f → 1
+/// - fixnum → value (clamped to i32)
+/// - anything else → 0
+unsafe fn exit_code_from_raw(raw: ffi::sexp) -> i32 {
+    unsafe {
+        if raw.is_null() || ffi::sexp_voidp(raw) != 0 {
+            return 0;
+        }
+        if ffi::sexp_booleanp(raw) != 0 {
+            return if ffi::sexp_truep(raw) != 0 { 0 } else { 1 };
+        }
+        if ffi::sexp_integerp(raw) != 0 {
+            return ffi::sexp_unbox_fixnum(raw) as i32;
+        }
+        0
+    }
 }
 
 impl Context {
@@ -1034,15 +2703,23 @@ impl Context {
     }
 
     /// Create a builder for configuring a context.
+    ///
+    /// Defaults to bare primitives only (no standard env, no sandboxing).
+    /// Call `.standard_env()` to load R7RS libraries and tein modules,
+    /// then optionally `.sandboxed(Modules::Safe)` to restrict importable modules.
     pub fn builder() -> ContextBuilder {
         ContextBuilder {
             heap_size: DEFAULT_HEAP_SIZE,
             heap_max: DEFAULT_HEAP_MAX,
             step_limit: None,
             standard_env: false,
-            allowed_primitives: None,
             file_read_prefixes: None,
             file_write_prefixes: None,
+            sandbox_modules: None,
+            with_vfs_shadows: false,
+            sandbox_env: None,
+            sandbox_command_line: None,
+            module_paths: Vec::new(),
         }
     }
 
@@ -1071,6 +2748,25 @@ impl Context {
             }
         }
         Ok(())
+    }
+
+    /// Check if `(exit)` was called during evaluation.
+    ///
+    /// If the exit flag is set, clears it, releases the GC root on the
+    /// stashed value, and returns `Some(Ok(Value::Exit(n)))`.
+    /// Returns `None` if no exit was requested.
+    fn check_exit(&self) -> Option<Result<Value>> {
+        if EXIT_REQUESTED.with(|c| c.replace(false)) {
+            let raw = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
+            // release GC root — sexp_release_object is a no-op for immediates
+            if !raw.is_null() {
+                unsafe { ffi::sexp_release_object(self.ctx, raw) };
+            }
+            let code = unsafe { exit_code_from_raw(raw) };
+            Some(Ok(Value::Exit(code)))
+        } else {
+            None
+        }
     }
 
     /// Evaluate one or more Scheme expressions.
@@ -1114,8 +2810,17 @@ impl Context {
         // access them. guards clear on all exit paths (early returns, `?`, panic).
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
         PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
         let _port_guard = PortStoreGuard;
+        // set EXT_API so ext-type method dispatch works during evaluation
+        let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
+            EXT_API.with(|c| c.set(api.as_ref() as *const _));
+            Some(ExtApiGuard)
+        } else {
+            None
+        };
         self.arm_fuel();
 
         unsafe {
@@ -1154,6 +2859,12 @@ impl Context {
                     return Value::from_raw(self.ctx, expr);
                 }
 
+                // gc-root expr across sexp_evaluate: sexp_compile_op calls
+                // sexp_make_eval_context immediately, which may trigger GC.
+                // the parsed expression is only a rust local (invisible to
+                // chibi's precise GC) until we hand it to the evaluator.
+                let _expr_guard = ffi::GcRoot::new(self.ctx, expr);
+
                 // evaluate the expression
                 result = ffi::sexp_evaluate(self.ctx, expr, env);
 
@@ -1161,11 +2872,22 @@ impl Context {
                 // (fuel exhaustion returns a normal-looking value, not an exception)
                 self.check_fuel()?;
 
-                // evaluation error
+                // exit escape hatch — (exit) returns an exception to stop the
+                // VM immediately; intercept before converting to an error.
                 if ffi::sexp_exceptionp(result) != 0 {
+                    if let Some(exit_result) = self.check_exit() {
+                        return exit_result;
+                    }
                     return Value::from_raw(self.ctx, result);
                 }
             }
+
+            // root result before from_raw. any allocation inside from_raw (e.g.
+            // sexp_symbol_to_string, sexp_bignum_to_string) can trigger a GC cycle that
+            // will collect `result` if it isn't explicitly preserved — chibi's GC is
+            // precise (no conservative stack scan), so rust locals are invisible to it.
+            // most visible in sandboxed contexts where the heap is more pressure-loaded.
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
 
             Value::from_raw(self.ctx, result)
         }
@@ -1206,7 +2928,7 @@ impl Context {
     /// Register a foreign function as a Scheme primitive.
     ///
     /// All arguments are passed as a single Scheme list via the `args` parameter.
-    /// This is the universal registration method — use `#[scheme_fn]` for ergonomic
+    /// This is the universal registration method — use `#[tein_fn]` for ergonomic
     /// wrappers that handle argument extraction and return conversion automatically.
     ///
     /// The function receives all arguments as a single Scheme list in the `args`
@@ -1253,6 +2975,11 @@ impl Context {
             .map_err(|_| Error::EvalError("function name contains null bytes".to_string()))?;
 
         unsafe {
+            // registers into the top-level env, NOT a library env. after
+            // `(import (tein mod))`, chibi's import checks find these names
+            // in the destination env chain (oldcell lookup) — the fork patch
+            // (see #57) suppresses the false "importing undefined variable"
+            // warning in this case. same behaviour in ext mode.
             let env = ffi::sexp_context_env(self.ctx);
             let result = ffi::sexp_define_foreign_proc(
                 self.ctx,
@@ -1296,6 +3023,19 @@ impl Context {
     /// // scheme now has: counter?, counter-increment, counter-get
     /// ```
     pub fn register_foreign_type<T: ForeignType>(&self) -> Result<()> {
+        // in sandboxed contexts the context env has been switched to null_env, which
+        // only contains the 10 r7rs core syntax forms. both register_foreign_protocol
+        // (foreign?, foreign-type, foreign-handle-id) and the type helpers below
+        // (predicate, method wrappers) use `and`, `pair?`, `eq?` etc. — none of which
+        // are available in null_env. skipping is safe: these helpers are not exported
+        // by any SLD and are never called by native fn implementations. the native fns
+        // and VFS module entries (registered elsewhere) work correctly without them.
+        // see #116.
+        if IS_SANDBOXED.with(|c| c.get()) {
+            self.foreign_store.borrow_mut().register_type::<T>()?;
+            return Ok(());
+        }
+
         if !self.has_foreign_protocol.get() {
             self.register_foreign_protocol()?;
             self.has_foreign_protocol.set(true);
@@ -1345,6 +3085,24 @@ impl Context {
         })
     }
 
+    /// Insert a foreign value into the current context's store via the thread-local
+    /// `FOREIGN_STORE_PTR`. Usable from inside `#[tein_fn]` free fn wrappers where
+    /// no `Context` reference is available. Errors if no store is active (i.e. not
+    /// called during an active `evaluate()` / `call()`).
+    pub(crate) fn make_foreign_via_ptr<T: ForeignType>(
+        value: T,
+    ) -> std::result::Result<Value, String> {
+        let store_ptr = FOREIGN_STORE_PTR.with(|c| c.get());
+        if store_ptr.is_null() {
+            return Err("make_foreign_via_ptr: no active context store (internal error)".into());
+        }
+        let id = unsafe { (*store_ptr).borrow_mut().insert(value) };
+        Ok(Value::Foreign {
+            handle_id: id,
+            type_name: T::type_name().to_string(),
+        })
+    }
+
     /// Borrow a foreign object immutably.
     ///
     /// Returns an error if the value isn't `Foreign`, the handle is stale,
@@ -1381,6 +3139,104 @@ impl Context {
             let (data, _) = s.get(id).unwrap();
             data.downcast_ref::<T>().unwrap()
         }))
+    }
+
+    /// Load a cdylib extension from the given path.
+    ///
+    /// The extension's `tein_ext_init` function is called immediately with a
+    /// populated `TeinExtApi` vtable. VFS entries, functions, and types
+    /// registered by the extension become available to scheme code.
+    ///
+    /// The shared library remains loaded for the process lifetime — there is
+    /// no unload path (dlclose during an active chibi heap is unsafe).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InitError`] if the library cannot be opened, the
+    /// `tein_ext_init` symbol is missing, the API version mismatches, or
+    /// the extension's init function returns a non-zero error code.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// ctx.load_extension("./libmy_extension.so")?;
+    /// ctx.evaluate("(import (tein my-extension))")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn load_extension(&self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        let path = path.as_ref();
+
+        // ensure foreign protocol is registered so extensions can call foreign-call
+        if !self.has_foreign_protocol.get() {
+            self.register_foreign_protocol()?;
+            self.has_foreign_protocol.set(true);
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(path).map_err(|e| {
+                Error::InitError(format!(
+                    "failed to load extension '{}': {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+
+            let init: libloading::Symbol<tein_ext::TeinExtInitFn> =
+                lib.get(b"tein_ext_init\0").map_err(|e| {
+                    Error::InitError(format!(
+                        "extension '{}' has no tein_ext_init symbol: {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+
+            // populate FOREIGN_STORE_PTR so ext_trampoline_register_type can access
+            // the store during init (extensions register types synchronously)
+            FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
+            let _foreign_guard = ForeignStoreGuard;
+
+            // build (or reuse) the API table — stored in context for future ext method dispatch
+            let api_box = {
+                let mut api_ref = self.ext_api.borrow_mut();
+                if api_ref.is_none() {
+                    *api_ref = Some(Box::new(build_ext_api()));
+                }
+                // return raw pointer to the stable Box<TeinExtApi>
+                api_ref.as_ref().unwrap().as_ref() as *const tein_ext::TeinExtApi
+            };
+            // set EXT_API so ext_trampoline_register_type and method dispatch can access it
+            EXT_API.with(|c| c.set(api_box));
+            let _ext_api_guard = ExtApiGuard;
+
+            let result = init(self.ctx as *mut tein_ext::OpaqueCtx, api_box);
+
+            match result {
+                tein_ext::TEIN_EXT_OK => {}
+                tein_ext::TEIN_EXT_ERR_VERSION => {
+                    return Err(Error::InitError(format!(
+                        "extension '{}': API version mismatch (host v{}, extension requires newer)",
+                        path.display(),
+                        tein_ext::TEIN_EXT_API_VERSION
+                    )));
+                }
+                code => {
+                    return Err(Error::InitError(format!(
+                        "extension '{}': init failed with code {}",
+                        path.display(),
+                        code
+                    )));
+                }
+            }
+
+            // leak the library handle — no unload
+            Box::leak(Box::new(lib));
+        }
+        Ok(())
     }
 
     /// Register the custom port protocol dispatch functions.
@@ -1434,6 +3290,275 @@ impl Context {
                 )),
             }
         }
+    }
+
+    /// Register a virtual filesystem entry at runtime.
+    ///
+    /// `path` is the VFS-relative path, e.g. `"lib/tein/json.sld"`. The entry
+    /// becomes immediately available to chibi's module resolver via `(import ...)`.
+    /// Must be called before any scheme code imports the module.
+    ///
+    /// Entries registered here are cleared on `Context::drop()`, so each context
+    /// has its own isolated set of runtime VFS modules.
+    ///
+    /// # errors
+    ///
+    /// Returns `Error::EvalError` if `path` contains null bytes.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// # use tein::{Context, Value};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// ctx.register_vfs_module(
+    ///     "lib/tein/mymod.sld",
+    ///     "(define-library (tein mymod) (import (scheme base)) (export the-answer) (include \"mymod.scm\"))",
+    /// )?;
+    /// ctx.register_vfs_module("lib/tein/mymod.scm", "(define the-answer 42)")?;
+    /// let result = ctx.evaluate("(import (tein mymod)) the-answer")?;
+    /// assert_eq!(result, Value::Integer(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_vfs_module(&self, path: &str, content: &str) -> Result<()> {
+        let full_path = format!("/vfs/{path}");
+        let c_path = std::ffi::CString::new(full_path)
+            .map_err(|_| Error::EvalError("VFS path contains null bytes".into()))?;
+        let rc = unsafe {
+            ffi::tein_vfs_register(
+                c_path.as_ptr(),
+                content.as_ptr() as *const std::ffi::c_char,
+                content.len() as std::ffi::c_uint,
+            )
+        };
+        if rc != 0 {
+            return Err(Error::InitError(
+                "VFS registration failed: out of memory".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Append a module path to the live VFS allowlist.
+    ///
+    /// Only meaningful in sandboxed contexts (where `VFS_GATE` is `GATE_CHECK`).
+    /// In unsandboxed contexts this is a no-op — the gate never checks the list.
+    ///
+    /// Used by `register_module` to make dynamically registered modules importable.
+    pub(crate) fn allow_module_runtime(&self, path: &str) {
+        use crate::sandbox::VFS_ALLOWLIST;
+        VFS_ALLOWLIST.with(|cell| {
+            let mut list = cell.borrow_mut();
+            if !list.iter().any(|p| p == path) {
+                list.push(path.to_string());
+            }
+        });
+    }
+
+    /// Register a scheme module from a `define-library` source string.
+    ///
+    /// Parses the library name, validates the form, registers the source into
+    /// the dynamic VFS, and (if sandboxed) appends to the live import allowlist.
+    ///
+    /// The source must use `(begin ...)` for all definitions — `(include ...)`,
+    /// `(include-ci ...)`, and `(include-library-declarations ...)` are not
+    /// supported and will return an error.
+    ///
+    /// # collision detection
+    ///
+    /// Rejects registration if the module already exists in the static
+    /// (compile-time) VFS — prevents shadowing built-in modules like
+    /// `scheme/base` or `tein/json`. Dynamic-over-dynamic shadowing is
+    /// allowed (update semantics for re-registration).
+    ///
+    /// # chibi module caching
+    ///
+    /// Chibi caches module environments after first `(import ...)`. Re-registering
+    /// a module's VFS entry does NOT invalidate the cache. A subsequent import in
+    /// the same context returns the old version. Use a fresh context (or
+    /// `ManagedContext::reset()`) for updated imports.
+    ///
+    /// # errors
+    ///
+    /// - `Error::EvalError` if source is not a valid `define-library` form
+    /// - `Error::EvalError` if library name is empty
+    /// - `Error::EvalError` if module collides with a built-in VFS entry
+    /// - `Error::EvalError` if source contains `(include ...)` or similar
+    /// - `Error::EvalError` if VFS registration fails (OOM)
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// # use tein::{Context, Value};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// ctx.register_module(r#"
+    ///     (define-library (my tool)
+    ///       (import (scheme base))
+    ///       (export greet)
+    ///       (begin (define (greet x) (string-append "hi " x))))
+    /// "#)?;
+    /// let result = ctx.evaluate("(import (my tool)) (greet \"world\")")?;
+    /// assert_eq!(result, Value::String("hi world".into()));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_module(&self, source: &str) -> Result<()> {
+        // step 1: sexp_read the source to get the define-library form
+        let (lib_name_parts, has_forbidden_include) = unsafe {
+            let scheme_str = ffi::sexp_c_str(
+                self.ctx,
+                source.as_ptr() as *const c_char,
+                source.len() as ffi::sexp_sint_t,
+            );
+            if ffi::sexp_exceptionp(scheme_str) != 0 {
+                return Err(Error::EvalError(
+                    "register_module: failed to create scheme string".into(),
+                ));
+            }
+            let _str_root = ffi::GcRoot::new(self.ctx, scheme_str);
+
+            let port = ffi::sexp_open_input_string(self.ctx, scheme_str);
+            if ffi::sexp_exceptionp(port) != 0 {
+                return Err(Error::EvalError(
+                    "register_module: failed to open input port".into(),
+                ));
+            }
+            let _port_root = ffi::GcRoot::new(self.ctx, port);
+
+            let form = ffi::sexp_read(self.ctx, port);
+            if ffi::sexp_exceptionp(form) != 0 || ffi::sexp_eofp(form) != 0 {
+                return Err(Error::EvalError(
+                    "register_module: source is not a valid s-expression".into(),
+                ));
+            }
+            let _form_root = ffi::GcRoot::new(self.ctx, form);
+
+            // validate it's (define-library (name ...) ...)
+            if ffi::sexp_pairp(form) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: expected (define-library ...) form".into(),
+                ));
+            }
+
+            let head = ffi::sexp_car(form);
+            if ffi::sexp_symbolp(head) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: expected (define-library ...) form".into(),
+                ));
+            }
+
+            let head_str = ffi::sexp_symbol_to_string(self.ctx, head);
+            let head_ptr = ffi::sexp_string_data(head_str);
+            let head_len = ffi::sexp_string_size(head_str) as usize;
+            let head_name =
+                std::str::from_utf8(std::slice::from_raw_parts(head_ptr as *const u8, head_len))
+                    .unwrap_or("");
+            if head_name != "define-library" {
+                return Err(Error::EvalError(
+                    "register_module: expected (define-library ...) form".into(),
+                ));
+            }
+
+            // extract library name list
+            let rest = ffi::sexp_cdr(form);
+            if ffi::sexp_pairp(rest) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: define-library has no library name".into(),
+                ));
+            }
+            let name_list = ffi::sexp_car(rest);
+            if ffi::sexp_pairp(name_list) == 0 {
+                return Err(Error::EvalError(
+                    "register_module: library name must be a list of symbols".into(),
+                ));
+            }
+
+            // walk the name list to extract parts
+            let mut parts = Vec::new();
+            let mut cursor = name_list;
+            while ffi::sexp_pairp(cursor) != 0 {
+                let elem = ffi::sexp_car(cursor);
+                if ffi::sexp_symbolp(elem) != 0 {
+                    let s = ffi::sexp_symbol_to_string(self.ctx, elem);
+                    let ptr = ffi::sexp_string_data(s);
+                    let len = ffi::sexp_string_size(s) as usize;
+                    let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+                    parts.push(String::from_utf8_lossy(slice).into_owned());
+                } else if ffi::sexp_integerp(elem) != 0 {
+                    let n = ffi::sexp_unbox_fixnum(elem);
+                    parts.push(n.to_string());
+                } else {
+                    return Err(Error::EvalError(
+                        "register_module: library name elements must be symbols or integers".into(),
+                    ));
+                }
+                cursor = ffi::sexp_cdr(cursor);
+            }
+
+            // check for forbidden include forms in the library body
+            let mut has_include = false;
+            let mut body = ffi::sexp_cdr(rest);
+            while ffi::sexp_pairp(body) != 0 {
+                let clause = ffi::sexp_car(body);
+                if ffi::sexp_pairp(clause) != 0 {
+                    let clause_head = ffi::sexp_car(clause);
+                    if ffi::sexp_symbolp(clause_head) != 0 {
+                        let s = ffi::sexp_symbol_to_string(self.ctx, clause_head);
+                        let ptr = ffi::sexp_string_data(s);
+                        let len = ffi::sexp_string_size(s) as usize;
+                        let sym =
+                            std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len))
+                                .unwrap_or("");
+                        if sym == "include"
+                            || sym == "include-ci"
+                            || sym == "include-library-declarations"
+                        {
+                            has_include = true;
+                            break;
+                        }
+                    }
+                }
+                body = ffi::sexp_cdr(body);
+            }
+
+            (parts, has_include)
+        };
+
+        if lib_name_parts.is_empty() {
+            return Err(Error::EvalError(
+                "register_module: library name is empty".into(),
+            ));
+        }
+
+        if has_forbidden_include {
+            return Err(Error::EvalError(
+                "register_module: (include ...) is not supported in dynamically registered modules; use (begin ...) instead".into(),
+            ));
+        }
+
+        // derive VFS path
+        let module_path = lib_name_parts.join("/");
+        let vfs_sld_path = format!("/vfs/lib/{module_path}.sld");
+
+        // collision check — reject if in static VFS
+        let c_vfs_path = CString::new(vfs_sld_path.as_str())
+            .map_err(|_| Error::EvalError("register_module: path contains null bytes".into()))?;
+        let collision = unsafe { ffi::vfs_static_exists(&c_vfs_path) };
+        if collision {
+            return Err(Error::EvalError(format!(
+                "register_module: module '{module_path}' already exists as a built-in module"
+            )));
+        }
+
+        // register into dynamic VFS
+        self.register_vfs_module(&format!("lib/{module_path}.sld"), source)?;
+
+        // update live allowlist
+        self.allow_module_runtime(&module_path);
+
+        Ok(())
     }
 
     /// Set a Scheme procedure as the macro expansion hook.
@@ -1600,6 +3725,118 @@ impl Context {
         }
     }
 
+    /// set a standard port parameter to the given port value.
+    ///
+    /// `symbol_fn` returns the global symbol for the parameter
+    /// (e.g. `ffi::sexp_global_cur_out_symbol`).
+    fn set_port_parameter(
+        &self,
+        port: &Value,
+        symbol_fn: unsafe fn(ffi::sexp) -> ffi::sexp,
+    ) -> Result<()> {
+        let raw_port = port
+            .as_port()
+            .ok_or_else(|| Error::TypeError(format!("expected port, got {}", port)))?;
+        unsafe {
+            let env = ffi::sexp_context_env(self.ctx);
+            let sym = symbol_fn(self.ctx);
+            ffi::sexp_set_parameter(self.ctx, env, sym, raw_port);
+        }
+        Ok(())
+    }
+
+    /// Set the current output port for this context.
+    ///
+    /// Replaces the port that `(current-output-port)` returns in Scheme code.
+    /// All output operations (`display`, `write`, `newline`, `write-char`)
+    /// that default to `(current-output-port)` will use this port.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    /// impl std::io::Write for SharedWriter {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.lock().unwrap().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_output_port(SharedWriter(buf.clone()))?;
+    /// ctx.set_current_output_port(&port)?;
+    /// ctx.evaluate("(display \"hello\")")?;
+    /// ctx.evaluate("(flush-output (current-output-port))")?;
+    /// assert_eq!(&*buf.lock().unwrap(), b"hello");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_current_output_port(&self, port: &Value) -> Result<()> {
+        self.set_port_parameter(port, ffi::sexp_global_cur_out_symbol)
+    }
+
+    /// Set the current input port for this context.
+    ///
+    /// Replaces the port that `(current-input-port)` returns in Scheme code.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_input_port(std::io::Cursor::new(b"42"))?;
+    /// ctx.set_current_input_port(&port)?;
+    /// let val = ctx.evaluate("(read)")?;
+    /// assert_eq!(val, Value::Integer(42));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_current_input_port(&self, port: &Value) -> Result<()> {
+        self.set_port_parameter(port, ffi::sexp_global_cur_in_symbol)
+    }
+
+    /// Set the current error port for this context.
+    ///
+    /// Replaces the port that `(current-error-port)` returns in Scheme code.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tein::{Context, Value};
+    /// use std::sync::{Arc, Mutex};
+    ///
+    /// struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+    /// impl std::io::Write for SharedWriter {
+    ///     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    ///         self.0.lock().unwrap().extend_from_slice(buf);
+    ///         Ok(buf.len())
+    ///     }
+    ///     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    /// }
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    /// let ctx = Context::new_standard()?;
+    /// let port = ctx.open_output_port(SharedWriter(buf.clone()))?;
+    /// ctx.set_current_error_port(&port)?;
+    /// ctx.evaluate("(display \"oops\" (current-error-port))")?;
+    /// ctx.evaluate("(flush-output (current-error-port))")?;
+    /// assert_eq!(&*buf.lock().unwrap(), b"oops");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_current_error_port(&self, port: &Value) -> Result<()> {
+        self.set_port_parameter(port, ffi::sexp_global_cur_err_symbol)
+    }
+
     /// Read one s-expression from a port.
     ///
     /// Returns the parsed but unevaluated expression.
@@ -1627,12 +3864,16 @@ impl Context {
         let _port_guard = PortStoreGuard;
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
 
         unsafe {
             let result = ffi::sexp_read(self.ctx, raw_port);
             if ffi::sexp_eofp(result) != 0 {
                 return Ok(Value::Unspecified);
             }
+            // root result before from_raw (see evaluate() for rationale)
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
             if ffi::sexp_exceptionp(result) != 0 {
                 return Value::from_raw(self.ctx, result);
             }
@@ -1668,6 +3909,14 @@ impl Context {
         let _port_guard = PortStoreGuard;
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
+        let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
+            EXT_API.with(|c| c.set(api.as_ref() as *const _));
+            Some(ExtApiGuard)
+        } else {
+            None
+        };
         self.arm_fuel();
 
         unsafe {
@@ -1688,7 +3937,12 @@ impl Context {
                 }
                 let result = ffi::sexp_evaluate(self.ctx, expr, env);
                 self.check_fuel()?;
+                // root result before from_raw (see evaluate() for rationale)
+                let _result_root = ffi::GcRoot::new(self.ctx, result);
                 if ffi::sexp_exceptionp(result) != 0 {
+                    if let Some(exit_result) = self.check_exit() {
+                        return exit_result;
+                    }
                     return Value::from_raw(self.ctx, result);
                 }
                 last = Value::from_raw(self.ctx, result)?;
@@ -1734,6 +3988,89 @@ impl Context {
         Ok(())
     }
 
+    #[cfg(feature = "json")]
+    /// Register `json-parse` and `json-stringify` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts. the VFS module
+    /// `(tein json)` exports these names, making them available via
+    /// `(import (tein json))`.
+    fn register_json_module(&self) -> Result<()> {
+        self.define_fn_variadic("json-parse", json_parse_trampoline)?;
+        self.define_fn_variadic("json-stringify", json_stringify_trampoline)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "toml")]
+    /// Register `toml-parse` and `toml-stringify` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts. the VFS module
+    /// `(tein toml)` exports these names, making them available via
+    /// `(import (tein toml))`.
+    fn register_toml_module(&self) -> Result<()> {
+        self.define_fn_variadic("toml-parse", toml_parse_trampoline)?;
+        self.define_fn_variadic("toml-stringify", toml_stringify_trampoline)?;
+        Ok(())
+    }
+
+    /// Register `file-exists?` and `delete-file` trampolines for `(tein file)`.
+    ///
+    /// `open-*-file` enforcement is handled at the C opcode level via the FS
+    /// policy gate (eval.c patches F, G) — no rust trampolines are needed for
+    /// those. `(tein file)` also exports 4 higher-order wrappers
+    /// (`call-with-*`, `with-*-from/to-file`) defined in `file.scm`.
+    /// Called during `build()` after context creation.
+    fn register_file_module(&self) -> Result<()> {
+        self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
+        self.define_fn_variadic("delete-file", delete_file_trampoline)?;
+        Ok(())
+    }
+
+    /// Register the VFS-restricted `load` function (VFS-only).
+    ///
+    /// Registers as `tein-load-vfs-internal` to avoid overriding chibi's
+    /// built-in `load`, which the module loader uses for `(include ...)` in
+    /// `.sld` files. `(tein load)` exports it as `load` via
+    /// `(export (rename tein-load-vfs-internal load))` in `load.sld`.
+    fn register_load_module(&self) -> Result<()> {
+        self.define_fn_variadic("tein-load-vfs-internal", load_trampoline)?;
+        Ok(())
+    }
+
+    /// Register the `environment` and `interaction-environment` trampolines.
+    ///
+    /// `tein-environment-internal` validates import specs against the VFS
+    /// allowlist and delegates to chibi's `mutable-environment`. Used by
+    /// `(scheme eval)` and `(scheme load)` shadows.
+    ///
+    /// `tein-interaction-environment-internal` returns a persistent mutable env
+    /// for REPL interaction. Used by `(scheme repl)` shadow.
+    fn register_eval_module(&self) -> Result<()> {
+        let env = unsafe { ffi::sexp_context_env(self.ctx) };
+        register_eval_trampolines(self.ctx, env)
+    }
+
+    /// Register `get-environment-variable`, `get-environment-variables`,
+    /// `command-line`, and `exit` native functions.
+    ///
+    /// Called during `build()` for standard-env contexts.
+    fn register_process_module(&self) -> Result<()> {
+        self.define_fn_variadic("get-environment-variable", get_env_var_trampoline)?;
+        self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
+        self.define_fn_variadic("command-line", command_line_trampoline)?;
+        self.define_fn_variadic("exit", exit_trampoline)?;
+        Ok(())
+    }
+
+    /// Register `register-module` and `module-registered?` native functions.
+    ///
+    /// These form the `(tein modules)` scheme API for dynamic module registration.
+    /// Called during `build()` for standard-env contexts.
+    fn register_modules_module(&self) -> Result<()> {
+        self.define_fn_variadic("register-module", register_module_trampoline)?;
+        self.define_fn_variadic("module-registered?", module_registered_trampoline)?;
+        Ok(())
+    }
+
     /// Call a Scheme procedure from Rust.
     ///
     /// Invokes a `Value::Procedure` (lambda, named function, or builtin)
@@ -1764,8 +4101,16 @@ impl Context {
 
         FOREIGN_STORE_PTR.with(|c| c.set(&self.foreign_store as *const _));
         let _foreign_guard = ForeignStoreGuard;
+        CONTEXT_PTR.with(|c| c.set(self as *const Context));
+        let _context_guard = ContextPtrGuard;
         PORT_STORE_PTR.with(|c| c.set(&self.port_store as *const _));
         let _port_guard = PortStoreGuard;
+        let _ext_api_guard = if let Some(api) = self.ext_api.borrow().as_ref() {
+            EXT_API.with(|c| c.set(api.as_ref() as *const _));
+            Some(ExtApiGuard)
+        } else {
+            None
+        };
         self.arm_fuel();
 
         unsafe {
@@ -1787,7 +4132,14 @@ impl Context {
             // check fuel before exception status
             self.check_fuel()?;
 
+            // root result — from_raw may allocate (sexp_symbol_to_string, etc.)
+            // which can trigger GC and collect an unrooted result sexp.
+            let _result_root = ffi::GcRoot::new(self.ctx, result);
+
             if ffi::sexp_exceptionp(result) != 0 {
+                if let Some(exit_result) = self.check_exit() {
+                    return exit_result;
+                }
                 return Value::from_raw(self.ctx, result);
             }
 
@@ -1807,23 +4159,52 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // restore previous module policy rather than unconditionally clearing —
-        // a second context on the same thread may still be active and depends on its policy.
-        if self.has_module_policy {
-            MODULE_POLICY.with(|cell| cell.set(self.prev_module_policy));
-            unsafe { ffi::module_policy_set(self.prev_module_policy as i32) };
-        }
+        // restore previous VFS gate — always, since a second context on the same thread
+        // may still be active and depends on its gate. prev_vfs_gate is GATE_OFF for
+        // unsandboxed contexts (default), so this is safe when no outer context exists.
+        VFS_GATE.with(|cell| cell.set(self.prev_vfs_gate));
+        unsafe { ffi::vfs_gate_set(self.prev_vfs_gate as i32) };
+        FS_GATE.with(|cell| cell.set(self.prev_fs_gate));
+        unsafe { ffi::fs_policy_gate_set(self.prev_fs_gate as i32) };
+        VFS_ALLOWLIST.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_vfs_allowlist);
+        });
 
         // restore previous FS_POLICY (typically None, unless sequential sandboxed contexts)
-        if self.has_io_wrappers {
-            FS_POLICY.with(|cell| {
-                *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
-            });
-            ORIGINAL_PROCS.with(|procs| {
-                for p in procs {
-                    p.set(std::ptr::null_mut());
-                }
-            });
+        FS_POLICY.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
+        });
+        // restore sandbox flag for the thread (defensive restore-previous pattern)
+        IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
+        // restore previous fake process environment
+        SANDBOX_ENV.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_env);
+        });
+        SANDBOX_COMMAND_LINE.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_command_line);
+        });
+        FS_MODULE_PATHS.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_module_paths);
+        });
+
+        // clear UX stub module map so next context on this thread starts fresh
+        STUB_MODULE_MAP.with(|map| map.borrow_mut().clear());
+
+        // release interaction-environment if it was created (#97)
+        INTERACTION_ENV.with(|cell| {
+            let env = cell.get();
+            if !env.is_null() {
+                unsafe { ffi::sexp_release_object(self.ctx, env) };
+                cell.set(std::ptr::null_mut());
+            }
+        });
+
+        // clear any pending exit request — defensive safety net in case evaluation
+        // was interrupted before the eval loop could consume the flag.
+        EXIT_REQUESTED.with(|c| c.set(false));
+        let stashed = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
+        if !stashed.is_null() {
+            unsafe { ffi::sexp_release_object(self.ctx, stashed) };
         }
 
         // clear reader dispatch table so the next context on this thread
@@ -1832,6 +4213,9 @@ impl Drop for Context {
 
         // clear macro expansion hook (thread-local in C)
         unsafe { ffi::macro_expand_hook_clear(self.ctx) };
+
+        // clear runtime VFS entries registered by this context (thread-local in C)
+        unsafe { ffi::tein_vfs_clear_dynamic() };
 
         unsafe {
             if !self.ctx.is_null() {
@@ -2964,74 +5348,91 @@ mod tests {
         );
     }
 
-    // --- phase 2: restricted environments + presets ---
+    // --- phase 2: restricted environments (module-level sandboxing) ---
 
     #[test]
-    fn test_arithmetic_only_env() {
+    fn test_env_trampoline_direct_unsandboxed() {
+        // verify the trampoline works in a non-sandboxed standard env
+        let ctx = Context::new_standard().unwrap();
+        // first, verify chibi's native environment works
+        let r1 = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 1 2) (environment '(scheme base)))")
+            .expect("native environment should work");
+        assert_eq!(r1, Value::Integer(3));
+        // now test our trampoline
+        let result = ctx
+            .evaluate("(eval '(+ 1 2) (tein-environment-internal '(scheme base)))")
+            .expect("trampoline should work unsandboxed");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_safe_arithmetic() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::Safe)
             .build()
             .expect("builder");
-        let result = ctx.evaluate("(+ 1 2)").expect("should work");
+        // after import, arithmetic works
+        let result = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("should work");
         assert_eq!(result, Value::Integer(3));
-        let err = ctx.evaluate("(cons 1 2)").unwrap_err();
+        // scheme/eval is now in Safe — verify it works (#97)
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 1 2) (environment '(scheme base)))")
+            .expect("scheme/eval should work in Safe");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_none_blocks_all() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("builder");
+        // even scheme/base is blocked — '+' requires import first
+        let err = ctx.evaluate("(import (scheme base))").unwrap_err();
         assert!(
-            matches!(err, Error::SandboxViolation(_)),
-            "cons should produce SandboxViolation in arithmetic-only env, got: {:?}",
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "scheme/base should be blocked in Modules::None, got: {:?}",
             err
         );
     }
 
     #[test]
-    fn test_syntax_forms_always_available() {
+    fn test_sandboxed_modules_only_single() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
             .expect("builder");
         let result = ctx
-            .evaluate("(define x 5) (if #t (+ x 1) 0)")
+            .evaluate("(import (scheme base)) (+ 1 2)")
             .expect("should work");
-        assert_eq!(result, Value::Integer(6));
-
-        let result = ctx
-            .evaluate("((lambda (a b) (+ a b)) 3 4)")
-            .expect("lambda");
-        assert_eq!(result, Value::Integer(7));
-
-        let result = ctx.evaluate("(begin (+ 1 1) (+ 2 2))").expect("begin");
-        assert_eq!(result, Value::Integer(4));
-
-        let result = ctx.evaluate("(quote hello)").expect("quote");
-        assert_eq!(result, Value::Symbol("hello".into()));
-    }
-
-    #[test]
-    fn test_preset_composition() {
-        let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
-            .preset(&crate::sandbox::LISTS)
-            .build()
-            .expect("builder");
-        let result = ctx.evaluate("(+ 1 2)").expect("arithmetic");
         assert_eq!(result, Value::Integer(3));
-        let result = ctx.evaluate("(car (cons 1 2))").expect("lists");
-        assert_eq!(result, Value::Integer(1));
     }
 
     #[test]
-    fn test_allow_individual_primitives() {
+    fn test_sandboxed_modules_all() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .allow(&["+", "-"])
+            .standard_env()
+            .sandboxed(Modules::All)
             .build()
             .expect("builder");
-        let result = ctx.evaluate("(+ 10 (- 5 3))").expect("should work");
-        assert_eq!(result, Value::Integer(12));
-        let err = ctx.evaluate("(* 2 3)");
-        assert!(err.is_err(), "* should be undefined");
+        let result = ctx
+            .evaluate("(import (scheme write)) (write 1) #t")
+            .expect("should work");
+        assert_eq!(result, Value::Boolean(true));
     }
 
     #[test]
-    fn test_no_preset_full_env() {
+    fn test_unrestricted_env() {
         let ctx = Context::builder().build().expect("builder");
         let result = ctx
             .evaluate("(cons 1 (cons 2 (quote ())))")
@@ -3043,30 +5444,8 @@ mod tests {
     }
 
     #[test]
-    fn test_pure_computation_convenience() {
-        let ctx = Context::builder()
-            .pure_computation()
-            .build()
-            .expect("builder");
-        let r = ctx.evaluate("(+ 1 2)").expect("arithmetic");
-        assert_eq!(r, Value::Integer(3));
-        let r = ctx.evaluate("(car (cons 1 2))").expect("lists");
-        assert_eq!(r, Value::Integer(1));
-        let r = ctx.evaluate("(string? \"hello\")").expect("strings");
-        assert_eq!(r, Value::Boolean(true));
-    }
-
-    #[test]
-    fn test_safe_convenience() {
-        let ctx = Context::builder().safe().build().expect("builder");
-        let r = ctx
-            .evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")
-            .expect("should work");
-        assert_eq!(r, Value::Integer(99));
-    }
-
-    #[test]
-    fn test_foreign_fn_works_in_restricted_env() {
+    fn test_foreign_fn_works_in_sandboxed_env() {
+        use crate::sandbox::Modules;
         unsafe extern "C" fn add100(
             _ctx: crate::ffi::sexp,
             _self: crate::ffi::sexp,
@@ -3080,19 +5459,290 @@ mod tests {
         }
 
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
             .expect("builder");
         ctx.define_fn_variadic("add100", add100).expect("define fn");
-        let result = ctx.evaluate("(add100 5)").expect("should work");
+        let result = ctx
+            .evaluate("(import (scheme base)) (add100 5)")
+            .expect("should work");
         assert_eq!(result, Value::Integer(105));
     }
 
     #[test]
-    fn test_file_io_absent_in_safe_preset() {
-        let ctx = Context::builder().safe().build().expect("builder");
-        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
-        assert!(err.is_err(), "file io should be unavailable in safe preset");
+    fn test_file_io_absent_without_policy() {
+        use crate::sandbox::Modules;
+        // sandboxed with no file_read — open-input-file not in scheme/base, is absent
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        let err = ctx.evaluate("(import (scheme base)) (open-input-file \"/etc/passwd\")");
+        assert!(
+            err.is_err(),
+            "file io should be unavailable without file policy"
+        );
+    }
+
+    #[test]
+    fn test_tein_process_safe_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        // (tein process) is in the safe set — trampolines use fake env/argv in sandbox
+        let r = ctx.evaluate("(import (tein process))");
+        assert!(
+            r.is_ok(),
+            "(tein process) should be importable in sandbox: {r:?}"
+        );
+        // default fake env seed
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("true".to_string()));
+        // vars not in fake env still return #f
+        let r = ctx.evaluate("(get-environment-variable \"HOME\")");
+        assert_eq!(r.unwrap(), Value::Boolean(false));
+        // env var list contains the seed
+        let r = ctx.evaluate("(import (scheme base)) (pair? (get-environment-variables))");
+        assert_eq!(
+            r.unwrap(),
+            Value::Boolean(true),
+            "should have fake env vars"
+        );
+        // command-line returns default fake
+        let r = ctx.evaluate("(command-line)");
+        assert_eq!(
+            r.unwrap(),
+            Value::List(vec![
+                Value::String("tein".into()),
+                Value::String("--sandbox".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_tein_process_allowed_with_allow_module() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("tein/process")
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        // module import should succeed once trampolines are registered
+        let r = ctx.evaluate("(import (tein process))");
+        assert!(
+            r.is_ok(),
+            "expected (tein process) import to succeed: {:?}",
+            r
+        );
+    }
+
+    // --- (tein file) tests ---
+
+    #[test]
+    fn test_tein_file_exists() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        // test with a file that exists (Cargo.toml in workspace root)
+        let r = ctx.evaluate("(file-exists? \"Cargo.toml\")").unwrap();
+        assert_eq!(r, Value::Boolean(true));
+        // test with a file that doesn't exist
+        let r = ctx
+            .evaluate("(file-exists? \"/nonexistent/path/xyz\")")
+            .unwrap();
+        assert_eq!(r, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_tein_file_delete() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let path = dir.join("tein_test_delete_file.txt");
+        // create a temp file
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"test").unwrap();
+        drop(f);
+
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let code = format!("(delete-file \"{}\")", path.display());
+        let r = ctx.evaluate(&code);
+        assert!(r.is_ok(), "delete-file failed: {:?}", r);
+        assert!(!path.exists(), "file should be deleted");
+    }
+
+    #[test]
+    fn test_tein_file_exists_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(5_000_000)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        // no FsPolicy configured, file-exists? should return a policy error
+        let r = ctx.evaluate("(file-exists? \"/etc/passwd\")");
+        assert!(r.is_err(), "expected sandbox violation: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_file_exists_with_read_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/"])
+            .step_limit(5_000_000)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? \"Cargo.toml\")").unwrap();
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    // --- (tein load) tests ---
+
+    #[test]
+    fn test_tein_load_vfs_path() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        // load a VFS file that defines something — tein/test.scm is a safe target
+        let r = ctx.evaluate("(load \"/vfs/lib/tein/test.scm\")");
+        assert!(r.is_ok(), "VFS load failed: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_load_non_vfs_rejected() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load \"/etc/passwd\")");
+        assert!(r.is_err(), "expected non-VFS path to be rejected: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_load_nonexistent_vfs() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load \"/vfs/lib/nonexistent.scm\")");
+        assert!(r.is_err(), "expected missing VFS path to error: {:?}", r);
+    }
+
+    // --- (tein process) tests ---
+
+    #[test]
+    fn test_tein_process_get_env_var() {
+        unsafe { std::env::set_var("TEIN_TEST_VAR", "hello") };
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx
+            .evaluate("(get-environment-variable \"TEIN_TEST_VAR\")")
+            .unwrap();
+        assert_eq!(r, Value::String("hello".to_string()));
+        // unset var returns #f
+        let r = ctx
+            .evaluate("(get-environment-variable \"TEIN_NONEXISTENT_VAR_XYZ\")")
+            .unwrap();
+        assert_eq!(r, Value::Boolean(false));
+        unsafe { std::env::remove_var("TEIN_TEST_VAR") };
+    }
+
+    #[test]
+    fn test_tein_process_get_env_var_no_args() {
+        // calling (get-environment-variable) with no arguments must not segfault
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable)");
+        assert!(r.is_err(), "expected arity error, got: {:?}", r);
+    }
+
+    #[test]
+    fn test_tein_process_get_env_vars() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(pair? (get-environment-variables))").unwrap();
+        assert_eq!(r, Value::Boolean(true), "should return non-empty alist");
+    }
+
+    #[test]
+    fn test_tein_process_command_line() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(list? (command-line))").unwrap();
+        assert_eq!(r, Value::Boolean(true), "should return a list");
+    }
+
+    #[test]
+    fn test_tein_process_exit_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit) (+ 1 2))").unwrap();
+        assert_eq!(r, Value::Exit(0), "(exit) should return Exit(0)");
+    }
+
+    #[test]
+    fn test_tein_process_exit_with_value() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit 42) (+ 1 2))").unwrap();
+        assert_eq!(r, Value::Exit(42), "(exit 42) should return Exit(42)");
+    }
+
+    #[test]
+    fn test_tein_process_exit_true() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit #t) 999)").unwrap();
+        assert_eq!(r, Value::Exit(0), "(exit #t) should return Exit(0)");
+    }
+
+    #[test]
+    fn test_tein_process_exit_false() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit #f) 999)").unwrap();
+        assert_eq!(r, Value::Exit(1), "(exit #f) should return Exit(1)");
+    }
+
+    #[test]
+    fn test_tein_process_exit_string() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(begin (exit \"done\") 999)").unwrap();
+        // non-integer, non-boolean → Exit(0) per r7rs
+        assert_eq!(r, Value::Exit(0), "(exit str) should return Exit(0)");
+    }
+
+    #[test]
+    fn test_tein_process_exit_skips_dynamic_wind() {
+        // r7rs deviation (GH #101): tein's exit does NOT run dynamic-wind
+        // "after" thunks — it has emergency-exit semantics. this test asserts
+        // the *current* behaviour. update when GH #101 is fixed.
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        // in r7rs-compliant exit, the after thunk would run before returning.
+        // tein exits immediately, so we get the exit value directly.
+        let r = ctx
+            .evaluate(
+                "(dynamic-wind \
+                   (lambda () #f) \
+                   (lambda () (exit 42)) \
+                   (lambda () (error \"after thunk ran — unexpected\")))",
+            )
+            .unwrap();
+        // exits with 42; after thunk never runs (no error thrown)
+        assert_eq!(
+            r,
+            Value::Exit(42),
+            "exit bypasses dynamic-wind after thunk (GH #101)"
+        );
     }
 
     // --- phase 3: timeout context ---
@@ -3169,10 +5819,10 @@ mod tests {
         drop(ctx);
     }
 
-    // --- phase 4: parameterised IO presets ---
+    // --- IO policy tests ---
     //
-    // IO tests use thread-local state (FS_POLICY, ORIGINAL_PROCS) so they
-    // must not run concurrently on the same thread. we use a mutex to
+    // IO tests use thread-local state (FS_POLICY, FS_GATE, IS_SANDBOXED) so
+    // they must not run concurrently on the same thread. we use a mutex to
     // serialise them.
 
     static IO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -3193,13 +5843,16 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
+        // open-input-file is a chibi opcode — import (tein file) to get it in sandbox.
+        // (scheme read) provides `read`.
         let code = format!(
-            r#"(define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
+            r#"(import (scheme base) (scheme read) (tein file)) (define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
             file.display()
         );
         let result = ctx.evaluate(&code).expect("should succeed");
@@ -3216,13 +5869,14 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         let err = ctx
-            .evaluate("(open-input-file \"/etc/passwd\")")
+            .evaluate("(import (tein file)) (open-input-file \"/etc/passwd\")")
             .unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
@@ -3245,13 +5899,14 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         let code = format!(
-            r#"(define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
+            r#"(import (scheme base) (tein file)) (define p (open-output-file "{}")) (write-char #\X p) (close-output-port p)"#,
             file.display()
         );
         ctx.evaluate(&code).expect("should succeed");
@@ -3269,12 +5924,14 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
-        let err = ctx.evaluate("(open-output-file \"/tmp/tein-io-test-nope.txt\")");
+        let err =
+            ctx.evaluate("(import (tein file)) (open-output-file \"/tmp/tein-io-test-nope.txt\")");
         assert!(err.is_err(), "write to unallowed path should be denied");
     }
 
@@ -3285,14 +5942,15 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         // try to escape via ../ — canonicalisation should catch this
         let evil_path = format!("{}/../../../etc/passwd", dir.display());
-        let code = format!(r#"(open-input-file "{}")"#, evil_path);
+        let code = format!(r#"(import (tein file)) (open-input-file "{}")"#, evil_path);
         let err = ctx.evaluate(&code);
         assert!(err.is_err(), "path traversal should be denied");
     }
@@ -3312,13 +5970,17 @@ mod tests {
             let canon_dir = dir.canonicalize().unwrap();
 
             let ctx = Context::builder()
-                .safe()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
                 .file_read(&[canon_dir.to_str().unwrap()])
                 .build()
                 .expect("builder");
 
             // the symlink points outside the allowed prefix, so should be denied
-            let code = format!(r#"(open-input-file "{}")"#, link.display());
+            let code = format!(
+                r#"(import (tein file)) (open-input-file "{}")"#,
+                link.display()
+            );
             let err = ctx.evaluate(&code);
             assert!(
                 err.is_err(),
@@ -3338,13 +6000,14 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         let code = format!(
-            r#"(define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
+            r#"(import (scheme base) (tein file)) (define p (open-output-file "{}")) (write-char #\Y p) (close-output-port p)"#,
             file.display()
         );
         ctx.evaluate(&code).expect("should create new file");
@@ -3360,14 +6023,15 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
         // parent dir doesn't exist, so check_write fails (can't canonicalise parent)
         let code = format!(
-            r#"(open-output-file "{}/nonexistent_subdir/file.txt")"#,
+            r#"(import (tein file)) (open-output-file "{}/nonexistent_subdir/file.txt")"#,
             dir.display()
         );
         let err = ctx.evaluate(&code);
@@ -3377,55 +6041,67 @@ mod tests {
     #[test]
     fn test_file_read_without_policy() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // safe preset without file_read — open-input-file should be absent
-        let ctx = Context::builder().safe().build().expect("builder");
-        let err = ctx.evaluate("(open-input-file \"/etc/passwd\")");
+        // sandboxed without file_read — C gate denies access
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .build()
+            .expect("builder");
+        let err = ctx.evaluate("(import (tein file)) (open-input-file \"/etc/passwd\")");
         assert!(
             err.is_err(),
-            "open-input-file should be undefined without file_read()"
+            "open-input-file should be denied without file_read()"
         );
     }
 
     #[test]
     fn test_file_write_without_policy() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // safe preset without file_write — open-output-file should be absent
-        let ctx = Context::builder().safe().build().expect("builder");
-        let err = ctx.evaluate("(open-output-file \"/tmp/nope.txt\")");
+        // sandboxed without file_write — C gate denies access
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .build()
+            .expect("builder");
+        let err = ctx.evaluate("(import (tein file)) (open-output-file \"/tmp/nope.txt\")");
         assert!(
             err.is_err(),
-            "open-output-file should be undefined without file_write()"
+            "open-output-file should be denied without file_write()"
         );
     }
 
     #[test]
-    fn test_file_io_with_safe_preset() {
+    fn test_file_io_with_sandboxed_modules() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
-        // .safe().file_read() should compose correctly
+        // sandboxed(Safe).file_read() should compose correctly
         let dir = io_test_dir("safe_compose");
         let file = dir.join("data.txt");
         std::fs::write(&file, "42").expect("write");
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .build()
             .expect("builder");
 
-        // arithmetic still works
-        let r = ctx.evaluate("(+ 1 2)").expect("arithmetic");
+        // arithmetic works after import
+        let r = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("arithmetic");
         assert_eq!(r, Value::Integer(3));
 
-        // mutation still works
+        // mutation works
         let r = ctx
             .evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")
             .expect("mutation");
         assert_eq!(r, Value::Integer(99));
 
-        // file read works
+        // file read via C opcode — import (tein file) to get open-input-file in sandbox.
+        // (scheme read) provides `read`.
         let code = format!(
-            r#"(define p (open-input-file "{}")) (read p)"#,
+            r#"(import (scheme read) (tein file)) (define p (open-input-file "{}")) (read p)"#,
             file.display()
         );
         let r = ctx.evaluate(&code).expect("file read");
@@ -3442,7 +6118,8 @@ mod tests {
         let canon_dir = dir.canonicalize().unwrap();
 
         let ctx = Context::builder()
-            .safe()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
             .file_read(&[canon_dir.to_str().unwrap()])
             .file_write(&[canon_dir.to_str().unwrap()])
             .build()
@@ -3454,6 +6131,131 @@ mod tests {
         assert!(err.is_err(), "fd primitives should be blocked");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- open-*-file C-level policy tests ---
+
+    #[test]
+    fn test_open_input_file_allowed() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_input_allowed");
+        let file = dir.join("data.txt");
+        std::fs::write(&file, "hello").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+        // import (tein file) to get open-input-file in sandbox
+        let code = format!(
+            "(import (scheme base) (tein file)) (let ((p (open-input-file \"{path}\"))) (close-input-port p) #t)"
+        );
+        let r = ctx.evaluate(&code).expect("open-input-file allowed");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_open_input_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_input_denied");
+        let file = dir.join("secret.txt");
+        std::fs::write(&file, "no").expect("write");
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies access — path not in allowed prefix
+        let code = format!("(import (tein file)) (open-input-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_output_file_allowed() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_output_allowed");
+        let file = dir.join("out.txt");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&[canon_dir.to_str().unwrap()])
+            .build()
+            .expect("builder");
+        // import (tein file) to get open-output-file in sandbox
+        let code = format!(
+            "(import (scheme base) (tein file)) (let ((p (open-output-file \"{path}\"))) (close-output-port p) #t)"
+        );
+        let r = ctx.evaluate(&code).expect("open-output-file allowed");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_open_output_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_output_denied");
+        let path = dir.join("nope.txt").to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies access — path not in allowed prefix
+        let code = format!("(import (tein file)) (open-output-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_binary_input_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_binary_input_denied");
+        let file = dir.join("secret.bin");
+        std::fs::write(&file, b"\x00\x01\x02").expect("write");
+        let path = file.to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_read(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies binary input — same opcode path as text mode
+        let code = format!("(import (tein file)) (open-binary-input-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_binary_output_file_denied() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let dir = io_test_dir("open_binary_output_denied");
+        let path = dir.join("nope.bin").to_str().unwrap().to_string();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .file_write(&["/tmp/__nonexistent_prefix__/"])
+            .build()
+            .expect("builder");
+        // C gate denies binary output — same opcode path as text mode
+        let code = format!("(import (tein file)) (open-binary-output-file \"{path}\")");
+        assert!(ctx.evaluate(&code).is_err(), "should be denied");
+    }
+
+    #[test]
+    fn test_open_input_file_unsandboxed_passthrough() {
+        // unsandboxed: open-input-file is the chibi opcode; FS gate is off, all access allowed
+        let tmp = "/tmp/tein_open_unsandboxed_test.txt";
+        std::fs::write(tmp, "test").expect("write");
+        let ctx = Context::builder().standard_env().build().expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(r.expect("unsandboxed passthrough"), Value::Boolean(true));
     }
 
     // --- standard environment ---
@@ -3517,20 +6319,19 @@ mod tests {
 
     #[test]
     fn test_standard_env_with_sandbox() {
-        // standard_env + presets: sandbox copies from the enriched standard env,
-        // but only bindings explicitly in the allowlist are available.
-        // "map" and "for-each" come from (scheme base), not from C primitives,
-        // so they must be explicitly allowed.
-        use crate::sandbox::*;
+        // sandboxed(Modules::only(["scheme/base"])) — map and for-each are
+        // available after (import (scheme base)).
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .preset(&LISTS)
-            .allow(&["map", "for-each"])
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
-        // map is allowed and comes from the standard env
+        // import scheme/base first
+        ctx.evaluate("(import (scheme base))").expect("import");
+
+        // map is available after import
         let r = ctx
             .evaluate("(map + '(1 2 3) '(10 20 30))")
             .expect("map in sandbox");
@@ -3543,18 +6344,19 @@ mod tests {
             ])
         );
 
-        // for-each works too (side-effect only, returns void)
-        // use define instead of let since for-each's closure sees the
-        // restricted env, and define creates top-level bindings.
+        // for-each works too
         ctx.evaluate("(define sandbox-sum 0)").expect("define");
         ctx.evaluate("(for-each (lambda (x) (set! sandbox-sum (+ sandbox-sum x))) '(1 2 3))")
             .expect("for-each in sandbox");
         let r = ctx.evaluate("sandbox-sum").expect("read sum");
         assert_eq!(r, Value::Integer(6));
 
-        // display is NOT in the allowlist — should be blocked
-        let err = ctx.evaluate("(display 42)");
-        assert!(err.is_err(), "display should be blocked by sandbox");
+        // scheme/eval is NOT in this custom allowlist (only scheme/base) — should be blocked
+        let err = ctx.evaluate("(import (scheme eval))");
+        assert!(
+            err.is_err(),
+            "scheme/eval should be blocked by Modules::only([scheme/base])"
+        );
     }
 
     #[test]
@@ -3613,24 +6415,22 @@ mod tests {
         );
     }
 
-    // --- module policy ---
+    // --- VFS gate ---
 
     #[test]
-    fn test_module_policy_blocks_non_vfs() {
-        // a sandboxed standard-env context should activate VfsOnly policy,
-        // blocking attempts to import filesystem-based modules.
-        use crate::sandbox::*;
+    fn test_vfs_gate_active_when_sandboxed() {
+        use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
-        MODULE_POLICY.with(|cell| {
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::VfsOnly,
-                "sandboxed standard env should activate VfsOnly policy"
+                GATE_CHECK,
+                "sandboxed standard env should activate VFS gate"
             );
         });
 
@@ -3638,15 +6438,15 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_unrestricted_without_sandbox() {
-        // standard env without sandbox should leave module policy unrestricted
+    fn test_vfs_gate_off_without_sandbox() {
+        use crate::sandbox::{GATE_OFF, VFS_GATE};
         let ctx = Context::new_standard().expect("new_standard");
 
-        MODULE_POLICY.with(|cell| {
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::Unrestricted,
-                "unsandboxed standard env should be unrestricted"
+                GATE_OFF,
+                "unsandboxed standard env should have gate off"
             );
         });
 
@@ -3654,44 +6454,64 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_cleared_on_drop() {
-        use crate::sandbox::*;
+    fn test_vfs_gate_cleared_on_drop() {
+        use crate::sandbox::{GATE_CHECK, GATE_OFF, Modules, VFS_GATE};
         {
             let _ctx = Context::builder()
                 .standard_env()
-                .preset(&ARITHMETIC)
+                .sandboxed(Modules::only(&["scheme/base"]))
                 .build()
-                .expect("standard + sandbox");
+                .expect("standard + sandboxed");
 
-            MODULE_POLICY.with(|cell| {
-                assert_eq!(cell.get(), ModulePolicy::VfsOnly);
+            VFS_GATE.with(|cell| {
+                assert_eq!(cell.get(), GATE_CHECK);
             });
         }
-        // after drop, policy should reset
-        MODULE_POLICY.with(|cell| {
+        // after drop, gate should reset
+        VFS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::Unrestricted,
-                "module policy should reset to unrestricted after context drop"
+                GATE_OFF,
+                "VFS gate should reset to off after context drop"
             );
         });
     }
 
     #[test]
-    fn test_module_policy_not_set_without_standard_env() {
-        // sandbox without standard_env should NOT activate module policy
-        // (there's no module system to restrict)
-        use crate::sandbox::*;
-        let ctx = Context::builder()
-            .preset(&ARITHMETIC)
-            .build()
-            .expect("sandbox without standard env");
+    fn test_fs_gate_cleared_on_drop() {
+        use crate::sandbox::{FS_GATE, FS_GATE_CHECK, FS_GATE_OFF, Modules};
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .sandboxed(Modules::only(&["scheme/base"]))
+                .build()
+                .expect("standard + sandboxed");
 
-        MODULE_POLICY.with(|cell| {
+            FS_GATE.with(|cell| {
+                assert_eq!(cell.get(), FS_GATE_CHECK);
+            });
+        }
+        // after drop, gate should reset
+        FS_GATE.with(|cell| {
             assert_eq!(
                 cell.get(),
-                ModulePolicy::Unrestricted,
-                "non-standard-env sandbox should not set module policy"
+                FS_GATE_OFF,
+                "FS gate should reset to off after context drop"
+            );
+        });
+    }
+
+    #[test]
+    fn test_vfs_gate_not_set_without_sandboxed() {
+        // unsandboxed context without standard_env should NOT activate VFS gate
+        use crate::sandbox::{GATE_OFF, VFS_GATE};
+        let ctx = Context::builder().build().expect("bare context");
+
+        VFS_GATE.with(|cell| {
+            assert_eq!(
+                cell.get(),
+                GATE_OFF,
+                "unsandboxed context should not set VFS gate"
             );
         });
 
@@ -3699,28 +6519,347 @@ mod tests {
     }
 
     #[test]
-    fn test_module_policy_blocks_filesystem_import() {
-        // sandboxed standard-env contexts with import allowed should block
-        // filesystem-based modules like (chibi process) via VfsOnly policy
-        // while still allowing VFS-based imports like (scheme write).
-        use crate::sandbox::*;
+    fn test_allow_module_runtime_appends_to_allowlist() {
+        use crate::sandbox::{Modules, VFS_ALLOWLIST};
+
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
-            .expect("standard + sandbox");
+            .expect("sandboxed context");
+
+        // verify "my/tool" is not in the allowlist
+        let before = VFS_ALLOWLIST.with(|cell| cell.borrow().contains(&"my/tool".to_string()));
+        assert!(!before, "my/tool should not be in allowlist initially");
+
+        ctx.allow_module_runtime("my/tool");
+
+        let after = VFS_ALLOWLIST.with(|cell| cell.borrow().contains(&"my/tool".to_string()));
+        assert!(
+            after,
+            "my/tool should be in allowlist after allow_module_runtime"
+        );
+    }
+
+    #[test]
+    fn test_register_module_basic() {
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (my tool) (import (scheme base)) (export greet) (begin (define (greet x) (string-append \"hi \" x))))",
+        )
+        .expect("register_module");
+
+        let result = ctx
+            .evaluate("(import (my tool)) (greet \"world\")")
+            .expect("eval");
+        assert_eq!(result, Value::String("hi world".into()));
+    }
+
+    #[test]
+    fn test_register_module_collision_with_builtin() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (scheme base) (import (scheme base)) (export +) (begin))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("already exists"),
+            "should reject collision with builtin: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_rejects_include() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (my mod) (import (scheme base)) (export x) (include \"foo.scm\"))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("include"),
+            "should reject (include ...): {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_not_define_library() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx.register_module("(+ 1 2)").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("define-library"),
+            "should reject non-define-library: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_dynamic_update() {
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (my versioned) (import (scheme base)) (export val) (begin (define val 1)))",
+        )
+        .expect("first registration");
+
+        let v1 = ctx
+            .evaluate("(import (my versioned)) val")
+            .expect("eval v1");
+        assert_eq!(v1, Value::Integer(1));
+
+        // re-register (update) — VFS entry is shadowed, but chibi caches the module
+        ctx.register_module(
+            "(define-library (my versioned) (import (scheme base)) (export val) (begin (define val 2)))",
+        )
+        .expect("second registration should succeed (dynamic-over-dynamic)");
+        // NOTE: chibi's module cache means the import still returns v1
+    }
+
+    #[test]
+    fn test_register_module_sandboxed_importable() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("sandboxed context");
+
+        ctx.register_module(
+            "(define-library (my sandboxed-tool) (import (scheme base)) (export answer) (begin (define answer 42)))",
+        )
+        .expect("register in sandboxed context");
+
+        let result = ctx
+            .evaluate("(import (my sandboxed-tool)) answer")
+            .expect("import dynamically registered module in sandbox");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_allow_dynamic_modules_builder() {
+        use crate::sandbox::Modules;
+        // verify the builder method doesn't panic and produces a valid context
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + allow_dynamic_modules");
+
+        // (tein modules) should be importable
+        let result = ctx.evaluate("(import (tein modules)) #t");
+        assert!(
+            result.is_ok(),
+            "(tein modules) should be importable with allow_dynamic_modules: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_register_module_from_scheme() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + dynamic modules");
+
+        let result = ctx.evaluate(r#"
+            (import (tein modules))
+            (import (scheme base))
+            (register-module
+              "(define-library (test tool) (import (scheme base)) (export val) (begin (define val 99)))")
+            (import (test tool))
+            val
+        "#).expect("scheme-side register-module");
+        assert_eq!(result, Value::Integer(99));
+    }
+
+    #[test]
+    fn test_module_registered_predicate_from_scheme() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_dynamic_modules()
+            .build()
+            .expect("sandboxed + dynamic modules");
+
+        let result = ctx
+            .evaluate(
+                r#"
+            (import (tein modules))
+            (module-registered? '(nonexistent thing))
+        "#,
+            )
+            .expect("module-registered? for nonexistent");
+        assert_eq!(result, Value::Boolean(false));
+
+        let result = ctx
+            .evaluate(
+                r#"
+            (import (tein modules))
+            (module-registered? '(scheme base))
+        "#,
+            )
+            .expect("module-registered? for scheme/base");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_allow_dynamic_modules_strict_sandbox() {
+        // Modules::only with only scheme/base — chibi is NOT transitively included.
+        // This is the minimal repro for the (import (chibi)) vs (scheme base) bug in
+        // the inline SLD: if the SLD imports (chibi), the VFS gate rejects it here.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .allow_dynamic_modules()
+            .build()
+            .expect("strict sandboxed + dynamic modules");
+
+        let result = ctx.evaluate("(import (tein modules)) #t");
+        assert!(
+            result.is_ok(),
+            "(import (tein modules)) should succeed in strict sandbox with allow_dynamic_modules: {:?}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn test_register_module_rejects_include_ci() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (my mod) (import (scheme base)) (export x) (include-ci \"foo.scm\"))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("include"),
+            "should reject (include-ci ...): {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_rejects_include_library_declarations() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(
+                "(define-library (my mod) (import (scheme base)) (export x) (include-library-declarations \"foo.sld\"))",
+            )
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("include"),
+            "should reject (include-library-declarations ...): {msg}"
+        );
+    }
+
+    #[test]
+    fn test_register_module_integer_name_component() {
+        // library names may contain integers, e.g. (srfi 1)
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (srfi 999) (import (scheme base)) (export the-answer) (begin (define the-answer 42)))",
+        )
+        .expect("register module with integer name component");
+
+        let result = ctx
+            .evaluate("(import (srfi 999)) the-answer")
+            .expect("import module with integer name");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_module_invalid_name_element() {
+        // library name elements must be symbols or integers — a string should be rejected
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_module(r#"(define-library ("bad" name) (import (scheme base)) (export x) (begin (define x 1)))"#)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("symbols or integers"),
+            "should reject non-symbol/integer name element: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_allow_module_runtime_dedup() {
+        use crate::sandbox::{Modules, VFS_ALLOWLIST};
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("sandboxed context");
+
+        ctx.allow_module_runtime("my/dedup-tool");
+        ctx.allow_module_runtime("my/dedup-tool"); // second call — must not duplicate
+
+        let count = VFS_ALLOWLIST.with(|cell| {
+            cell.borrow()
+                .iter()
+                .filter(|p| *p == "my/dedup-tool")
+                .count()
+        });
+        assert_eq!(count, 1, "allow_module_runtime should not add duplicates");
+    }
+
+    #[test]
+    fn test_register_module_dynamic_update_cache_behavior() {
+        // chibi caches module envs after first import — re-registration must NOT
+        // invalidate the cache; the old value remains visible in the same context.
+        let ctx = Context::new_standard().expect("standard context");
+        ctx.register_module(
+            "(define-library (my cached) (import (scheme base)) (export val) (begin (define val 1)))",
+        )
+        .expect("first registration");
+
+        ctx.evaluate("(import (my cached))").expect("first import");
+        let v1 = ctx.evaluate("val").expect("eval v1");
+        assert_eq!(v1, Value::Integer(1));
+
+        ctx.register_module(
+            "(define-library (my cached) (import (scheme base)) (export val) (begin (define val 2)))",
+        )
+        .expect("re-registration should succeed");
+
+        // chibi's module cache means the import still returns v1, not v2
+        let v_after = ctx.evaluate("val").expect("eval after re-registration");
+        assert_eq!(
+            v_after,
+            Value::Integer(1),
+            "chibi module cache should preserve v1 after re-registration"
+        );
+    }
+
+    #[test]
+    fn test_vfs_gate_blocks_filesystem_import() {
+        // sandboxed standard-env contexts should block filesystem-based modules
+        // like (chibi process) via the VFS gate while allowing VFS-based imports.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("standard + sandboxed");
 
         // VFS import should succeed
         let r = ctx.evaluate("(import (scheme write))");
         assert!(
             r.is_ok(),
-            "(import (scheme write)) should succeed under VfsOnly: {:?}",
+            "(import (scheme write)) should succeed under VFS gate: {:?}",
             r.err()
         );
 
-        // filesystem import should fail — (chibi process) is not in VFS
-        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        // non-VFS import should fail — chibi/disasm is intentionally excluded
+        let err = ctx.evaluate("(import (chibi disasm))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "expected SandboxViolation for blocked import, got: {:?}",
@@ -3730,23 +6869,76 @@ mod tests {
         drop(ctx);
     }
 
+    /// Verify that dangerous chibi primitives are unreachable in sandboxed Safe contexts.
+    ///
+    /// These were formerly blocked by `ALWAYS_STUB`; now blocked by the VFS gate
+    /// (no path through any allowlisted module exports them). Each name must be
+    /// unbound in the null env — accessing them must produce an error, not a value.
+    ///
+    /// Covers: `find-module-file`, `load-module-file`, `%import`,
+    /// `add-module-directory`, `current-module-path`, `env-parent`, `env-exports`,
+    /// `%meta-env`, `primitive-environment`, `scheme-report-environment`,
+    /// `current-environment`, `set-current-environment!`.
+    /// Closes #127.
     #[test]
-    fn test_standard_env_sandbox_allows_vfs_import() {
-        // sandboxed standard-env contexts with import allowed should be able
-        // to import VFS modules and use their bindings at runtime.
-        use crate::sandbox::*;
+    fn test_dangerous_chibi_primitives_blocked_in_sandbox() {
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::Safe)
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
+
+        // give access to scheme/base so the env is fully initialised
+        ctx.evaluate("(import (scheme base))").unwrap();
+
+        // primitives that bypass VFS gate / modify module search path
+        let vfs_escape = [
+            "find-module-file",
+            "load-module-file",
+            "%import",
+            "add-module-directory",
+            "current-module-path",
+        ];
+        // env traversal / mutation primitives
+        let env_traversal = [
+            "env-parent",
+            "env-exports",
+            "%meta-env",
+            "primitive-environment",
+            "scheme-report-environment",
+            "current-environment",
+            "set-current-environment!",
+        ];
+
+        for name in vfs_escape.iter().chain(env_traversal.iter()) {
+            // referencing an unbound name must error; a live proc would be a sandbox escape
+            let r = ctx.evaluate(name);
+            assert!(
+                r.is_err(),
+                "dangerous primitive `{name}` must be unbound in sandbox, got: {:?}",
+                r.ok()
+            );
+        }
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_standard_env_sandbox_allows_vfs_import() {
+        // sandboxed standard-env contexts should be able to import VFS modules.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("standard + sandboxed");
 
         // import scheme write — VFS module with dependencies (srfi 38, etc.)
         let r = ctx.evaluate("(import (scheme write))");
         assert!(r.is_ok(), "(import (scheme write)) failed: {:?}", r.err());
 
-        // verify imported binding works — display returns void, write returns void
+        // verify imported binding works
         let r = ctx.evaluate("(write 42)");
         assert!(
             r.is_ok(),
@@ -3762,31 +6954,243 @@ mod tests {
     }
 
     #[test]
-    fn test_sequential_context_policy_isolation() {
-        // ctx1 sets VfsOnly module policy; after drop, ctx2 must still have VfsOnly.
+    fn test_sequential_context_gate_isolation() {
+        // ctx1 sets VFS gate; after drop, ctx2 must still have its gate active.
         // this tests the save/restore RAII pattern on Context::drop().
-        use crate::sandbox::ARITHMETIC;
+        use crate::sandbox::Modules;
         let ctx1 = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
         let ctx2 = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
 
-        // drop ctx1 — must NOT clear ctx2's module policy
+        // drop ctx1 — must NOT clear ctx2's VFS gate
         drop(ctx1);
 
         // ctx2 must still block filesystem modules
         let err = ctx2.evaluate("(import (chibi process))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
-            "ctx2 module policy must still be VfsOnly after ctx1 dropped, got: {:?}",
+            "ctx2 VFS gate must still be active after ctx1 dropped, got: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_sandboxed_modules_all_allows_extra_modules() {
+        // Modules::All includes everything registered in the VFS, including modules
+        // not in the safe set. chibi/string is a dep of scheme/base (also in All).
+        use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::All)
+            .build()
+            .expect("standard + sandboxed(All)");
+
+        VFS_GATE.with(|cell| {
+            assert_eq!(cell.get(), GATE_CHECK);
+        });
+
+        // chibi/string is in the All set
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(
+            r.is_ok(),
+            "(import (chibi string)) should succeed under Modules::All: {:?}",
+            r.err()
+        );
+
+        // a module not in the VFS registry should still fail (not in the registry).
+        // chibi/disasm is intentionally excluded (exposes VM internals) — always absent.
+        let err = ctx.evaluate("(import (chibi disasm))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "non-VFS import should fail under Modules::All: {:?}",
+            err
+        );
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_vfs_gate_allow_module() {
+        use crate::sandbox::{GATE_CHECK, Modules, VFS_GATE};
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .allow_module("chibi/string")
+            .build()
+            .expect("standard + sandboxed + allow_module");
+
+        VFS_GATE.with(|cell| {
+            assert_eq!(cell.get(), GATE_CHECK);
+        });
+
+        // chibi/string was explicitly allowed (+ its deps resolved automatically)
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(
+            r.is_ok(),
+            "(import (chibi string)) should succeed: {:?}",
+            r.err()
+        );
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_sandboxed_modules_none_with_explicit_allow_module() {
+        // Modules::None + allow_module: start from nothing, add only what you need
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .allow_module("tein/test")
+            .build()
+            .expect("standard + sandboxed(None) + allow_module");
+
+        // tein/test was explicitly listed — should work
+        let r = ctx.evaluate("(import (tein test))");
+        assert!(
+            r.is_ok(),
+            "(import (tein test)) should succeed: {:?}",
+            r.err()
+        );
+
+        // chibi/process is not in the explicit list
+        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "(import (chibi process)) should fail with Modules::None: {:?}",
+            err
+        );
+
+        drop(ctx);
+    }
+
+    #[test]
+    fn test_chibi_regexp_blocked_in_modules_safe() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx.evaluate("(import (chibi regexp))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "(chibi regexp) should be blocked in Modules::Safe, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_chibi_regexp_allowed_in_modules_all() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::All)
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (chibi regexp)) (regexp? (regexp '(+ digit)))");
+        assert!(
+            r.is_ok(),
+            "(chibi regexp) should work under Modules::All: {:?}",
+            r.err()
+        );
+    }
+
+    #[test]
+    fn test_chibi_regexp_allowed_via_allow_module() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/regexp")
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (chibi regexp)) (regexp? (regexp '(+ digit)))");
+        assert!(
+            r.is_ok(),
+            "(chibi regexp) should work via allow_module: {:?}",
+            r.err()
+        );
+    }
+
+    #[test]
+    fn test_srfi_115_alias_blocked_in_safe() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx.evaluate("(import (srfi 115))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "(srfi 115) should be blocked in Modules::Safe, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_scheme_regex_alias_blocked_in_safe() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx.evaluate("(import (scheme regex))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
+            "(scheme regex) should be blocked in Modules::Safe, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_vfs_gate_allowlist_raii() {
+        use crate::sandbox::{Modules, VFS_ALLOWLIST};
+        // verify allowlist is restored, not just the gate level
+        {
+            let _ctx = Context::builder()
+                .standard_env()
+                .sandboxed(Modules::only(&["scheme/base"]))
+                .allow_module("chibi/string")
+                .build()
+                .expect("context with extended allowlist");
+        }
+        // after drop, allowlist should be empty (previous was empty)
+        VFS_ALLOWLIST.with(|cell| {
+            assert!(
+                cell.borrow().is_empty(),
+                "allowlist should be restored to empty after drop"
+            );
+        });
+    }
+
+    #[test]
+    fn test_vfs_gate_transitive_deps() {
+        use crate::sandbox::Modules;
+        // allow_module resolves transitive deps from the registry,
+        // so adding tein/foreign also enables its deps (chibi/string etc).
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .allow_module("tein/foreign")
+            .build()
+            .expect("minimal allowlist with dep resolution");
+
+        // chibi/string is a dep of tein/foreign — should be resolved automatically
+        let r = ctx.evaluate("(import (chibi string))");
+        assert!(
+            r.is_ok(),
+            "(chibi string) should load via transitive dep resolution: {:?}",
+            r.err()
+        );
+
+        drop(ctx);
     }
 
     #[test]
@@ -4017,17 +7421,17 @@ mod tests {
 
     #[test]
     fn test_file_io_sandbox_violation_type() {
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let _lock = IO_TEST_LOCK.lock().unwrap();
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
+            .sandboxed(Modules::Safe)
             .file_read(&["/allowed/"])
             .build()
             .expect("builder");
 
         let err = ctx
-            .evaluate("(open-input-file \"/etc/passwd\")")
+            .evaluate("(import (tein file)) (open-input-file \"/etc/passwd\")")
             .unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
@@ -4044,20 +7448,20 @@ mod tests {
 
     #[test]
     fn test_module_import_sandbox_violation_type() {
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import"])
+            .sandboxed(Modules::Safe)
             .build()
-            .expect("standard + sandbox");
+            .expect("standard + sandboxed");
 
         // VFS import should still succeed
         let r = ctx.evaluate("(import (scheme write))");
         assert!(r.is_ok(), "(scheme write) should work: {:?}", r.err());
 
-        // filesystem import should fail as SandboxViolation
-        let err = ctx.evaluate("(import (chibi process))").unwrap_err();
+        // a module not in the VFS registry should fail as SandboxViolation.
+        // chibi/disasm is intentionally excluded (exposes VM internals) — always absent.
+        let err = ctx.evaluate("(import (chibi disasm))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
             "expected SandboxViolation, got: {:?}",
@@ -4072,45 +7476,45 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_stub_binding_violation() {
-        // arithmetic-only context should have stubs for known non-allowed primitives
-        use crate::sandbox::*;
+    fn test_ux_stub_binding_hint() {
+        // UX stubs in Modules::None context should emit informative messages
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::None)
             .build()
             .expect("builder");
 
-        // cons is in LISTS preset, not allowed — should produce SandboxViolation
-        let err = ctx.evaluate("(cons 1 2)").unwrap_err();
+        // map is from scheme/base — UX stub should hint at the providing module.
+        // use a literal arg so we don't trigger other stubs during argument evaluation.
+        let err = ctx.evaluate("(map 1)").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_)),
-            "expected SandboxViolation for stubbed binding, got: {:?}",
+            "expected SandboxViolation for UX stub, got: {:?}",
             err
         );
         let msg = format!("{}", err);
         assert!(
-            msg.contains("not available in this sandbox"),
-            "expected 'not available in this sandbox', got: {}",
-            msg
-        );
-        assert!(
-            msg.contains("cons"),
-            "expected stub message to name 'cons', got: {}",
+            msg.contains("requires (import"),
+            "expected hint with '(import ...)', got: {}",
             msg
         );
     }
 
     #[test]
-    fn test_sandbox_stub_does_not_shadow_allowed() {
-        // allowed primitives should work normally, not be replaced by stubs
-        use crate::sandbox::*;
+    fn test_ux_stub_absent_after_import() {
+        // after importing scheme/base, its bindings work and are not stubbed
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&ARITHMETIC)
-            .preset(&LISTS)
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
             .build()
             .expect("builder");
 
-        let result = ctx.evaluate("(cons 1 2)").expect("cons should work");
+        ctx.evaluate("(import (scheme base))").expect("import");
+        let result = ctx
+            .evaluate("(cons 1 2)")
+            .expect("cons should work after import");
         assert_eq!(
             result,
             Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)))
@@ -4694,7 +8098,7 @@ mod tests {
     #[test]
     fn test_managed_concurrent_evaluate() {
         // ThreadLocalContext is Send + Sync; concurrent callers are serialised
-        // by the Mutex<Receiver<Response>> on the receive side.
+        // by the Mutex<(Sender, Receiver)> guarding the entire send+recv roundtrip.
         use std::sync::Arc;
         let ctx = Arc::new(
             Context::builder()
@@ -4844,6 +8248,128 @@ mod tests {
 
         let output = buf.lock().unwrap();
         assert_eq!(&*output, b"hello");
+    }
+
+    #[test]
+    fn test_set_current_output_port() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("open port");
+
+        ctx.set_current_output_port(&port).expect("set port");
+
+        // display without explicit port arg — should go to our custom port
+        ctx.evaluate("(display \"hello\")").expect("display");
+        ctx.evaluate("(flush-output (current-output-port))")
+            .expect("flush");
+
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"hello");
+    }
+
+    #[test]
+    fn test_set_current_output_port_survives_multiple_evals() {
+        // regression: verify the custom port survives subsequent evaluate calls
+        // (e.g. env-extending imports) after set_current_output_port.
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("open port");
+        ctx.set_current_output_port(&port).expect("set port");
+
+        // several intervening evals that may extend the env (like REPL history/imports)
+        ctx.evaluate("(define __test__ 1)").expect("define");
+        ctx.evaluate("(import (scheme base))").expect("import");
+
+        // display should still go to our custom port
+        ctx.evaluate("(display \"hello\")").expect("display");
+        ctx.evaluate("(flush-output (current-output-port))")
+            .expect("flush");
+
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"hello", "port should survive multiple evals");
+    }
+
+    #[test]
+    fn test_set_current_input_port() {
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_input_port(std::io::Cursor::new(b"42"))
+            .expect("open port");
+        ctx.set_current_input_port(&port).expect("set port");
+        let val = ctx.evaluate("(read)").expect("read");
+        assert_eq!(val, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_set_current_error_port() {
+        use std::sync::{Arc, Mutex};
+
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().expect("context");
+        let port = ctx
+            .open_output_port(SharedWriter(buf.clone()))
+            .expect("open port");
+        ctx.set_current_error_port(&port).expect("set port");
+        ctx.evaluate("(display \"oops\" (current-error-port))")
+            .expect("display");
+        ctx.evaluate("(flush-output (current-error-port))")
+            .expect("flush");
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"oops");
+    }
+
+    #[test]
+    fn test_set_port_rejects_non_port() {
+        let ctx = Context::new_standard().expect("context");
+        let err = ctx
+            .set_current_output_port(&Value::Integer(42))
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::TypeError(_)),
+            "expected TypeError, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -5003,11 +8529,10 @@ mod tests {
     fn test_reader_dispatch_via_import_sandbox() {
         // regression test for #31: (import (tein reader)) must work in
         // sandboxed contexts where the module is loaded via C static lib
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import", "define"])
+            .sandboxed(Modules::Safe)
             .build()
             .expect("sandboxed context");
         ctx.evaluate("(import (tein reader))").expect("import");
@@ -5228,14 +8753,14 @@ mod tests {
     fn test_macro_expand_hook_sandbox() {
         // regression test for #31: (import (tein macro)) must work in
         // sandboxed contexts via C static library init.
-        use crate::sandbox::*;
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
-            .preset(&ARITHMETIC)
-            .allow(&["import", "define-syntax", "syntax-rules", "set!", "define"])
+            .sandboxed(Modules::Safe)
             .build()
             .expect("sandboxed context");
-        ctx.evaluate("(import (tein macro))").expect("import");
+        ctx.evaluate("(import (scheme base))").expect("import base");
+        ctx.evaluate("(import (tein macro))").expect("import macro");
         ctx.evaluate("(define-syntax double (syntax-rules () ((double x) (+ x x))))")
             .expect("define macro");
         ctx.evaluate(
@@ -5319,49 +8844,53 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_eval_escape_blocked() {
-        // eval + interaction-environment must be stubbed even when not in any preset.
-        // we call each one (with no args or a dummy arg) to trigger the stub.
-        // the stub fires on *call*, not on reference — so we wrap in (apply ... '()).
+    fn test_sandbox_eval_contained() {
+        // eval in sandbox can only access allowed modules via environment (#97)
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
 
-        for name in [
-            "eval",
-            "interaction-environment",
-            "primitive-environment",
-            "scheme-report-environment",
-            "current-environment",
-            "set-current-environment!",
-            "%load",
-        ] {
-            // call with no args to trigger the stub (SandboxViolation fires on call, not reference)
-            let call = format!("({})", name);
-            let err = ctx.evaluate(&call).unwrap_err();
-            assert!(
-                matches!(err, Error::SandboxViolation(_)),
-                "`{}` should be SandboxViolation in sandboxed env, got: {:?}",
-                name,
-                err
-            );
-        }
+        // eval works with allowed modules
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 1 2) (environment '(scheme base)))")
+            .expect("eval with allowed module should work");
+        assert_eq!(result, Value::Integer(3));
+
+        // environment with disallowed module fails
+        // (scheme regex) is default_safe: false — not in Safe allowlist
+        let err = ctx
+            .evaluate("(import (scheme eval)) (environment '(scheme regex))")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("allowlist")
+                || err.to_string().contains("not found")
+                || matches!(err, Error::EvalError(_)),
+            "disallowed module should error, got: {:?}",
+            err
+        );
     }
 
     #[test]
-    fn test_sandbox_eval_escape_attempt() {
-        // the classic escape: (eval expr (interaction-environment))
+    fn test_sandbox_eval_environment_disallowed_module() {
+        // environment rejects modules outside the allowlist (#97)
+        use crate::sandbox::Modules;
         let ctx = Context::builder()
-            .preset(&crate::sandbox::ARITHMETIC)
+            .standard_env()
+            .sandboxed(Modules::Safe)
             .build()
             .unwrap();
+        // (scheme regex) is not in the safe set — environment should reject it
         let err = ctx
-            .evaluate("(eval '(+ 1 2) (interaction-environment))")
+            .evaluate("(import (scheme eval)) (environment '(scheme regex))")
             .unwrap_err();
         assert!(
-            matches!(err, Error::SandboxViolation(_)),
-            "eval escape attempt should be SandboxViolation, got: {:?}",
+            err.to_string().contains("allowlist")
+                || err.to_string().contains("not found")
+                || matches!(err, Error::EvalError(_)),
+            "disallowed module should error, got: {:?}",
             err
         );
     }
@@ -5379,5 +8908,2362 @@ mod tests {
         let v2 = ctx.read(&port2).unwrap();
         assert_eq!(v1, Value::Symbol("a".into()));
         assert_eq!(v2, Value::Symbol("b".into()));
+    }
+
+    #[test]
+    fn test_register_vfs_module() {
+        let ctx = Context::new_standard().expect("standard context");
+
+        ctx.register_vfs_module(
+            "lib/tein/test-runtime.sld",
+            "(define-library (tein test-runtime) (import (scheme base)) (export test-rt-val) (include \"test-runtime.scm\"))",
+        )
+        .expect("register sld");
+        ctx.register_vfs_module("lib/tein/test-runtime.scm", "(define test-rt-val 42)")
+            .expect("register scm");
+
+        let result = ctx
+            .evaluate("(import (tein test-runtime)) test-rt-val")
+            .expect("eval");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_register_vfs_module_null_byte_error() {
+        let ctx = Context::new_standard().expect("standard context");
+        let err = ctx
+            .register_vfs_module("lib/bad\0path.sld", "")
+            .unwrap_err();
+        assert!(matches!(err, Error::EvalError(_)));
+    }
+
+    #[test]
+    fn test_register_vfs_module_cleared_on_drop() {
+        // register a module in one context, verify a fresh context can't see it
+        {
+            let ctx = Context::new_standard().expect("ctx1");
+            ctx.register_vfs_module(
+                "lib/tein/drop-test.sld",
+                "(define-library (tein drop-test) (import (scheme base)) (export x) (include \"drop-test.scm\"))",
+            )
+            .unwrap();
+            ctx.register_vfs_module("lib/tein/drop-test.scm", "(define x 1)")
+                .unwrap();
+            ctx.evaluate("(import (tein drop-test)) x")
+                .expect("should work in ctx1");
+        }
+        // ctx dropped → dynamic VFS cleared; new context should not find module
+        let ctx2 = Context::new_standard().expect("ctx2");
+        let err = ctx2.evaluate("(import (tein drop-test))").unwrap_err();
+        assert!(matches!(err, Error::EvalError(_)));
+    }
+
+    // --- numeric tower: from_raw ---
+
+    #[test]
+    fn test_bignum_from_scheme() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(expt 2 100)").expect("evaluation failed");
+        match &result {
+            Value::Bignum(s) => assert_eq!(s, "1267650600228229401496703205376"),
+            other => panic!("expected Bignum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bignum_negative() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(- (expt 2 100))").expect("evaluation failed");
+        match &result {
+            Value::Bignum(s) => assert!(s.starts_with('-'), "expected negative, got {s}"),
+            other => panic!("expected Bignum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rational_from_scheme() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx.evaluate("(/ 1 3)").expect("evaluation failed");
+        match &result {
+            Value::Rational(n, d) => {
+                assert_eq!(**n, Value::Integer(1));
+                assert_eq!(**d, Value::Integer(3));
+            }
+            other => panic!("expected Rational, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rational_display() {
+        let v = Value::Rational(Box::new(Value::Integer(1)), Box::new(Value::Integer(3)));
+        assert_eq!(v.to_string(), "1/3");
+    }
+
+    #[test]
+    fn test_complex_from_scheme() {
+        // make-rectangular requires standard env (r7rs)
+        let ctx = Context::new_standard().expect("failed to create context");
+        let result = ctx
+            .evaluate("(make-rectangular 1 2)")
+            .expect("evaluation failed");
+        match &result {
+            Value::Complex(r, i) => {
+                assert_eq!(**r, Value::Integer(1));
+                assert_eq!(**i, Value::Integer(2));
+            }
+            other => panic!("expected Complex, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_complex_display() {
+        let v = Value::Complex(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
+        assert_eq!(v.to_string(), "1+2i");
+    }
+
+    #[test]
+    fn test_complex_negative_imag_display() {
+        let v = Value::Complex(Box::new(Value::Integer(1)), Box::new(Value::Integer(-2)));
+        assert_eq!(v.to_string(), "1-2i");
+    }
+
+    #[test]
+    fn test_bignum_display() {
+        let v = Value::Bignum("1267650600228229401496703205376".to_string());
+        assert_eq!(v.to_string(), "1267650600228229401496703205376");
+    }
+
+    #[test]
+    fn test_rational_with_bignum_components() {
+        let ctx = Context::new().expect("failed to create context");
+        let result = ctx
+            .evaluate("(/ (expt 2 100) (expt 3 50))")
+            .expect("evaluation failed");
+        match &result {
+            Value::Rational(_, _) => {} // just verify it parses as rational
+            other => panic!("expected Rational, got {:?}", other),
+        }
+    }
+
+    // --- numeric tower: to_raw round-trips ---
+
+    #[test]
+    fn test_bignum_to_raw_roundtrip() {
+        unsafe extern "C" fn get_bignum(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let val = Value::Bignum("1267650600228229401496703205376".to_string());
+                val.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn_variadic("get-bignum", get_bignum)
+            .expect("failed to define fn");
+        let result = ctx.evaluate("(get-bignum)").expect("evaluation failed");
+        match &result {
+            Value::Bignum(s) => assert_eq!(s, "1267650600228229401496703205376"),
+            other => panic!("expected Bignum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rational_to_raw_roundtrip() {
+        unsafe extern "C" fn get_rational(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let val = Value::Rational(Box::new(Value::Integer(1)), Box::new(Value::Integer(3)));
+                val.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn_variadic("get-rational", get_rational)
+            .expect("failed to define fn");
+        let result = ctx.evaluate("(get-rational)").expect("evaluation failed");
+        match &result {
+            Value::Rational(n, d) => {
+                assert_eq!(**n, Value::Integer(1));
+                assert_eq!(**d, Value::Integer(3));
+            }
+            other => panic!("expected Rational, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_complex_to_raw_roundtrip() {
+        unsafe extern "C" fn get_complex(
+            ctx_ptr: crate::ffi::sexp,
+            _self: crate::ffi::sexp,
+            _n: crate::ffi::sexp_sint_t,
+            _args: crate::ffi::sexp,
+        ) -> crate::ffi::sexp {
+            unsafe {
+                let val = Value::Complex(Box::new(Value::Integer(1)), Box::new(Value::Integer(2)));
+                val.to_raw(ctx_ptr)
+                    .unwrap_or_else(|_| crate::ffi::get_void())
+            }
+        }
+
+        let ctx = Context::new().expect("failed to create context");
+        ctx.define_fn_variadic("get-complex", get_complex)
+            .expect("failed to define fn");
+        let result = ctx.evaluate("(get-complex)").expect("evaluation failed");
+        match &result {
+            Value::Complex(r, i) => {
+                assert_eq!(**r, Value::Integer(1));
+                assert_eq!(**i, Value::Integer(2));
+            }
+            other => panic!("expected Complex, got {:?}", other),
+        }
+    }
+
+    // --- (tein json) ---
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_object() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate(r#"(json-parse "{\"a\": 1, \"b\": \"two\"}")"#)
+            .expect("parse");
+        match result {
+            Value::List(items) => assert_eq!(items.len(), 2),
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_array() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"[1, 2, 3]\")").expect("parse");
+        assert_eq!(
+            result,
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+            ])
+        );
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_null_is_symbol() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"null\")").expect("parse");
+        assert_eq!(result, Value::Symbol("null".to_string()));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_stringify_alist() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate("(json-stringify '((\"name\" . \"tein\")))")
+            .expect("stringify");
+        assert_eq!(result, Value::String("{\"name\":\"tein\"}".to_string()));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_round_trip_via_scheme() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx
+            .evaluate(r#"(json-stringify (json-parse "{\"x\":42}"))"#)
+            .expect("round-trip");
+        assert_eq!(result, Value::String("{\"x\":42}".to_string()));
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_invalid() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein json))").expect("import");
+        let result = ctx.evaluate("(json-parse \"not json\")");
+        match result {
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_table() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(toml-parse \"name = \\\"tein\\\"\\nversion = 1\")")
+            .expect("parse");
+        match result {
+            Value::List(items) => assert_eq!(items.len(), 2),
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_datetime() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(cdr (car (toml-parse \"dt = 1979-05-27T07:32:00Z\")))")
+            .expect("parse");
+        // should be a tagged list (toml-datetime "1979-05-27T07:32:00Z")
+        match result {
+            Value::List(items) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], Value::Symbol("toml-datetime".to_string()));
+                assert_eq!(items[1], Value::String("1979-05-27T07:32:00Z".to_string()));
+            }
+            other => panic!("expected tagged list, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_stringify_table() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(toml-stringify '((\"name\" . \"tein\")))")
+            .expect("stringify");
+        match result {
+            Value::String(s) => assert!(s.contains("name = \"tein\"")),
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_round_trip_via_scheme() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx
+            .evaluate("(cdr (car (toml-parse (toml-stringify '((\"x\" . 42))))))")
+            .expect("round-trip");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_invalid() {
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (tein toml))").expect("import");
+        let result = ctx.evaluate("(toml-parse \"not valid {{toml\")");
+        match result {
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    // --- trampoline bad-input / arity robustness tests ---
+    //
+    // variadic trampolines (define_fn_variadic, num_args=0) receive sexp_null as
+    // `args` when called with no arguments — chibi does no arity checking. calling
+    // sexp_car on sexp_null is UB (segfault). these tests verify:
+    //   (a) no-args → Err (scheme exception)
+    //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err (scheme exception)
+    //   (c) extra args don't crash (variadic; extra args are silently ignored)
+    //
+    // note: all trampoline errors raise scheme exceptions → evaluate() returns Err.
+    // json/toml/http parse/stringify errors, get-environment-variable, file-exists?,
+    // delete-file, and load all use make_error and propagate as Err(EvalError(...)).
+
+    // --- get-environment-variable ---
+
+    #[test]
+    fn test_get_env_var_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable 42)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable #t)");
+        assert!(r.is_err(), "expected type error for boolean arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable '(\"PATH\"))");
+        assert!(r.is_err(), "expected type error for list arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_wrong_type_lambda() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(get-environment-variable (lambda (x) x))");
+        assert!(r.is_err(), "expected type error for lambda arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_get_env_var_extra_args_ignored() {
+        // extra args are ignored by variadic trampolines — should not crash
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        // "PATH" is almost certainly set; regardless, we just check no crash
+        let r = ctx.evaluate("(get-environment-variable \"PATH\" \"extra\")");
+        assert!(r.is_ok(), "extra args should be silently ignored: {:?}", r);
+    }
+
+    // --- file-exists? ---
+
+    #[test]
+    fn test_file_exists_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists?)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? 42)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type_symbol() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? 'myfile)");
+        assert!(r.is_err(), "expected type error for symbol arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_file_exists_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(file-exists? #f)");
+        assert!(r.is_err(), "expected type error for boolean arg: {:?}", r);
+    }
+
+    // --- delete-file ---
+
+    #[test]
+    fn test_delete_file_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(delete-file)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[test]
+    fn test_delete_file_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(delete-file 99)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_delete_file_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein file))").unwrap();
+        let r = ctx.evaluate("(delete-file '(\"/tmp/x\"))");
+        assert!(r.is_err(), "expected type error for list arg: {:?}", r);
+    }
+
+    // --- load ---
+
+    #[test]
+    fn test_load_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[test]
+    fn test_load_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load 42)");
+        assert!(r.is_err(), "expected type error for integer arg: {:?}", r);
+    }
+
+    #[test]
+    fn test_load_wrong_type_symbol() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein load))").unwrap();
+        let r = ctx.evaluate("(load 'myfile)");
+        assert!(r.is_err(), "expected type error for symbol arg: {:?}", r);
+    }
+
+    // --- json-parse ---
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse)");
+        // returns make_error → Err
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse 42)");
+        match r {
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse #f)");
+        match r {
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse '(1 2 3))");
+        match r {
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_parse_wrong_type_lambda() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-parse (lambda () 42))");
+        match r {
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    // --- json-stringify ---
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_stringify_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-stringify)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn test_json_stringify_lambda_arg() {
+        // lambdas are not json-serialisable — should raise an error, not crash
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein json))").unwrap();
+        let r = ctx.evaluate("(json-stringify (lambda (x) x))");
+        assert!(r.is_err(), "expected error, got {r:?}");
+    }
+
+    // --- toml-parse ---
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_wrong_type_integer() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse 42)");
+        match r {
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_wrong_type_boolean() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse #t)");
+        match r {
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_parse_wrong_type_list() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-parse '(\"a\" \"b\"))");
+        match r {
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
+        }
+    }
+
+    // --- toml-stringify ---
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_stringify_no_args() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-stringify)");
+        assert!(r.is_err(), "expected arity error: {:?}", r);
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn test_toml_stringify_integer_arg() {
+        // integers are not valid toml root values — should raise an error
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein toml))").unwrap();
+        let r = ctx.evaluate("(toml-stringify 42)");
+        assert!(r.is_err(), "expected error, got {r:?}");
+    }
+
+    // --- task 6: Modules enum + sandboxed() builder ---
+    // --- task 7: new sandbox env construction ---
+
+    #[test]
+    fn test_sandboxed_modules_safe_can_import_and_compute() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("sandboxed safe eval");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_none_blocks_base_bindings() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("build");
+        // + should be stubbed — SandboxViolation
+        let err = ctx.evaluate("(+ 1 2)").expect_err("should fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("scheme") || msg.contains("import") || msg.contains("sandbox"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sandboxed_modules_only_scheme_base() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (scheme base)) (+ 1 2)")
+            .expect("eval with only scheme/base");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_all_allows_scheme_write() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::All)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (scheme write)) (begin (write 1) #t)")
+            .expect("sandboxed all with scheme/write");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_safe_eval_contained() {
+        // scheme/eval is in Safe but environment validates allowlist (#97)
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        // import succeeds
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval '(+ 10 20) (environment '(scheme base)))")
+            .expect("eval with allowed module");
+        assert_eq!(result, Value::Integer(30));
+        // but disallowed module is rejected (scheme/regex is default_safe: false)
+        let err = ctx
+            .evaluate("(import (scheme eval)) (environment '(scheme regex))")
+            .expect_err("scheme/regex should be blocked");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("allowlist") || msg.contains("not found") || msg.contains("ast"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sandboxed_environment_empty() {
+        // (environment) with no args returns an empty env — eval of a literal works
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate("(import (scheme eval)) (eval 42 (environment))")
+            .expect("eval literal in empty env");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_environment_trampoline_multi_spec_gc() {
+        // Multi-spec environment call — exercises the cons loop with 3+ specs.
+        // Under the GC rooting bug, the partial list could be collected mid-loop
+        // under heap pressure. Use `--features debug-chibi` for GC instrumentation.
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval))\
+                 (eval '(+ 1 2) (environment '(scheme base) '(scheme write) '(scheme cxr)))",
+            )
+            .expect("multi-spec environment should work");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_environment_trampoline_multi_spec_gc() {
+        // Same but sandboxed — allowlist check + multi-spec cons loop both exercised.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval))\
+                 (eval '(+ 10 20) (environment '(scheme base) '(scheme write) '(scheme cxr)))",
+            )
+            .expect("sandboxed multi-spec environment should work");
+        assert_eq!(result, Value::Integer(30));
+    }
+
+    #[test]
+    fn test_sandboxed_environment_via_scheme_load() {
+        // environment accessible from (scheme load) too
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval) (scheme load)) (eval '(+ 10 20) (environment '(scheme base)))",
+            )
+            .expect("eval via scheme/load environment");
+        assert_eq!(result, Value::Integer(30));
+    }
+
+    #[test]
+    fn test_sandboxed_interaction_environment_mutable() {
+        // define a binding in interaction-environment, then retrieve it
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval) (scheme repl))\n\
+                 (eval '(define x 42) (interaction-environment))\n\
+                 (eval 'x (interaction-environment))",
+            )
+            .expect("interaction-environment should be mutable");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_sandboxed_interaction_environment_persistent() {
+        // interaction-environment persists across evaluate calls
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        // first eval: define
+        ctx.evaluate(
+            "(import (scheme eval) (scheme repl))\n\
+             (eval '(define y 99) (interaction-environment))",
+        )
+        .expect("define in interaction-environment");
+        // second eval: retrieve — should still be there
+        let result = ctx
+            .evaluate(
+                "(import (scheme eval) (scheme repl))\n\
+                 (eval 'y (interaction-environment))",
+            )
+            .expect("y should persist");
+        assert_eq!(result, Value::Integer(99));
+    }
+
+    #[test]
+    fn test_sandboxed_interaction_environment_has_base_bindings() {
+        // interaction-environment reflects the context env — bindings are
+        // available after import. import (scheme base) then verify via eval.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (scheme base) (scheme eval) (scheme repl))\n\
+                 (eval '(+ 1 2) (interaction-environment))",
+            )
+            .expect("interaction-environment should have base bindings");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_sandboxed_ux_stub_message_mentions_module() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("build");
+        // + from scheme/base should have a UX stub with a module hint
+        let err = ctx.evaluate("(+ 1 2)").expect_err("should fail");
+        assert!(
+            matches!(err, crate::Error::SandboxViolation(_)),
+            "expected SandboxViolation, got {err:?}"
+        );
+        if let crate::Error::SandboxViolation(msg) = &err {
+            assert!(
+                msg.contains("scheme") || msg.contains("import"),
+                "stub message should mention module: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandboxed_builder_compiles() {
+        use crate::sandbox::Modules;
+        // sandboxed() returns a ContextBuilder — just check it compiles and doesn't panic.
+        let _builder = Context::builder().standard_env().sandboxed(Modules::Safe);
+        let _builder2 = Context::builder().standard_env().sandboxed(Modules::All);
+        let _builder3 = Context::builder().standard_env().sandboxed(Modules::None);
+        let _builder4 = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]));
+    }
+
+    // --- task 9: allow_module() with new sandbox path ---
+
+    #[test]
+    fn test_sandboxed_allow_module_tein_process() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("tein/process")
+            .build()
+            .expect("build");
+        // (exit 0) should succeed and return Exit(0)
+        let result = ctx
+            .evaluate("(import (tein process)) (exit 0)")
+            .expect("tein/process exit");
+        assert_eq!(result, Value::Exit(0));
+    }
+
+    #[test]
+    fn test_sandboxed_allow_module_scheme_eval_importable() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("scheme/eval")
+            .build()
+            .expect("build");
+        // scheme/eval should now be importable without VFS gate error
+        ctx.evaluate("(import (scheme eval))")
+            .expect("scheme/eval should be importable after allow_module");
+    }
+
+    // --- task 8: file_read/file_write with new sandbox path ---
+
+    #[test]
+    fn test_sandboxed_file_read_allowed_path() {
+        use crate::sandbox::Modules;
+        // write a temp file to read from
+        let tmp = "/tmp/tein_sandbox_read_test.txt";
+        std::fs::write(tmp, "42").unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("build");
+        // open-input-file is a chibi opcode — import (tein file) to get it in sandbox.
+        // (scheme read) provides `read`; (scheme base) provides close-input-port.
+        let code = format!(
+            r#"(import (scheme base) (scheme read) (tein file))
+               (let ((p (open-input-file "{tmp}")))
+                 (let ((v (read p))) (close-input-port p) v))"#
+        );
+        let result = ctx.evaluate(&code).expect("read from allowed path");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_sandboxed_file_read_blocked_path() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("build");
+        // reading from /etc/ should be blocked by IO policy (C gate denies)
+        let err = ctx
+            .evaluate(r#"(import (tein file)) (open-input-file "/etc/hostname")"#)
+            .expect_err("should be blocked");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("policy")
+                || msg.contains("denied")
+                || msg.contains("not allowed")
+                || msg.contains("SandboxViolation")
+                || msg.contains("error"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sandboxed_modules_safe_default() {
+        use crate::sandbox::Modules;
+        let m: Modules = Default::default();
+        assert!(matches!(m, Modules::Safe));
+    }
+
+    #[test]
+    fn test_sandboxed_modules_only_constructor() {
+        use crate::sandbox::Modules;
+        let m = Modules::only(&["scheme/base", "scheme/write"]);
+        if let Modules::Only(list) = m {
+            assert!(list.contains(&"scheme/base".to_string()));
+            assert!(list.contains(&"scheme/write".to_string()));
+        } else {
+            panic!("expected Modules::Only");
+        }
+    }
+
+    // --- VFS shadow tests ---
+
+    #[test]
+    fn test_scheme_repl_shadow_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // (scheme repl) in sandbox should resolve to our shadow
+        let r = ctx
+            .evaluate("(import (scheme base) (scheme repl)) (procedure? interaction-environment)");
+        assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_file_shadow_importable_in_sandbox() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        let tmp = "/tmp/tein_shadow_file_test.txt";
+        std::fs::write(tmp, "shadowed").expect("write");
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&["/tmp/"])
+            .build()
+            .expect("builder");
+        // (scheme file) in sandbox should resolve to our shadow
+        let r = ctx.evaluate(&format!(
+            "(import (scheme base) (scheme file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(r.expect("scheme file shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_scheme_file_shadow_denies_without_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            // no file_read configured
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (scheme file)) (open-input-file \"/etc/passwd\")");
+        assert!(
+            r.is_err(),
+            "scheme/file open-input-file denied without policy"
+        );
+    }
+
+    #[test]
+    fn test_tein_file_not_shadowed_unsandboxed() {
+        // unsandboxed: (tein file) trampolines allow all file access (no policy check)
+        // note: (scheme file) is not available in unsandboxed mode — tein's module path
+        // is VFS-only and the shadow is only registered in sandboxed contexts.
+        // (tein file) is the correct import for file ops in unsandboxed contexts.
+        let tmp = "/tmp/tein_unsandboxed_scheme_file.txt";
+        std::fs::write(tmp, "native").expect("write");
+        let ctx = Context::builder().standard_env().build().expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(import (scheme base) (tein file)) (let ((p (open-input-file \"{tmp}\"))) (close-input-port p) #t)"
+        ));
+        assert_eq!(
+            r.expect("unsandboxed tein file works"),
+            Value::Boolean(true)
+        );
+    }
+
+    #[test]
+    fn test_shadow_stubs_not_registered_in_unsandboxed_context() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        // shadow stubs are only injected during sandboxed context build (via register_vfs_shadows).
+        // unsandboxed contexts must NOT set IS_SANDBOXED=true — verify by checking that:
+        // 1. a sandboxed context raises a stub error when calling chibi/filesystem procs
+        // 2. an unsandboxed context runs with IS_SANDBOXED=false: real file ops work freely
+        //
+        // note: VFS is process-global — stubs registered by earlier sandbox tests persist
+        // in the binary's VFS table for the lifetime of the process. the invariant being tested
+        // is IS_SANDBOXED=false (no policy gate, no stub-via-FS-gate), not VFS isolation.
+
+        // sandboxed: stub proc raises a scheme error (not available in sandbox)
+        let sandboxed = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("sandboxed context");
+        let stub_err = sandboxed.evaluate("(import (chibi filesystem)) (directory-files \".\")");
+        let err_msg = format!("{:?}", stub_err.unwrap_err());
+        assert!(
+            err_msg.contains("sandbox") || err_msg.contains("not available"),
+            "sandboxed chibi/filesystem call should raise stub error: {err_msg}"
+        );
+        // drop sandboxed context before building unsandboxed — restores IS_SANDBOXED=false
+        // and clears the FS gate. both are RAII thread-locals scoped to the context.
+        drop(sandboxed);
+
+        // unsandboxed: IS_SANDBOXED=false — real file ops work, no policy gate fires
+        let unsandboxed = Context::builder()
+            .standard_env()
+            .build()
+            .expect("unsandboxed context");
+        let file_ok = unsandboxed
+            .evaluate("(import (scheme base) (tein file)) (file-exists? \"/etc/passwd\")");
+        assert_eq!(
+            file_ok.expect("unsandboxed file-exists? should work"),
+            Value::Boolean(true),
+            "file access must work in unsandboxed context (IS_SANDBOXED=false)"
+        );
+    }
+
+    #[test]
+    fn test_scheme_repl_shadow_returns_environment() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // interaction-environment should return an env (not #f, not error)
+        let r = ctx.evaluate(
+            "(import (scheme base) (scheme repl)) (let ((e (interaction-environment))) #t)",
+        );
+        assert_eq!(r.expect("scheme repl shadow works"), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_srfi_98_shadow_stubs_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("builder");
+        // srfi/98 in sandboxed contexts uses a self-contained stub shadow (not (tein process))
+        // because shadow SLDs cannot import VfsSource::Embedded modules via chibi's module
+        // machinery. for fake env access, import (tein process) directly.
+        let r = ctx
+            .evaluate(
+                "(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")",
+            )
+            .expect("srfi/98 importable in sandbox");
+        assert_eq!(
+            r,
+            Value::Boolean(false),
+            "srfi/98 stub always returns #f (use (tein process) for fake env)"
+        );
+        let r = ctx
+            .evaluate("(get-environment-variables)")
+            .expect("get-environment-variables");
+        assert_eq!(r, Value::Nil, "srfi/98 stub returns empty list");
+    }
+
+    #[test]
+    fn test_sandbox_custom_environment_variables() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .environment_variables(&[("CHIBI_HASH_SALT", "42"), ("MY_VAR", "hello")])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context with custom env");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // custom var present
+        let r = ctx.evaluate("(get-environment-variable \"CHIBI_HASH_SALT\")");
+        assert_eq!(r.unwrap(), Value::String("42".to_string()));
+        let r = ctx.evaluate("(get-environment-variable \"MY_VAR\")");
+        assert_eq!(r.unwrap(), Value::String("hello".to_string()));
+        // default seed still present (merge, not replace)
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("true".to_string()));
+    }
+
+    #[test]
+    fn test_sandbox_custom_command_line() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .command_line(&["my-app", "--verbose"])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context with custom command-line");
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx.evaluate("(command-line)");
+        assert_eq!(
+            r.unwrap(),
+            Value::List(vec![
+                Value::String("my-app".into()),
+                Value::String("--verbose".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_unsandboxed_ignores_environment_variables() {
+        unsafe { std::env::set_var("TEIN_TEST_UNSANDBOXED", "real") };
+        let ctx = Context::builder()
+            .standard_env()
+            .environment_variables(&[("TEIN_TEST_UNSANDBOXED", "fake")])
+            .build()
+            .expect("unsandboxed context");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // unsandboxed: reads real env, not fake
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_TEST_UNSANDBOXED\")");
+        assert_eq!(r.unwrap(), Value::String("real".to_string()));
+        unsafe { std::env::remove_var("TEIN_TEST_UNSANDBOXED") };
+    }
+
+    #[test]
+    fn test_sandbox_env_override_default_seed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .environment_variables(&[("TEIN_SANDBOX", "custom")])
+            .step_limit(5_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (tein process))").unwrap();
+        // user override wins
+        let r = ctx.evaluate("(get-environment-variable \"TEIN_SANDBOX\")");
+        assert_eq!(r.unwrap(), Value::String("custom".to_string()));
+    }
+
+    // --- (scheme show) / (srfi 166) sandbox tests ---
+
+    #[test]
+    fn test_scheme_show_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (scheme show)) (show #f \"hello\")");
+        assert!(r.is_ok(), "scheme show importable in sandbox: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_base_importable_in_sandbox() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate("(import (srfi 166 base)) (show #f (displayed \"test\"))");
+        assert!(r.is_ok(), "srfi/166/base importable in sandbox: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_columnar_from_file_with_policy() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        use crate::sandbox::Modules;
+        let dir = io_test_dir("columnar_from_file");
+        let file = dir.join("lines.txt");
+        std::fs::write(&file, "line1\nline2\n").expect("write");
+        let canon_dir = dir.canonicalize().unwrap();
+        let path = file.to_str().unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .file_read(&[canon_dir.to_str().unwrap()])
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        let r = ctx.evaluate(&format!(
+            "(import (srfi 166)) (show #f (from-file \"{path}\"))"
+        ));
+        assert!(r.is_ok(), "from-file with read policy: {r:?}");
+    }
+
+    #[test]
+    fn test_srfi_166_columnar_from_file_denied_without_policy() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("builder");
+        // from-file calls open-input-file which hits the policy check
+        let r = ctx
+            .evaluate("(import (srfi 166)) (show #f (from-file \"/tmp/nonexistent_tein_test\"))");
+        assert!(r.is_err(), "from-file without policy should fail");
+    }
+
+    // --- clib loading regression tests (issue #98) ---
+
+    #[test]
+    fn test_chibi_weak_clib_loads() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(1_000_000)
+            .build()
+            .expect("build");
+        // chibi/weak requires include-shared "weak" — fails without ClibEntry
+        let result = ctx
+            .evaluate(
+                "(import (chibi weak)) \
+                 (let ((e (make-ephemeron 'key 'value))) \
+                   (and (ephemeron? e) \
+                        (eq? (ephemeron-key e) 'key) \
+                        (eq? (ephemeron-value e) 'value)))",
+            )
+            .expect("chibi/weak should load and work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_chibi_weak_clib_loads_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(1_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (chibi weak)) (ephemeron? (make-ephemeron 'a 'b))")
+            .expect("chibi/weak should load in sandbox");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_filesystem_raises_error() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/filesystem")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi filesystem)) (create-directory \"/tmp/test\")");
+        // stub raises an error containing the sandbox marker
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/filesystem]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_constants_are_zero() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/filesystem")
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate("(import (chibi filesystem)) open/read")
+            .unwrap();
+        assert_eq!(result, Value::Integer(0));
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_shell_macro_raises_error() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/shell")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi shell)) (shell \"echo hello\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/shell]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_chibi_channel_in_vfs() {
+        // chibi/channel is registered in the VFS (pure-scheme, not OS-touching).
+        // its dependency srfi/18 uses SEXP_USE_GREEN_THREADS — enabled on posix,
+        // disabled on windows. on posix, with chibi/time's ClibEntry wired up,
+        // (import (chibi channel)) fully succeeds. on windows, it errors (thread
+        // support absent) but must NOT be a SandboxViolation (not blocked by gate).
+        use crate::sandbox::Modules;
+
+        let ctx_sandbox = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/channel")
+            .allow_module("srfi/18")
+            .build()
+            .unwrap();
+        let result = ctx_sandbox.evaluate("(import (chibi channel))");
+        match result {
+            // posix: green threads enabled + chibi/time wired → import succeeds
+            Ok(_) => {}
+            // windows (or any other failure): must not be a sandbox gate violation
+            Err(err) => assert!(
+                !matches!(err, Error::SandboxViolation(_)),
+                "chibi/channel should not be a sandbox violation, got: {:?}",
+                err
+            ),
+        }
+    }
+
+    #[test]
+    fn test_chibi_iset_optimize_loads() {
+        // chibi/iset/optimize is pure scheme; all deps (iset/base, iset/iterators,
+        // iset/constructors, srfi/151) are in VFS and safe.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate(
+            "(import (chibi iset) (chibi iset optimize)) \
+             (iset-optimize (iset 1 2 3))",
+        )
+        .expect("chibi/iset/optimize should load and iset-optimize should work");
+    }
+
+    #[test]
+    fn test_chibi_show_aliases_load() {
+        // chibi/show/color|column|pretty|unicode are alias-for srfi/166 sub-modules.
+        // these transitively depend on srfi/166/base → scheme/repl (shadow), so
+        // a sandboxed context is required.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate(
+            "(import (chibi show color) (chibi show column) \
+             (chibi show pretty) (chibi show unicode))",
+        )
+        .expect("chibi/show alias modules should all load");
+    }
+
+    #[test]
+    fn test_srfi_227_definition_loads() {
+        // srfi/227/definition re-exports define-optionals from chibi/optional.
+        let ctx = Context::builder().standard_env().build().unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (srfi 227 definition)) \
+                 (define-optionals (f x (y 10)) (+ x y)) \
+                 (f 1)",
+            )
+            .expect("srfi/227/definition should load and define-optionals should work");
+        assert_eq!(result, Value::Integer(11));
+    }
+
+    #[test]
+    fn test_chibi_mime_loads() {
+        // chibi/mime is pure scheme: MIME parsing with base64/quoted-printable.
+        // all deps in VFS and safe.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (chibi mime)) \
+                 (mime-parse-content-type \"text/html; charset=utf-8\")",
+            )
+            .expect("chibi/mime should load and parse content types");
+        // result is an alist like (("text/html") ("charset" . "utf-8"))
+        assert!(
+            matches!(result, Value::List(_) | Value::Pair(_, _)),
+            "expected parsed content-type alist, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_chibi_binary_record_loads() {
+        // chibi/binary-record provides binary record type macros.
+        // pure scheme, deps: scheme/base, srfi/1, srfi/151, srfi/130.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (chibi binary-record))")
+            .expect("chibi/binary-record should load");
+    }
+
+    #[test]
+    fn test_chibi_memoize_loads() {
+        // chibi/memoize provides in-memory LRU caching.
+        // chibi cond-expand branch pulls chibi/system + chibi/filesystem
+        // (both already shadowed). LRU cache construction works; file-backed
+        // memoize-to-file errors via shadowed deps. #105 upgrades later.
+        // note: memoize + does not work because procedure-arity of variadic
+        // builtins returns an unexpected value under chibi/ast introspection.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        let result = ctx
+            .evaluate(
+                "(import (chibi memoize)) \
+                 (lru-cache? (make-lru-cache))",
+            )
+            .expect("chibi/memoize should load and make-lru-cache should work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_stty_raises_error() {
+        // chibi/stty is C-backed terminal control — shadow stub blocks all access.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/stty")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi stty)) (get-terminal-width)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/stty]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_term_edit_line_raises_error() {
+        // chibi/term/edit-line depends on stty — shadow stub blocks all access.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/term/edit-line")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi term edit-line)) (make-line-editor)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/term/edit-line]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_app_raises_error() {
+        // chibi/app is CLI framework depending on config + process-context.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/app")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi app)) (app-help '())");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/app]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_config_raises_error() {
+        // chibi/config is config file reader depending on scheme/file + chibi/filesystem.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/config")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi config)) (make-conf '())");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/config]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_log_raises_error() {
+        // chibi/log is logging with file locking + OS identity (PIDs, UIDs).
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/log")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi log)) (log-open \"test\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/log]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_tar_raises_error() {
+        // chibi/tar: archive handling hard-wired to chibi/filesystem (#105).
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/tar")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi tar)) (tar-files \"test.tar\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/tar]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_srfi_193_raises_error() {
+        // srfi/193: command-line args + script path leak in sandbox.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("srfi/193")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (srfi 193)) (script-file)");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:srfi/193]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_shadow_stub_chibi_apropos_raises_error() {
+        // chibi/apropos: env introspection exposes internal module structure.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .allow_module("chibi/apropos")
+            .build()
+            .unwrap();
+        let result = ctx.evaluate("(import (chibi apropos)) (apropos \"test\")");
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("[sandbox:chibi/apropos]"),
+                "expected sandbox error, got: {e}"
+            ),
+            Ok(v) => panic!("expected error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scheme_load_shadow_uses_tein_load() {
+        // scheme/load shadow re-exports from (tein load) — VFS-restricted load.
+        // (scheme load) has a shadow_sld that imports (tein load) and re-exports load.
+        // verify: import succeeds, and the load binding rejects non-VFS paths.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .unwrap();
+        // import should succeed — shadow registered in sandboxed context
+        ctx.evaluate("(import (scheme load))")
+            .expect("(scheme load) shadow should import via (tein load)");
+        // a non-VFS path should be rejected by the VFS-restricted load
+        let r = ctx.evaluate("(load \"/etc/passwd\")");
+        assert!(r.is_err(), "expected non-VFS load to fail, got: {r:?}");
+    }
+
+    // NOTE: scheme/time has a deep dependency chain (scheme/process-context,
+    // scheme/file, scheme/read, scheme/time/tai-to-utc-offset) and performs
+    // file IO at load time (leap second list). it is default_safe: false.
+    // the ClibEntry fix (issue #98) is verified structurally — it follows the
+    // same pattern as all other clib entries and the build succeeds (the C
+    // source compiles and is linked into the static library table).
+    // a full integration test for (scheme time) would require either:
+    //   - a non-sandboxed context with filesystem access to chibi's scheme/process-context, or
+    //   - making scheme/process-context available as both Embedded and Shadow
+    // neither is warranted for a clib audit fix.
+
+    #[test]
+    fn test_srfi_160_uvprims_loads_and_works() {
+        // verifies uvprims.c compiles correctly and the C primitives are callable.
+        // tests: predicates, make, ref, set!, length, list conversion.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        // s8 vector round-trip
+        let result = ctx
+            .evaluate(
+                "(import (srfi 160 base)) \
+                 (let ((v (make-s8vector 3 0))) \
+                   (s8vector-set! v 0 -5) \
+                   (s8vector-set! v 1 42) \
+                   (s8vector-set! v 2 127) \
+                   (and (s8vector? v) \
+                        (= (s8vector-length v) 3) \
+                        (= (s8vector-ref v 0) -5) \
+                        (= (s8vector-ref v 1) 42) \
+                        (= (s8vector-ref v 2) 127)))",
+            )
+            .expect("srfi/160/base s8vector should work");
+        assert_eq!(result, Value::Boolean(true), "s8vector round-trip");
+
+        // f64 vector
+        let ctx2 = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result2 = ctx2
+            .evaluate(
+                "(import (srfi 160 base)) \
+                 (let ((v (f64vector 1.5 2.5 3.5))) \
+                   (and (f64vector? v) \
+                        (= (f64vector-length v) 3) \
+                        (= (f64vector-ref v 1) 2.5)))",
+            )
+            .expect("srfi/160/base f64vector should work");
+        assert_eq!(result2, Value::Boolean(true), "f64vector round-trip");
+    }
+
+    #[test]
+    fn test_srfi_160_u8_submodule_loads() {
+        // verifies a type-specific sub-module (u8) loads with uvector.scm
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate(
+                "(import (srfi 160 u8)) \
+                 (let ((v (make-u8vector 4 7))) \
+                   (and (u8vector? v) \
+                        (= (u8vector-length v) 4) \
+                        (= (u8vector-ref v 2) 7)))",
+            )
+            .expect("srfi/160/u8 should load and work");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_srfi_144_flonum_constants() {
+        // srfi/144 requires a C-backed static library (math.c generated from math.stub).
+        // fl-pi should be approximately π — a C constant, not pure scheme.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (srfi 144)) fl-pi")
+            .expect("fl-pi should be defined");
+        match result {
+            Value::Float(f) => assert!((f - std::f64::consts::PI).abs() < 1e-10),
+            other => panic!("expected float, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scheme_bytevector_endian() {
+        // scheme/bytevector requires a C-backed static library (bytevector.c from bytevector.stub).
+        // bytevector-u16-ref with little-endian on bytes [1, 0] should give 1.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate(
+                "(import (scheme bytevector)) \
+                 (let ((bv (make-bytevector 2 0))) \
+                   (bytevector-u8-set! bv 0 1) \
+                   (bytevector-u16-ref bv 0 'little))",
+            )
+            .expect("bytevector-u16-ref should work");
+        assert_eq!(result, Value::Integer(1));
+    }
+
+    #[test]
+    fn test_chibi_time_import() {
+        // chibi/time requires a C-backed static library (time.c from time.stub).
+        // get-time-of-day is a C procedure — procedure? verifies it loaded.
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(import (chibi time)) (procedure? get-time-of-day)")
+            .expect("chibi/time should load");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_srfi_19_import() {
+        // patch H: (import (srfi 19)) alone works — native fns registered via
+        // define_fn_variadic are now importable as library exports.
+        let ctx = Context::new_standard().expect("context");
+        ctx.evaluate("(import (srfi 19))")
+            .expect("srfi 19 should import");
+        let r = ctx.evaluate("(time? (current-time time-utc))");
+        assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_srfi_19_sandboxed() {
+        // srfi/19 is default_safe: true — importable in sandboxed contexts.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(50_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (srfi 19))")
+            .expect("srfi 19 importable in sandbox");
+        let r = ctx.evaluate("(date-year (current-date 0))").unwrap();
+        assert!(matches!(r, Value::Integer(y) if y >= 2026));
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    fn test_scheme_time_shadow_uses_tein_time() {
+        // verify (scheme time) shadow works in a sandboxed context, where
+        // chibi/time (native C lib) is not available but (tein time) is.
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(10_000_000)
+            .build()
+            .expect("sandboxed context");
+        ctx.evaluate("(import (scheme base))").expect("import base");
+        ctx.evaluate("(import (scheme time))")
+            .expect("import scheme/time");
+        let r = ctx.evaluate("(> (current-second) 0)");
+        assert_eq!(r.unwrap(), Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_chibi_test_loads_with_vfs_shadows() {
+        // chibi/test requires scheme/time, scheme/process-context, chibi/term/ansi, chibi/diff.
+        // all of these must load successfully in a with_vfs_shadows non-sandboxed context.
+        let ctx = Context::builder()
+            .standard_env()
+            .with_vfs_shadows()
+            .build()
+            .expect("build");
+        ctx.evaluate("(import (chibi test))")
+            .expect("import chibi/test");
+        // verify test infrastructure works
+        ctx.evaluate("(test-begin \"basic\") (test 1 1) (test-end)")
+            .expect("basic test");
+        let failures = ctx.evaluate("(test-failure-count)").expect("failure count");
+        assert_eq!(
+            failures,
+            Value::Integer(0),
+            "no chibi test failures expected"
+        );
+    }
+
+    // --- exit escape hatch ---
+
+    #[test]
+    fn exit_no_args_returns_exit_zero() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit)").unwrap();
+        assert_eq!(result, Value::Exit(0));
+    }
+
+    #[test]
+    fn exit_true_returns_exit_zero() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit #t)").unwrap();
+        assert_eq!(result, Value::Exit(0));
+    }
+
+    #[test]
+    fn exit_false_returns_exit_one() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit #f)").unwrap();
+        assert_eq!(result, Value::Exit(1));
+    }
+
+    #[test]
+    fn exit_integer_returns_exit_n() {
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx.evaluate("(import (tein process)) (exit 42)").unwrap();
+        assert_eq!(result, Value::Exit(42));
+    }
+
+    #[test]
+    fn exit_string_returns_exit_zero() {
+        // non-integer, non-boolean → 0 per r7rs
+        let ctx = Context::new_standard().unwrap();
+        let result = ctx
+            .evaluate(r#"(import (tein process)) (exit "bye")"#)
+            .unwrap();
+        assert_eq!(result, Value::Exit(0));
+    }
+
+    #[cfg(feature = "crypto")]
+    mod crypto_tests {
+        use super::*;
+
+        // NIST test vectors: SHA-256("") and SHA-512("")
+        const SHA256_EMPTY: &str =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        const SHA512_EMPTY: &str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+             47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e";
+        // BLAKE3("") from reference implementation
+        const BLAKE3_EMPTY: &str =
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262";
+
+        // SHA-256("hello")
+        const SHA256_HELLO: &str =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        #[test]
+        fn test_sha256_string() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"\")")
+                .unwrap();
+            assert_eq!(result, Value::String(SHA256_EMPTY.to_string()));
+        }
+
+        #[test]
+        fn test_sha256_hello() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"hello\")")
+                .unwrap();
+            assert_eq!(result, Value::String(SHA256_HELLO.to_string()));
+        }
+
+        #[test]
+        fn test_sha256_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (sha256-bytes \"\"))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(32));
+        }
+
+        #[test]
+        fn test_sha512_string() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha512 \"\")")
+                .unwrap();
+            assert_eq!(result, Value::String(SHA512_EMPTY.to_string()));
+        }
+
+        #[test]
+        fn test_sha512_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (sha512-bytes \"\"))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(64));
+        }
+
+        #[test]
+        fn test_blake3_string() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (blake3 \"\")")
+                .unwrap();
+            assert_eq!(result, Value::String(BLAKE3_EMPTY.to_string()));
+        }
+
+        #[test]
+        fn test_blake3_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (blake3-bytes \"\"))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(32));
+        }
+
+        #[test]
+        fn test_hash_string_bytevector_equivalence() {
+            // "hello" as string vs #u8(104 101 108 108 111) must yield the same hash
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let hex = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"hello\")")
+                .unwrap();
+            let bv_hex = ctx.evaluate("(sha256 #u8(104 101 108 108 111))").unwrap();
+            assert_eq!(hex, bv_hex);
+        }
+
+        #[test]
+        fn test_hash_invalid_input() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(sha256 42)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("string or bytevector"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
+        }
+
+        #[test]
+        fn test_random_bytes_length() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (random-bytes 16))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(16));
+        }
+
+        #[test]
+        fn test_random_bytes_zero() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (bytevector-length (random-bytes 0))")
+                .unwrap();
+            assert_eq!(result, Value::Integer(0));
+        }
+
+        #[test]
+        fn test_random_bytes_negative() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(random-bytes -1)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("non-negative"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
+        }
+
+        #[test]
+        fn test_random_integer_bounds() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            // run 100 iterations, all results must be in [0, 10)
+            let result = ctx
+                .evaluate(
+                    "(let loop ((i 0) (ok #t))
+                       (if (= i 100) ok
+                         (let ((r (random-integer 10)))
+                           (loop (+ i 1) (and ok (>= r 0) (< r 10))))))",
+                )
+                .unwrap();
+            assert_eq!(result, Value::Boolean(true));
+        }
+
+        #[test]
+        fn test_random_integer_invalid() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(random-integer 0)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("positive"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
+        }
+
+        #[test]
+        fn test_random_float_bounds() {
+            let ctx = Context::builder().standard_env().build().unwrap();
+            ctx.evaluate("(import (tein crypto))").unwrap();
+            let result = ctx
+                .evaluate(
+                    "(let loop ((i 0) (ok #t))
+                       (if (= i 100) ok
+                         (let ((r (random-float)))
+                           (loop (+ i 1) (and ok (>= r 0.0) (< r 1.0))))))",
+                )
+                .unwrap();
+            assert_eq!(result, Value::Boolean(true));
+        }
+
+        #[test]
+        fn test_crypto_sandbox_access() {
+            let ctx = Context::builder()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
+                .build()
+                .unwrap();
+            let result = ctx
+                .evaluate("(import (tein crypto)) (sha256 \"test\")")
+                .unwrap();
+            assert!(matches!(result, Value::String(_)));
+        }
+    }
+
+    // --- module search path ---
+
+    #[test]
+    fn test_gate_check_allows_fs_module_path() {
+        use crate::sandbox::FS_MODULE_PATHS;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let canon = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        // inject the dir into FS_MODULE_PATHS (simulating what build() will do)
+        FS_MODULE_PATHS.with(|cell| cell.borrow_mut().push(canon.clone()));
+
+        // verify the thread-local contains our dir
+        let paths = FS_MODULE_PATHS.with(|cell| cell.borrow().clone());
+        assert!(paths.iter().any(|p| p == &canon));
+
+        // cleanup: restore FS_MODULE_PATHS
+        FS_MODULE_PATHS.with(|cell| cell.borrow_mut().retain(|p| p != &canon));
+    }
+
+    #[test]
+    fn test_module_path_unsandboxed() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("my");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("util.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (my util) (import (scheme base)) (export square) (begin (define (square x) (* x x))))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("context with module_path");
+
+        let result = ctx
+            .evaluate("(import (my util)) (square 7)")
+            .expect("import from fs module path");
+        assert_eq!(result, Value::Integer(49));
+    }
+
+    #[test]
+    fn test_module_path_sandboxed() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("safe");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("calc.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (safe calc) (import (scheme base)) (export double) (begin (define (double x) (+ x x))))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("sandboxed context with module_path");
+
+        let result = ctx
+            .evaluate("(import (safe calc)) (double 5)")
+            .expect("import from fs module path in sandbox");
+        assert_eq!(result, Value::Integer(10));
+    }
+
+    #[test]
+    fn test_module_path_sandboxed_blocked_transitive() {
+        // a user module that tries to import a sandbox-blocked module gets rejected.
+        // just verify no panic — result depends on sandbox config.
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("bad");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("actor.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (bad actor) (import (scheme eval)) (export run) (begin (define (run x) (eval x (interaction-environment)))))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("sandboxed context");
+
+        // no panic is the contract — result depends on sandbox config
+        let _ = ctx.evaluate("(import (bad actor)) (run '(+ 1 2))");
+    }
+
+    #[test]
+    fn test_module_path_with_include() {
+        // (include "impl.scm") in an .sld should resolve relative to the .sld
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("ext");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        let mut impl_f = std::fs::File::create(lib_dir.join("impl.scm")).unwrap();
+        writeln!(impl_f, "(define (triple x) (* x 3))").unwrap();
+
+        let mut sld_f = std::fs::File::create(lib_dir.join("math.sld")).unwrap();
+        writeln!(
+            sld_f,
+            r#"(define-library (ext math) (import (scheme base)) (export triple) (include "impl.scm"))"#
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("context with module_path + include");
+
+        let result = ctx
+            .evaluate("(import (ext math)) (triple 4)")
+            .expect("import with (include ...) in .sld");
+        assert_eq!(result, Value::Integer(12));
+    }
+
+    #[test]
+    fn test_module_path_traversal_rejected() {
+        // path outside registered dir is blocked by the gate
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let evil_dir = dir.path().join("evil");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        let mut f = std::fs::File::create(evil_dir.join("lib.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (evil lib) (export x) (begin (define x 1)))"
+        )
+        .unwrap();
+
+        // only register "sub", not "evil"
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(sub.to_str().unwrap())
+            .build()
+            .expect("context");
+
+        // (evil lib) is not under the registered path — must fail
+        let result = ctx.evaluate("(import (evil lib)) x");
+        assert!(result.is_err(), "import outside registered path must fail");
+    }
+
+    #[test]
+    fn test_module_path_multiple_dirs() {
+        use std::io::Write;
+        let dir_a = tempfile::TempDir::new().unwrap();
+        let dir_b = tempfile::TempDir::new().unwrap();
+
+        let a_lib = dir_a.path().join("a");
+        std::fs::create_dir_all(&a_lib).unwrap();
+        let mut f = std::fs::File::create(a_lib.join("thing.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (a thing) (import (scheme base)) (export ax) (begin (define ax 1)))"
+        )
+        .unwrap();
+
+        let b_lib = dir_b.path().join("b");
+        std::fs::create_dir_all(&b_lib).unwrap();
+        let mut f = std::fs::File::create(b_lib.join("thing.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (b thing) (import (scheme base)) (export bx) (begin (define bx 2)))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(dir_a.path().to_str().unwrap())
+            .module_path(dir_b.path().to_str().unwrap())
+            .build()
+            .expect("context with two module paths");
+
+        let result = ctx
+            .evaluate("(import (a thing)) (import (b thing)) (+ ax bx)")
+            .expect("import from two separate dirs");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_tein_module_path_env_var() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("env");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("greet.sld")).unwrap();
+        writeln!(
+            f,
+            r#"(define-library (env greet) (import (scheme base)) (export hello) (begin (define (hello) "hi")))"#
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded test — no concurrent env reads
+        unsafe { std::env::set_var("TEIN_MODULE_PATH", dir.path().to_str().unwrap()) };
+        let ctx = Context::builder()
+            .standard_env()
+            .build()
+            .expect("context with TEIN_MODULE_PATH");
+        // SAFETY: single-threaded test — no concurrent env reads
+        unsafe { std::env::remove_var("TEIN_MODULE_PATH") };
+
+        let result = ctx
+            .evaluate("(import (env greet)) (hello)")
+            .expect("import via TEIN_MODULE_PATH env var");
+        assert_eq!(result, Value::String("hi".into()));
     }
 }

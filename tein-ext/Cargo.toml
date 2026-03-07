@@ -1,0 +1,10 @@
+[package]
+name = "tein-ext"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "C ABI type definitions for tein extension modules"
+repository.workspace = true
+keywords = ["scheme", "tein", "extension", "ffi"]
