@@ -211,8 +211,11 @@ unsafe extern "C" {
     // make-immutable wrapper (chibi SEXP_API, for r7rs environment)
     pub fn tein_sexp_make_immutable(ctx: sexp, x: sexp) -> sexp;
 
-    // module search path (chibi SEXP_API — adds a dir to SEXP_G_MODULE_PATH)
-    pub fn sexp_add_module_directory(
+    // module search path (chibi SEXP_API — adds a dir to SEXP_G_MODULE_PATH).
+    // note: the chibi header defines `sexp_add_module_directory` as a macro
+    // expanding to `sexp_add_module_directory_op(ctx, NULL, 1, d, a)`.
+    // we bind the underlying `_op` symbol directly.
+    pub fn sexp_add_module_directory_op(
         ctx: sexp,
         _self: sexp,
         _n: sexp_sint_t,
@@ -855,7 +858,7 @@ pub unsafe fn fs_policy_gate_set(level: i32) {
 pub unsafe fn add_module_directory(ctx: sexp, dir: sexp, append: bool) -> sexp {
     unsafe {
         let appendp = if append { get_true() } else { get_false() };
-        sexp_add_module_directory(ctx, get_void(), 1, dir, appendp)
+        sexp_add_module_directory_op(ctx, get_void(), 1, dir, appendp)
     }
 }
 

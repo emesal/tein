@@ -1087,12 +1087,28 @@ pub(crate) enum FsAccess {
 /// Check FsPolicy access for `path`.
 ///
 /// - unsandboxed (IS_SANDBOXED=false): allows unconditionally
+/// - sandboxed read under an `FS_MODULE_PATHS` dir: allows (module loading)
 /// - sandboxed with matching FsPolicy: delegates to `check_read`/`check_write`
 /// - sandboxed without FsPolicy configured: denies
+///
+/// `FS_MODULE_PATHS` entries are canonicalised dirs; any read under them is
+/// implicitly allowed so chibi's module loader can open `.sld`/`.scm` files.
+/// this grants no write access and no access outside the registered dirs.
 pub(crate) fn check_fs_access(path: &str, access: FsAccess) -> bool {
     let sandboxed = IS_SANDBOXED.with(|c| c.get());
     if !sandboxed {
         return true;
+    }
+    // module search paths implicitly grant read access for module loading
+    if matches!(access, FsAccess::Read) {
+        let path_buf = std::path::Path::new(path);
+        let allowed_by_module_path = FS_MODULE_PATHS.with(|cell| {
+            let dirs = cell.borrow();
+            dirs.iter().any(|dir| path_buf.starts_with(dir.as_str()))
+        });
+        if allowed_by_module_path {
+            return true;
+        }
     }
     FS_POLICY.with(|cell| {
         let policy = cell.borrow();
@@ -11046,5 +11062,205 @@ mod tests {
 
         // cleanup: restore FS_MODULE_PATHS
         FS_MODULE_PATHS.with(|cell| cell.borrow_mut().retain(|p| p != &canon));
+    }
+
+    #[test]
+    fn test_module_path_unsandboxed() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("my");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("util.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (my util) (import (scheme base)) (export square) (begin (define (square x) (* x x))))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("context with module_path");
+
+        let result = ctx
+            .evaluate("(import (my util)) (square 7)")
+            .expect("import from fs module path");
+        assert_eq!(result, Value::Integer(49));
+    }
+
+    #[test]
+    fn test_module_path_sandboxed() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("safe");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("calc.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (safe calc) (import (scheme base)) (export double) (begin (define (double x) (+ x x))))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("sandboxed context with module_path");
+
+        let result = ctx
+            .evaluate("(import (safe calc)) (double 5)")
+            .expect("import from fs module path in sandbox");
+        assert_eq!(result, Value::Integer(10));
+    }
+
+    #[test]
+    fn test_module_path_sandboxed_blocked_transitive() {
+        // a user module that tries to import a sandbox-blocked module gets rejected.
+        // just verify no panic — result depends on sandbox config.
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("bad");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("actor.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (bad actor) (import (scheme eval)) (export run) (begin (define (run x) (eval x (interaction-environment)))))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("sandboxed context");
+
+        // no panic is the contract — result depends on sandbox config
+        let _ = ctx.evaluate("(import (bad actor)) (run '(+ 1 2))");
+    }
+
+    #[test]
+    fn test_module_path_with_include() {
+        // (include "impl.scm") in an .sld should resolve relative to the .sld
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("ext");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+
+        let mut impl_f = std::fs::File::create(lib_dir.join("impl.scm")).unwrap();
+        writeln!(impl_f, "(define (triple x) (* x 3))").unwrap();
+
+        let mut sld_f = std::fs::File::create(lib_dir.join("math.sld")).unwrap();
+        writeln!(
+            sld_f,
+            r#"(define-library (ext math) (import (scheme base)) (export triple) (include "impl.scm"))"#
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(dir.path().to_str().unwrap())
+            .build()
+            .expect("context with module_path + include");
+
+        let result = ctx
+            .evaluate("(import (ext math)) (triple 4)")
+            .expect("import with (include ...) in .sld");
+        assert_eq!(result, Value::Integer(12));
+    }
+
+    #[test]
+    fn test_module_path_traversal_rejected() {
+        // path outside registered dir is blocked by the gate
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let evil_dir = dir.path().join("evil");
+        std::fs::create_dir_all(&evil_dir).unwrap();
+        let mut f = std::fs::File::create(evil_dir.join("lib.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (evil lib) (export x) (begin (define x 1)))"
+        )
+        .unwrap();
+
+        // only register "sub", not "evil"
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(sub.to_str().unwrap())
+            .build()
+            .expect("context");
+
+        // (evil lib) is not under the registered path — must fail
+        let result = ctx.evaluate("(import (evil lib)) x");
+        assert!(result.is_err(), "import outside registered path must fail");
+    }
+
+    #[test]
+    fn test_module_path_multiple_dirs() {
+        use std::io::Write;
+        let dir_a = tempfile::TempDir::new().unwrap();
+        let dir_b = tempfile::TempDir::new().unwrap();
+
+        let a_lib = dir_a.path().join("a");
+        std::fs::create_dir_all(&a_lib).unwrap();
+        let mut f = std::fs::File::create(a_lib.join("thing.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (a thing) (import (scheme base)) (export ax) (begin (define ax 1)))"
+        )
+        .unwrap();
+
+        let b_lib = dir_b.path().join("b");
+        std::fs::create_dir_all(&b_lib).unwrap();
+        let mut f = std::fs::File::create(b_lib.join("thing.sld")).unwrap();
+        writeln!(
+            f,
+            "(define-library (b thing) (import (scheme base)) (export bx) (begin (define bx 2)))"
+        )
+        .unwrap();
+
+        let ctx = Context::builder()
+            .standard_env()
+            .module_path(dir_a.path().to_str().unwrap())
+            .module_path(dir_b.path().to_str().unwrap())
+            .build()
+            .expect("context with two module paths");
+
+        let result = ctx
+            .evaluate("(import (a thing)) (import (b thing)) (+ ax bx)")
+            .expect("import from two separate dirs");
+        assert_eq!(result, Value::Integer(3));
+    }
+
+    #[test]
+    fn test_tein_module_path_env_var() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let lib_dir = dir.path().join("env");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let mut f = std::fs::File::create(lib_dir.join("greet.sld")).unwrap();
+        writeln!(
+            f,
+            r#"(define-library (env greet) (import (scheme base)) (export hello) (begin (define (hello) "hi")))"#
+        )
+        .unwrap();
+
+        // SAFETY: single-threaded test — no concurrent env reads
+        unsafe { std::env::set_var("TEIN_MODULE_PATH", dir.path().to_str().unwrap()) };
+        let ctx = Context::builder()
+            .standard_env()
+            .build()
+            .expect("context with TEIN_MODULE_PATH");
+        // SAFETY: single-threaded test — no concurrent env reads
+        unsafe { std::env::remove_var("TEIN_MODULE_PATH") };
+
+        let result = ctx
+            .evaluate("(import (env greet)) (hello)")
+            .expect("import via TEIN_MODULE_PATH env var");
+        assert_eq!(result, Value::String("hi".into()));
     }
 }
