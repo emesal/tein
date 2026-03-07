@@ -42,7 +42,10 @@ use crate::{
     ffi,
     foreign::{ForeignStore, ForeignType},
     port::PortStore,
-    sandbox::{FS_GATE, FS_GATE_CHECK, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST, VFS_GATE},
+    sandbox::{
+        FS_GATE, FS_GATE_CHECK, FS_MODULE_PATHS, FS_POLICY, FsPolicy, GATE_CHECK, VFS_ALLOWLIST,
+        VFS_GATE,
+    },
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -1918,6 +1921,9 @@ pub struct ContextBuilder {
     sandbox_env: Option<Vec<(String, String)>>,
     /// fake command-line for sandboxed contexts.
     sandbox_command_line: Option<Vec<String>>,
+    /// user-supplied filesystem module search directories.
+    /// combined with `TEIN_MODULE_PATH` env var during `build()`.
+    module_paths: Vec<String>,
 }
 
 impl ContextBuilder {
@@ -2110,6 +2116,35 @@ impl ContextBuilder {
         self.allow_module("tein/modules")
     }
 
+    /// Add a directory to the module search path.
+    ///
+    /// When resolving `(import (foo bar))`, tein searches each path for
+    /// `foo/bar.sld` and loads `(include ...)` files relative to the `.sld`.
+    /// Builder paths are searched before `TEIN_MODULE_PATH` dirs.
+    /// Can be called multiple times; directories accumulate.
+    ///
+    /// Works in both sandboxed and unsandboxed contexts. Module search paths
+    /// are independent of [`ContextBuilder::file_read()`] — they grant no
+    /// runtime file IO access, only module discovery.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::Context;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .module_path("./lib")
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn module_path(mut self, path: &str) -> Self {
+        self.module_paths.push(path.to_string());
+        self
+    }
+
     /// Inject fake environment variables for sandboxed contexts.
     ///
     /// Merges with the default seed (`TEIN_SANDBOX=true`). User entries
@@ -2227,6 +2262,59 @@ impl ContextBuilder {
                     return Err(Error::InitError(
                         "failed to load standard ports".to_string(),
                     ));
+                }
+            }
+
+            // --- module search path setup ---
+            //
+            // env var paths have lower priority (prepended first); builder paths
+            // have higher priority (prepended after, so they shadow env paths).
+            // for each dir: canonicalise, register into chibi's module path list,
+            // and record in FS_MODULE_PATHS for the VFS gate check.
+            let prev_fs_module_paths = FS_MODULE_PATHS.with(|cell| cell.borrow().clone());
+            {
+                let env_paths: Vec<String> = std::env::var("TEIN_MODULE_PATH")
+                    .unwrap_or_default()
+                    .split(':')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+
+                // env first, then builder — chibi prepend means last-prepended is first-searched
+                let all_paths: Vec<String> = env_paths
+                    .into_iter()
+                    .chain(self.module_paths.drain(..))
+                    .collect();
+
+                for raw_path in &all_paths {
+                    let canon = match std::path::Path::new(raw_path).canonicalize() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("tein: warning: module_path '{}' skipped: {}", raw_path, e);
+                            continue;
+                        }
+                    };
+                    let canon_str = canon.to_string_lossy().into_owned();
+
+                    // create a chibi string for the directory path (allocating call —
+                    // no live sexp locals at risk here, so no GcRoot needed)
+                    let c_dir = ffi::sexp_c_str(
+                        ctx,
+                        canon_str.as_ptr() as *const c_char,
+                        canon_str.len() as ffi::sexp_sint_t,
+                    );
+                    if ffi::sexp_exceptionp(c_dir) != 0 {
+                        eprintln!(
+                            "tein: warning: failed to create string for module path '{}'",
+                            raw_path
+                        );
+                        continue;
+                    }
+                    // prepend: builder paths end up first in search order
+                    ffi::add_module_directory(ctx, c_dir, false);
+
+                    // record for VFS gate check
+                    FS_MODULE_PATHS.with(|cell| cell.borrow_mut().push(canon_str));
                 }
             }
 
@@ -2389,6 +2477,7 @@ impl ContextBuilder {
                 prev_is_sandboxed,
                 prev_sandbox_env,
                 prev_sandbox_command_line,
+                prev_fs_module_paths,
                 foreign_store: RefCell::new(ForeignStore::new()),
                 has_foreign_protocol: Cell::new(false),
                 port_store: RefCell::new(PortStore::new()),
@@ -2534,6 +2623,8 @@ pub struct Context {
     prev_sandbox_env: Option<HashMap<String, String>>,
     /// previous SANDBOX_COMMAND_LINE value, restored on drop
     prev_sandbox_command_line: Option<Vec<String>>,
+    /// previous FS_MODULE_PATHS value, restored on drop
+    prev_fs_module_paths: Vec<String>,
     /// per-context store for foreign type registrations and live instances
     foreign_store: RefCell<ForeignStore>,
     /// whether foreign protocol dispatch functions are registered
@@ -2609,6 +2700,7 @@ impl Context {
             with_vfs_shadows: false,
             sandbox_env: None,
             sandbox_command_line: None,
+            module_paths: Vec::new(),
         }
     }
 
@@ -4071,6 +4163,9 @@ impl Drop for Context {
         });
         SANDBOX_COMMAND_LINE.with(|cell| {
             *cell.borrow_mut() = std::mem::take(&mut self.prev_sandbox_command_line);
+        });
+        FS_MODULE_PATHS.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_module_paths);
         });
 
         // clear UX stub module map so next context on this thread starts fresh
