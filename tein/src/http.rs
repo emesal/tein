@@ -17,7 +17,7 @@ use crate::{Value, ffi};
 /// scheme library definition for `(tein http)`.
 pub(crate) const HTTP_SLD: &str = "\
 (define-library (tein http)
-  (import (scheme base))
+  (import (scheme base) (chibi))
   (export http-request http-get http-post http-put http-delete)
   (include \"http.scm\"))";
 
