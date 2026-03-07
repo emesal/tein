@@ -89,6 +89,8 @@ mod value;
 pub use context::{Context, ContextBuilder};
 pub use error::{Error, Result};
 pub use foreign::{ForeignType, MethodContext, MethodFn};
+#[cfg(feature = "json")]
+pub use json::json_value_to_value;
 pub use managed::{Mode, ThreadLocalContext};
 pub use timeout::TimeoutContext;
 pub use value::Value;

@@ -1830,7 +1830,7 @@ unsafe extern "C" fn command_line_trampoline(
     }
 }
 
-/// `exit` trampoline: eval escape hatch.
+/// `emergency-exit` trampoline: immediate VM halt without cleanup.
 ///
 /// sets EXIT_REQUESTED + EXIT_VALUE thread-locals and returns a scheme
 /// exception to immediately stop the VM. the eval loop intercepts this
@@ -1838,16 +1838,9 @@ unsafe extern "C" fn command_line_trampoline(
 ///
 /// semantics: `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj
 ///
-/// **r7rs deviation**: r7rs `exit` must run all `dynamic-wind` "after" thunks
-/// before handing control to the OS. tein's `exit` does **not** — it immediately
-/// aborts the VM by throwing an exception, which is `emergency-exit` semantics.
-/// tein has no unwind continuation established around each `evaluate()` call, so
-/// r7rs-compliant exit (with dynamic-wind cleanup) would require an architectural
-/// change. tracked in GH #101.
-///
-/// both `exit` and `emergency-exit` therefore have identical emergency-exit
-/// semantics today. a future standalone interpreter host can wrap `evaluate()` in
-/// a continuation and re-route `exit` through it to achieve correct cleanup.
+/// this is r7rs `emergency-exit` — no `dynamic-wind` "after" thunks run,
+/// no ports flushed. r7rs `exit` (which does run cleaners) is implemented
+/// as a scheme procedure in `(tein process)` that delegates here after cleanup.
 unsafe extern "C" fn exit_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -2246,10 +2239,34 @@ impl ContextBuilder {
                 let prim_env = ffi::sexp_context_env(ctx);
                 register_eval_trampolines(ctx, prim_env)?;
 
-                // register feature-gated trampolines that scheme wrapper code
-                // references as free variables. must be in the primitive env so
-                // they end up in *chibi-env* and are visible to library bodies
-                // via `(import (chibi))`.
+                // register trampolines that scheme wrapper code references as
+                // free variables. must be in the primitive env so they end up
+                // in *chibi-env* and are visible to library bodies via
+                // `(import (chibi))`.
+                //
+                // (tein process) uses `(import (chibi))` in its library body so
+                // that `emergency-exit` and other trampolines are visible as free
+                // variables. chibi's built-in env has native `command-line`,
+                // `get-environment-variable`, `get-environment-variables`, and
+                // `emergency-exit` parameter/proc objects — registering ours here
+                // OVERRIDES them in `*chibi-env*` before `load_standard_env` runs.
+                // without this, `(import (tein process))` exports chibi's native
+                // versions instead of our trampolines, breaking sandbox faking.
+                register_native_trampoline(ctx, prim_env, "emergency-exit", exit_trampoline)?;
+                register_native_trampoline(ctx, prim_env, "command-line", command_line_trampoline)?;
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "get-environment-variable",
+                    get_env_var_trampoline,
+                )?;
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "get-environment-variables",
+                    get_env_vars_trampoline,
+                )?;
+
                 #[cfg(feature = "http")]
                 register_native_trampoline(
                     ctx,
@@ -2750,11 +2767,14 @@ impl Context {
         Ok(())
     }
 
-    /// Check if `(exit)` was called during evaluation.
+    /// Check if `(emergency-exit)` was called during evaluation.
     ///
     /// If the exit flag is set, clears it, releases the GC root on the
     /// stashed value, and returns `Some(Ok(Value::Exit(n)))`.
     /// Returns `None` if no exit was requested.
+    ///
+    /// Called after scheme `emergency-exit` (direct) or `exit` (after
+    /// dynamic-wind cleanup and port flushing in scheme).
     fn check_exit(&self) -> Option<Result<Value>> {
         if EXIT_REQUESTED.with(|c| c.replace(false)) {
             let raw = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
@@ -4050,14 +4070,26 @@ impl Context {
     }
 
     /// Register `get-environment-variable`, `get-environment-variables`,
-    /// `command-line`, and `exit` native functions.
+    /// `command-line`, and `emergency-exit` native functions.
     ///
     /// Called during `build()` for standard-env contexts.
+    ///
+    /// All four are also registered into the primitive env earlier in `build()`
+    /// via `register_native_trampoline`. Both registrations are required:
+    ///
+    /// - primitive-env registration (before `load_standard_env`): overrides
+    ///   chibi's built-in `command-line`, `get-environment-variable`, etc. in
+    ///   `*chibi-env*`, so `(import (chibi))` in `process.scm`'s library body
+    ///   picks up our trampolines instead of chibi's native parameter objects.
+    ///
+    /// - `define_fn_variadic` registration (top-level env): makes the names
+    ///   importable from the top-level env via eval.c patch H, so
+    ///   `(import (tein process))` can export them transitively.
     fn register_process_module(&self) -> Result<()> {
         self.define_fn_variadic("get-environment-variable", get_env_var_trampoline)?;
         self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
         self.define_fn_variadic("command-line", command_line_trampoline)?;
-        self.define_fn_variadic("exit", exit_trampoline)?;
+        self.define_fn_variadic("emergency-exit", exit_trampoline)?;
         Ok(())
     }
 
@@ -5721,28 +5753,124 @@ mod tests {
     }
 
     #[test]
-    fn test_tein_process_exit_skips_dynamic_wind() {
-        // r7rs deviation (GH #101): tein's exit does NOT run dynamic-wind
-        // "after" thunks — it has emergency-exit semantics. this test asserts
-        // the *current* behaviour. update when GH #101 is fixed.
+    fn test_exit_runs_dynamic_wind_after_thunks() {
+        // r7rs: exit must run dynamic-wind "after" thunks before halting.
+        // the after thunk runs and would raise an error if exit were broken;
+        // but here the after thunk just mutates a log — we verify exit still
+        // returns Exit(42) after the thunks complete.
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
-        // in r7rs-compliant exit, the after thunk would run before returning.
-        // tein exits immediately, so we get the exit value directly.
+        let r = ctx
+            .evaluate(
+                "(let ((log '())) \
+                   (dynamic-wind \
+                     (lambda () (set! log (cons 'in log))) \
+                     (lambda () \
+                       (dynamic-wind \
+                         (lambda () (set! log (cons 'in2 log))) \
+                         (lambda () \
+                           (exit 42)) \
+                         (lambda () (set! log (cons 'out2 log))))) \
+                     (lambda () (set! log (cons 'out log)))))",
+            )
+            .unwrap();
+        // exit runs after thunks (out2, out) then halts — we get Exit(42)
+        assert_eq!(r, Value::Exit(42));
+    }
+
+    #[test]
+    fn test_exit_nested_dynamic_wind_order() {
+        // verify innermost-first unwind order via captured output
+        use std::sync::{Arc, Mutex};
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let port = ctx.open_output_port(SharedWriter(buf.clone())).unwrap();
+        ctx.set_current_output_port(&port).unwrap();
+
         let r = ctx
             .evaluate(
                 "(dynamic-wind \
                    (lambda () #f) \
-                   (lambda () (exit 42)) \
+                   (lambda () \
+                     (dynamic-wind \
+                       (lambda () #f) \
+                       (lambda () \
+                         (dynamic-wind \
+                           (lambda () #f) \
+                           (lambda () (exit 0)) \
+                           (lambda () (display \"c\")))) \
+                       (lambda () (display \"b\")))) \
+                   (lambda () (display \"a\")))",
+            )
+            .unwrap();
+        assert_eq!(r, Value::Exit(0));
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"cba", "after thunks run innermost-first");
+    }
+
+    #[test]
+    fn test_emergency_exit_skips_dynamic_wind() {
+        // emergency-exit must NOT run dynamic-wind "after" thunks
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let r = ctx
+            .evaluate(
+                "(dynamic-wind \
+                   (lambda () #f) \
+                   (lambda () (emergency-exit 42)) \
                    (lambda () (error \"after thunk ran — unexpected\")))",
             )
             .unwrap();
-        // exits with 42; after thunk never runs (no error thrown)
         assert_eq!(
             r,
             Value::Exit(42),
-            "exit bypasses dynamic-wind after thunk (GH #101)"
+            "emergency-exit bypasses dynamic-wind after thunks"
         );
+    }
+
+    #[test]
+    fn test_exit_flushes_output_port() {
+        // exit must flush current-output-port before halting (r7rs 6.13.2).
+        //
+        // chibi custom ports use a 4096-byte buffer — the rust Write impl is
+        // only called during sexp_buffered_flush, not on every scheme write.
+        // the flush here comes from `(flush-output-port (current-output-port))`
+        // in process.scm, called before delegating to emergency-exit. without
+        // that flush, `(display "hello")` would stay in chibi's buffer and the
+        // SharedWriter would never see any bytes.
+        use std::sync::{Arc, Mutex};
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein process))").unwrap();
+        let port = ctx.open_output_port(SharedWriter(buf.clone())).unwrap();
+        ctx.set_current_output_port(&port).unwrap();
+        let r = ctx.evaluate("(display \"hello\") (exit 0)").unwrap();
+        assert_eq!(r, Value::Exit(0));
+        let output = buf.lock().unwrap();
+        assert_eq!(&*output, b"hello", "output port flushed before exit");
     }
 
     // --- phase 3: timeout context ---

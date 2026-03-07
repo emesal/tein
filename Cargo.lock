@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "tein"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blake3",
  "cc",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "tein-bin"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rustyline",
  "tein",
@@ -772,11 +772,11 @@ dependencies = [
 
 [[package]]
 name = "tein-ext"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "tein-macros"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "tein-sexp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "tein-test-ext"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tein-ext",
  "tein-macros",

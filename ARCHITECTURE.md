@@ -223,17 +223,20 @@ ContextBuilder with sandboxed():
 ### Exit escape hatch flow
 
 ```
-Scheme code calls (exit) or (exit obj):
-  1. (tein process) exit trampoline sets EXIT_REQUESTED + EXIT_VALUE thread-locals
-  2. returns an exception sexp to stop VM immediately (emergency-exit semantics)
-  3. evaluate() / evaluate_port() / call() intercepts via check_exit() after each eval step
-  4. check_exit(): reads EXIT_REQUESTED → clears flags → converts EXIT_VALUE → returns Ok(value)
-  5. (exit) → Ok(Value::Integer(0))
-  6. (exit #t) → Ok(Value::Integer(0))
-  7. (exit #f) → Ok(Value::Integer(1))
-  8. (exit obj) → Ok(Value::from(obj))
+Scheme code calls (exit) or (exit obj) via (tein process):
+  1. exit (scheme proc) unwinds %dk dynamic-wind stack via travel-to-point!
+  2. flushes current output/error ports (r7rs requires flush, not close)
+  3. calls emergency-exit (rust trampoline)
+  4. emergency-exit sets EXIT_REQUESTED + EXIT_VALUE thread-locals
+  5. returns an exception sexp to stop VM immediately
+  6. evaluate() / evaluate_port() / call() intercepts via check_exit()
+  7. check_exit(): reads EXIT_REQUESTED → clears flags → converts EXIT_VALUE → returns Ok(Value::Exit(n))
+  8. (exit) → 0, (exit #t) → 0, (exit #f) → 1, (exit obj) → obj
   9. EXIT_REQUESTED + EXIT_VALUE cleared on Context::drop()
-  r7rs deviation: dynamic-wind "after" thunks NOT run — emergency-exit semantics only (see GH #101)
+
+Scheme code calls (emergency-exit) or (emergency-exit obj):
+  - skips steps 1-2 (no dynamic-wind cleanup, no port flushing)
+  - goes directly to step 4
 ```
 
 **VFS safety contract**: VFS modules are safe by construction — tein curates
