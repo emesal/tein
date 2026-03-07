@@ -36,7 +36,7 @@ pub struct OpaqueVal {
 
 /// Current API version. Checked by extensions at init time.
 /// Bump when adding fields to `TeinExtApi`.
-pub const TEIN_EXT_API_VERSION: u32 = 1;
+pub const TEIN_EXT_API_VERSION: u32 = 2;
 
 // ── error codes ──────────────────────────────────────────────────────────────
 
@@ -231,6 +231,12 @@ pub struct TeinExtApi {
 
     /// Create a bytevector of given length, filled with `init`. Allocates.
     pub sexp_make_bytes: unsafe extern "C" fn(*mut OpaqueCtx, c_long, u8) -> *mut OpaqueVal,
+
+    /// Create a scheme exception (error object) from a message string.
+    /// Equivalent to `(error msg)` in scheme. Catchable by `guard`.
+    /// `len` is byte length; pass -1 for null-terminated C strings.
+    pub make_error:
+        unsafe extern "C" fn(*mut OpaqueCtx, *const c_char, c_long) -> *mut OpaqueVal,
 
     // ── sentinels ────────────────────────────────────────────────────
     // These return the canonical singleton values. Do not allocate.
