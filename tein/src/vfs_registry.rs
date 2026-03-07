@@ -227,6 +227,9 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     // tein/process: safe — trampolines neuter env vars, command-line, in sandbox
+    // dep on (chibi) is intentional in process.sld (library body uses *chibi-env*
+    // trampolines) but "chibi" is NOT a real VFS path — do not add it to deps
+    // here, or prefix-matching in the VFS gate would unlock the entire chibi/* namespace.
     VfsEntry {
         path: "tein/process",
         deps: &["scheme/base"],

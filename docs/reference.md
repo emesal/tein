@@ -224,10 +224,9 @@ In sandboxed contexts use `integer?` instead of `fixnum?` in your own code.
 
 ## known r7rs deviations
 
-### exit and dynamic-wind (issue #101)
+### exit and dynamic-wind
 
-Both `exit` and `emergency-exit` in `(tein process)` have emergency-exit semantics —
-neither runs `dynamic-wind` "after" thunks. R7RS `exit` should run them.
+`exit` in `(tein process)` is r7rs-compliant — it runs all `dynamic-wind` "after" thunks
+(innermost-first) and flushes/closes current output and error ports before halting.
 
-A future standalone interpreter host is expected to establish the unwind continuation
-needed for this. The current tein library API does not establish one.
+`emergency-exit` skips all cleanup (r7rs-compliant immediate halt).
