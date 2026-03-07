@@ -177,6 +177,10 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **`register-module` trampoline owns source string**: the trampoline copies the scheme string arg to a rust `String` before calling `register_module`, because `register_module` calls `sexp_read` which may trigger GC and relocate the original scheme string.
 
+**`FS_MODULE_PATHS` thread-local**: populated during `Context::build()` for contexts with `module_path()` dirs or `TEIN_MODULE_PATH` env var. read by `tein_vfs_gate_check` to allow imports from user-supplied directories, and by `check_fs_access` to allow `open-input-file` reads during module loading. saved/restored on build/drop like all other gate thread-locals. orthogonal to `FsPolicy` — module search paths grant no runtime file IO write access and no read access outside the registered dirs.
+
+**`TEIN_MODULE_PATH` env var**: colon-separated list of module search dirs, read during `build()`. lower priority than builder `module_path()` calls (env paths prepended first, builder paths prepended after — chibi searches last-prepended first). consistent with `CHIBI_MODULE_PATH` convention. works in sandboxed and unsandboxed contexts.
+
 ## adding a new scheme type
 
 1. add predicate wrapper to `tein_shim.c` in the fork (emesal/chibi-scheme, branch emesal-tein)
