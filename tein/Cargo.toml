@@ -26,6 +26,8 @@ rand = { version = "0.9", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 
 [dev-dependencies]
+tempfile = "3"
+
 [features]
 ## json, toml, uuid, and time on by default — disable with `default-features = false` if you don't need them.
 default = ["json", "toml", "uuid", "time", "regex", "crypto"]

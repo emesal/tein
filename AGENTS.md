@@ -125,7 +125,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 - **`heap_max` defaults to 128 MiB** (context.rs) — bounds heap growth, prevents memory exhaustion and strengthens heap-overflow mitigation.
 - **version parameter hardcoded to 7** (context.rs) — chibi's `init_file[128]` does `version + '0'` unchecked; version >= 10 overflows.
 - **`SEXP_G_STRICT_P` never set** — `sexp_warn` calls `exit(1)` in strict mode, bypassing all rust error handling. never enable strict mode.
-- **module path list never user-modifiable** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). safe because compiled-in defaults + VFS are never empty. never expose raw module path manipulation.
+- **module path list and the empty-path UB** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). user-supplied paths via `ContextBuilder::module_path()` / `TEIN_MODULE_PATH` / `-I` are safe because each is run through `std::path::Path::canonicalize()` (which always returns a non-empty absolute path) and empty env-var tokens are filtered before reaching `sexp_add_module_directory`. never add paths to chibi's module list without canonicalization.
 - **`SEXP_USE_STRICT_TOPLEVEL_BINDINGS=1`** (default) — must stay enabled; without it, `analyze_bind_syntax` has a potential NULL deref.
 - **`CHIBI_MODULE_PATH` env var** — read by chibi's module resolver. our VFS gate blocks non-VFS paths at the C level so it can't escape the sandbox, but document that this env var exists.
 
@@ -176,6 +176,10 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **`register_module` requires `(begin ...)`**: `(include ...)`, `(include-ci ...)`, and `(include-library-declarations ...)` are rejected. dynamically registered modules must be self-contained.
 
 **`register-module` trampoline owns source string**: the trampoline copies the scheme string arg to a rust `String` before calling `register_module`, because `register_module` calls `sexp_read` which may trigger GC and relocate the original scheme string.
+
+**`FS_MODULE_PATHS` thread-local**: populated during `Context::build()` for contexts with `module_path()` dirs or `TEIN_MODULE_PATH` env var. read by `tein_vfs_gate_check` to allow imports from user-supplied directories, and by `check_fs_access` to allow `open-input-file` reads during module loading. saved/restored on build/drop like all other gate thread-locals. orthogonal to `FsPolicy` — module search paths grant no runtime file IO write access and no read access outside the registered dirs.
+
+**`TEIN_MODULE_PATH` env var**: colon-separated list of module search dirs, read during `build()`. lower priority than builder `module_path()` calls (env paths prepended first, builder paths prepended after — chibi searches last-prepended first). consistent with `CHIBI_MODULE_PATH` convention. works in sandboxed and unsandboxed contexts.
 
 ## adding a new scheme type
 
