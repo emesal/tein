@@ -206,7 +206,11 @@ unsafe fn json_sexp_to_value(ctx: ffi::sexp, sexp: ffi::sexp, depth: usize) -> R
 }
 
 /// convert a `serde_json::Value` into a scheme `Value`, preserving null vs empty.
-fn json_value_to_value(jv: serde_json::Value) -> Result<Value> {
+///
+/// JSON objects become alists `((key . val) ...)`, arrays become lists, null
+/// becomes `'null` symbol. used by `json-parse` and re-exported for rust callers
+/// (e.g. chibi synthesised-tool dispatch).
+pub fn json_value_to_value(jv: serde_json::Value) -> Result<Value> {
     match jv {
         serde_json::Value::Null => Ok(Value::Symbol("null".to_string())),
         serde_json::Value::Bool(b) => Ok(Value::Boolean(b)),
