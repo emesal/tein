@@ -10927,4 +10927,29 @@ mod tests {
             assert!(matches!(result, Value::String(_)));
         }
     }
+
+    // --- module search path ---
+
+    #[test]
+    fn test_gate_check_allows_fs_module_path() {
+        use crate::sandbox::FS_MODULE_PATHS;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let canon = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        // inject the dir into FS_MODULE_PATHS (simulating what build() will do)
+        FS_MODULE_PATHS.with(|cell| cell.borrow_mut().push(canon.clone()));
+
+        // verify the thread-local contains our dir
+        let paths = FS_MODULE_PATHS.with(|cell| cell.borrow().clone());
+        assert!(paths.iter().any(|p| p == &canon));
+
+        // cleanup: restore FS_MODULE_PATHS
+        FS_MODULE_PATHS.with(|cell| cell.borrow_mut().retain(|p| p != &canon));
+    }
 }

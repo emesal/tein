@@ -860,43 +860,64 @@ pub unsafe fn add_module_directory(ctx: sexp, dir: sexp, append: bool) -> sexp {
 }
 
 /// called from C (`tein_shim.c`) when `tein_vfs_gate == 1`.
-/// checks the module path against the thread-local VFS allowlist.
+/// checks the module path against the thread-local VFS allowlist and
+/// the filesystem module search path (`FS_MODULE_PATHS`).
 ///
-/// absorbs all gate logic previously split between C and rust:
-/// - VFS `/vfs/lib/` prefix requirement (non-VFS paths rejected)
-/// - `..` path traversal guard
-/// - `.scm` passthrough (if the `.sld` was allowed, included `.scm` files are safe)
+/// two branches:
+///
+/// **VFS branch** — path starts with `/vfs/lib/`:
+/// - `..` traversal guard
+/// - `.scm` passthrough (included file after `.sld` was allowed)
 /// - allowlist prefix matching
 ///
-/// the path arrives as e.g. `/vfs/lib/tein/json.sld` or `/vfs/lib/srfi/69/hash`.
+/// **filesystem branch** — any other absolute path:
+/// - `..` traversal guard (fast path before `Path::starts_with`)
+/// - allowed if path is under any dir in `FS_MODULE_PATHS` (canonicalised)
+///
+/// the path arrives as e.g. `/vfs/lib/tein/json.sld`, `/vfs/lib/srfi/69/hash`,
+/// or `/tmp/mylibs/mymod/util.sld`.
 #[unsafe(no_mangle)]
 extern "C" fn tein_vfs_gate_check(path: *const c_char) -> c_int {
-    use crate::sandbox::VFS_ALLOWLIST;
+    use crate::sandbox::{FS_MODULE_PATHS, VFS_ALLOWLIST};
 
     let path_str = unsafe { CStr::from_ptr(path) }.to_str().unwrap_or("");
 
-    // reject non-VFS paths (filesystem module loading)
-    let Some(suffix) = path_str.strip_prefix("/vfs/lib/") else {
-        return 0;
-    };
-
-    // reject path traversal attempts
-    if suffix.contains("..") {
-        return 0;
+    // --- VFS path branch ---
+    if let Some(suffix) = path_str.strip_prefix("/vfs/lib/") {
+        // reject path traversal attempts
+        if suffix.contains("..") {
+            return 0;
+        }
+        // .scm passthrough — reachable only after the corresponding .sld was allowed
+        if suffix.ends_with(".scm") {
+            return 1;
+        }
+        // check against the allowlist
+        return VFS_ALLOWLIST.with(|cell| {
+            let list = cell.borrow();
+            if list
+                .iter()
+                .any(|prefix| suffix.starts_with(prefix.as_str()))
+            {
+                1
+            } else {
+                0
+            }
+        });
     }
 
-    // .scm passthrough — reachable only after the corresponding .sld was allowed
-    if suffix.ends_with(".scm") {
-        return 1;
+    // --- filesystem module path branch ---
+    // reject traversal before Path::starts_with (fast path)
+    if path_str.contains("..") {
+        return 0;
     }
-
-    // check against the allowlist
-    VFS_ALLOWLIST.with(|cell| {
-        let list = cell.borrow();
-        if list
-            .iter()
-            .any(|prefix| suffix.starts_with(prefix.as_str()))
-        {
+    // allow if path is under any configured module search dir.
+    // uses Path::starts_with for proper component-boundary matching
+    // (prevents "/tmp/mylib_evil" matching registered "/tmp/mylib").
+    let path_buf = std::path::Path::new(path_str);
+    FS_MODULE_PATHS.with(|cell| {
+        let dirs = cell.borrow();
+        if dirs.iter().any(|dir| path_buf.starts_with(dir.as_str())) {
             1
         } else {
             0
