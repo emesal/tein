@@ -2390,6 +2390,16 @@ impl ContextBuilder {
                 )?;
             }
 
+            #[cfg(feature = "http")]
+            if self.standard_env {
+                context.define_fn_variadic(
+                    "http-request-internal",
+                    crate::http::http_request_trampoline,
+                )?;
+                context.register_vfs_module("lib/tein/http.sld", crate::http::HTTP_SLD)?;
+                context.register_vfs_module("lib/tein/http.scm", crate::http::HTTP_SCM)?;
+            }
+
             if self.standard_env {
                 context.register_file_module()?;
                 context.register_load_module()?;
