@@ -2248,12 +2248,7 @@ impl ContextBuilder {
                 // procedure that calls `emergency-exit` (rust trampoline) after
                 // dynamic-wind cleanup. must be pre-registered here so the
                 // library body can reference it as a free variable.
-                register_native_trampoline(
-                    ctx,
-                    prim_env,
-                    "emergency-exit",
-                    exit_trampoline,
-                )?;
+                register_native_trampoline(ctx, prim_env, "emergency-exit", exit_trampoline)?;
 
                 #[cfg(feature = "http")]
                 register_native_trampoline(
@@ -2755,11 +2750,14 @@ impl Context {
         Ok(())
     }
 
-    /// Check if `(exit)` was called during evaluation.
+    /// Check if `(emergency-exit)` was called during evaluation.
     ///
     /// If the exit flag is set, clears it, releases the GC root on the
     /// stashed value, and returns `Some(Ok(Value::Exit(n)))`.
     /// Returns `None` if no exit was requested.
+    ///
+    /// Called after scheme `emergency-exit` (direct) or `exit` (after
+    /// dynamic-wind cleanup and port flushing in scheme).
     fn check_exit(&self) -> Option<Result<Value>> {
         if EXIT_REQUESTED.with(|c| c.replace(false)) {
             let raw = EXIT_VALUE.with(|c| c.replace(std::ptr::null_mut()));
@@ -5769,9 +5767,7 @@ mod tests {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
-        let port = ctx
-            .open_output_port(SharedWriter(buf.clone()))
-            .unwrap();
+        let port = ctx.open_output_port(SharedWriter(buf.clone())).unwrap();
         ctx.set_current_output_port(&port).unwrap();
 
         let r = ctx
@@ -5833,9 +5829,7 @@ mod tests {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein process))").unwrap();
-        let port = ctx
-            .open_output_port(SharedWriter(buf.clone()))
-            .unwrap();
+        let port = ctx.open_output_port(SharedWriter(buf.clone())).unwrap();
         ctx.set_current_output_port(&port).unwrap();
         let r = ctx.evaluate("(display \"hello\") (exit 0)").unwrap();
         assert_eq!(r, Value::Exit(0));
