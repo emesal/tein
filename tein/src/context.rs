@@ -1830,7 +1830,7 @@ unsafe extern "C" fn command_line_trampoline(
     }
 }
 
-/// `exit` trampoline: eval escape hatch.
+/// `emergency-exit` trampoline: immediate VM halt without cleanup.
 ///
 /// sets EXIT_REQUESTED + EXIT_VALUE thread-locals and returns a scheme
 /// exception to immediately stop the VM. the eval loop intercepts this
@@ -1838,16 +1838,9 @@ unsafe extern "C" fn command_line_trampoline(
 ///
 /// semantics: `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj
 ///
-/// **r7rs deviation**: r7rs `exit` must run all `dynamic-wind` "after" thunks
-/// before handing control to the OS. tein's `exit` does **not** — it immediately
-/// aborts the VM by throwing an exception, which is `emergency-exit` semantics.
-/// tein has no unwind continuation established around each `evaluate()` call, so
-/// r7rs-compliant exit (with dynamic-wind cleanup) would require an architectural
-/// change. tracked in GH #101.
-///
-/// both `exit` and `emergency-exit` therefore have identical emergency-exit
-/// semantics today. a future standalone interpreter host can wrap `evaluate()` in
-/// a continuation and re-route `exit` through it to achieve correct cleanup.
+/// this is r7rs `emergency-exit` — no `dynamic-wind` "after" thunks run,
+/// no ports flushed. r7rs `exit` (which does run cleaners) is implemented
+/// as a scheme procedure in `(tein process)` that delegates here after cleanup.
 unsafe extern "C" fn exit_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -4050,14 +4043,14 @@ impl Context {
     }
 
     /// Register `get-environment-variable`, `get-environment-variables`,
-    /// `command-line`, and `exit` native functions.
+    /// `command-line`, and `emergency-exit` native functions.
     ///
     /// Called during `build()` for standard-env contexts.
     fn register_process_module(&self) -> Result<()> {
         self.define_fn_variadic("get-environment-variable", get_env_var_trampoline)?;
         self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
         self.define_fn_variadic("command-line", command_line_trampoline)?;
-        self.define_fn_variadic("exit", exit_trampoline)?;
+        self.define_fn_variadic("emergency-exit", exit_trampoline)?;
         Ok(())
     }
 
