@@ -2253,12 +2253,7 @@ impl ContextBuilder {
                 // without this, `(import (tein process))` exports chibi's native
                 // versions instead of our trampolines, breaking sandbox faking.
                 register_native_trampoline(ctx, prim_env, "emergency-exit", exit_trampoline)?;
-                register_native_trampoline(
-                    ctx,
-                    prim_env,
-                    "command-line",
-                    command_line_trampoline,
-                )?;
+                register_native_trampoline(ctx, prim_env, "command-line", command_line_trampoline)?;
                 register_native_trampoline(
                     ctx,
                     prim_env,
