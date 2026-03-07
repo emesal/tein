@@ -2244,11 +2244,33 @@ impl ContextBuilder {
                 // in *chibi-env* and are visible to library bodies via
                 // `(import (chibi))`.
                 //
-                // emergency-exit: (tein process) defines `exit` as a scheme
-                // procedure that calls `emergency-exit` (rust trampoline) after
-                // dynamic-wind cleanup. must be pre-registered here so the
-                // library body can reference it as a free variable.
+                // (tein process) uses `(import (chibi))` in its library body so
+                // that `emergency-exit` and other trampolines are visible as free
+                // variables. chibi's built-in env has native `command-line`,
+                // `get-environment-variable`, `get-environment-variables`, and
+                // `emergency-exit` parameter/proc objects — registering ours here
+                // OVERRIDES them in `*chibi-env*` before `load_standard_env` runs.
+                // without this, `(import (tein process))` exports chibi's native
+                // versions instead of our trampolines, breaking sandbox faking.
                 register_native_trampoline(ctx, prim_env, "emergency-exit", exit_trampoline)?;
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "command-line",
+                    command_line_trampoline,
+                )?;
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "get-environment-variable",
+                    get_env_var_trampoline,
+                )?;
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "get-environment-variables",
+                    get_env_vars_trampoline,
+                )?;
 
                 #[cfg(feature = "http")]
                 register_native_trampoline(
@@ -4057,13 +4079,17 @@ impl Context {
     ///
     /// Called during `build()` for standard-env contexts.
     ///
-    /// Note: `emergency-exit` is also registered into the primitive env earlier
-    /// in `build()` via `register_native_trampoline`. Both registrations are
-    /// required: the primitive-env registration makes it visible to library
-    /// bodies (so `process.scm` can call it as a free variable); this
-    /// `define_fn_variadic` registration makes it importable from the top-level
-    /// env via eval.c patch H (needed for `(import (tein process))` to export
-    /// `emergency-exit` transitively).
+    /// All four are also registered into the primitive env earlier in `build()`
+    /// via `register_native_trampoline`. Both registrations are required:
+    ///
+    /// - primitive-env registration (before `load_standard_env`): overrides
+    ///   chibi's built-in `command-line`, `get-environment-variable`, etc. in
+    ///   `*chibi-env*`, so `(import (chibi))` in `process.scm`'s library body
+    ///   picks up our trampolines instead of chibi's native parameter objects.
+    ///
+    /// - `define_fn_variadic` registration (top-level env): makes the names
+    ///   importable from the top-level env via eval.c patch H, so
+    ///   `(import (tein process))` can export them transitively.
     fn register_process_module(&self) -> Result<()> {
         self.define_fn_variadic("get-environment-variable", get_env_var_trampoline)?;
         self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
