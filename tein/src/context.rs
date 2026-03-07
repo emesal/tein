@@ -451,6 +451,16 @@ fn build_ext_api() -> tein_ext::TeinExtApi {
             // sexp_make_bytes takes sexp_uint_t; API table uses c_long (signed)
             sexp_make_bytes: ext_trampoline_make_bytes,
 
+            // error constructor — same signature as sexp_c_str but returns exception
+            make_error: std::mem::transmute::<
+                unsafe fn(ffi::sexp, *const std::ffi::c_char, ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *const std::ffi::c_char,
+                    std::ffi::c_long,
+                ) -> *mut OpaqueVal,
+            >(ffi::make_error),
+
             // sentinels
             get_null: std::mem::transmute::<
                 unsafe fn() -> ffi::sexp,
@@ -811,8 +821,7 @@ unsafe extern "C" fn port_write_trampoline(
 #[cfg(feature = "json")]
 /// Trampoline for `json-parse`: takes one scheme string argument, returns parsed value.
 ///
-/// On parse error or type mismatch, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On parse error or type mismatch, raises a scheme exception.
 unsafe extern "C" fn json_parse_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -829,7 +838,7 @@ unsafe extern "C" fn json_parse_trampoline(
         if ffi::sexp_stringp(str_sexp) == 0 {
             let msg = "json-parse: expected string argument";
             let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
         let data = ffi::sexp_string_data(str_sexp);
         let len = ffi::sexp_string_size(str_sexp) as usize;
@@ -838,7 +847,7 @@ unsafe extern "C" fn json_parse_trampoline(
             Err(e) => {
                 let msg = format!("json-parse: invalid UTF-8: {e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
             }
         };
         match crate::json::json_parse(input) {
@@ -847,13 +856,13 @@ unsafe extern "C" fn json_parse_trampoline(
                 Err(e) => {
                     let msg = format!("json-parse: {e}");
                     let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
                 }
             },
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -867,8 +876,7 @@ unsafe extern "C" fn json_parse_trampoline(
 /// when the cdr is a proper list (e.g. `("x" . (("y" . 1)))` → `("x" ("y" . 1))`),
 /// losing the structural cue needed to detect alists.
 ///
-/// On conversion error, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On conversion error, raises a scheme exception.
 unsafe extern "C" fn json_stringify_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -890,7 +898,7 @@ unsafe extern "C" fn json_stringify_trampoline(
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -901,8 +909,7 @@ unsafe extern "C" fn json_stringify_trampoline(
 #[cfg(feature = "toml")]
 /// Trampoline for `toml-parse`: takes one scheme string argument, returns parsed value.
 ///
-/// On parse error or type mismatch, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On parse error or type mismatch, raises a scheme exception.
 unsafe extern "C" fn toml_parse_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -919,7 +926,7 @@ unsafe extern "C" fn toml_parse_trampoline(
         if ffi::sexp_stringp(str_sexp) == 0 {
             let msg = "toml-parse: expected string argument";
             let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
         let data = ffi::sexp_string_data(str_sexp);
         let len = ffi::sexp_string_size(str_sexp) as usize;
@@ -928,7 +935,7 @@ unsafe extern "C" fn toml_parse_trampoline(
             Err(e) => {
                 let msg = format!("toml-parse: invalid UTF-8: {e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
             }
         };
         match crate::toml::toml_parse(input) {
@@ -937,13 +944,13 @@ unsafe extern "C" fn toml_parse_trampoline(
                 Err(e) => {
                     let msg = format!("toml-parse: {e}");
                     let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
                 }
             },
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -955,8 +962,7 @@ unsafe extern "C" fn toml_parse_trampoline(
 /// Works directly on raw chibi sexps via `toml::toml_stringify_raw` to preserve
 /// alist structure, then delegates to `toml::to_string()` for correct formatting.
 ///
-/// On conversion error, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On conversion error, raises a scheme exception.
 unsafe extern "C" fn toml_stringify_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -978,7 +984,7 @@ unsafe extern "C" fn toml_stringify_trampoline(
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -9076,11 +9082,10 @@ mod tests {
     fn test_json_parse_invalid() {
         let ctx = Context::new_standard().expect("context");
         ctx.evaluate("(import (tein json))").expect("import");
-        let result = ctx.evaluate("(json-parse \"not json\")").expect("parse");
-        // per convention: errors return scheme strings (see AGENTS.md critical gotchas)
+        let result = ctx.evaluate("(json-parse \"not json\")");
         match result {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9147,12 +9152,10 @@ mod tests {
     fn test_toml_parse_invalid() {
         let ctx = Context::new_standard().expect("context");
         ctx.evaluate("(import (tein toml))").expect("import");
-        let result = ctx
-            .evaluate("(toml-parse \"not valid {{toml\")")
-            .expect("parse");
+        let result = ctx.evaluate("(toml-parse \"not valid {{toml\")");
         match result {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9161,14 +9164,13 @@ mod tests {
     // variadic trampolines (define_fn_variadic, num_args=0) receive sexp_null as
     // `args` when called with no arguments — chibi does no arity checking. calling
     // sexp_car on sexp_null is UB (segfault). these tests verify:
-    //   (a) no-args → Err (or scheme error string, per trampoline convention)
-    //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err or error string
+    //   (a) no-args → Err (scheme exception)
+    //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err (scheme exception)
     //   (c) extra args don't crash (variadic; extra args are silently ignored)
     //
-    // note: json/toml parse/stringify errors return a scheme *string* (not an exception),
-    // per the AGENTS.md convention for native function errors. so we match Value::String.
-    // get-environment-variable, file-exists?, delete-file, and load return make_error
-    // (proper scheme exceptions) → evaluate() returns Err.
+    // note: all trampoline errors raise scheme exceptions → evaluate() returns Err.
+    // json/toml/http parse/stringify errors, get-environment-variable, file-exists?,
+    // delete-file, and load all use make_error and propagate as Err(EvalError(...)).
 
     // --- get-environment-variable ---
 
@@ -9317,11 +9319,10 @@ mod tests {
     fn test_json_parse_wrong_type_integer() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse 42)").unwrap();
-        // type mismatch returns a scheme string (AGENTS.md convention)
+        let r = ctx.evaluate("(json-parse 42)");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9330,10 +9331,10 @@ mod tests {
     fn test_json_parse_wrong_type_boolean() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse #f)").unwrap();
+        let r = ctx.evaluate("(json-parse #f)");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9342,10 +9343,10 @@ mod tests {
     fn test_json_parse_wrong_type_list() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse '(1 2 3))").unwrap();
+        let r = ctx.evaluate("(json-parse '(1 2 3))");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9354,10 +9355,10 @@ mod tests {
     fn test_json_parse_wrong_type_lambda() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse (lambda () 42))").unwrap();
+        let r = ctx.evaluate("(json-parse (lambda () 42))");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9375,14 +9376,11 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn test_json_stringify_lambda_arg() {
-        // lambdas are not json-serialisable — should get an error string, not a crash
+        // lambdas are not json-serialisable — should raise an error, not crash
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-stringify (lambda (x) x))").unwrap();
-        match r {
-            Value::String(_) => {} // error string is fine
-            other => panic!("expected error string or string, got {other:?}"),
-        }
+        let r = ctx.evaluate("(json-stringify (lambda (x) x))");
+        assert!(r.is_err(), "expected error, got {r:?}");
     }
 
     // --- toml-parse ---
@@ -9401,10 +9399,10 @@ mod tests {
     fn test_toml_parse_wrong_type_integer() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-parse 42)").unwrap();
+        let r = ctx.evaluate("(toml-parse 42)");
         match r {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9413,10 +9411,10 @@ mod tests {
     fn test_toml_parse_wrong_type_boolean() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-parse #t)").unwrap();
+        let r = ctx.evaluate("(toml-parse #t)");
         match r {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9425,10 +9423,10 @@ mod tests {
     fn test_toml_parse_wrong_type_list() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-parse '(\"a\" \"b\"))").unwrap();
+        let r = ctx.evaluate("(toml-parse '(\"a\" \"b\"))");
         match r {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9446,14 +9444,11 @@ mod tests {
     #[cfg(feature = "toml")]
     #[test]
     fn test_toml_stringify_integer_arg() {
-        // integers are not valid toml root values — should return an error string
+        // integers are not valid toml root values — should raise an error
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-stringify 42)").unwrap();
-        match r {
-            Value::String(_) => {} // error string is fine
-            other => panic!("expected error string, got {other:?}"),
-        }
+        let r = ctx.evaluate("(toml-stringify 42)");
+        assert!(r.is_err(), "expected error, got {r:?}");
     }
 
     // --- task 6: Modules enum + sandboxed() builder ---
@@ -10283,10 +10278,9 @@ mod tests {
             )
             .expect("chibi/mime should load and parse content types");
         // result is an alist like (("text/html") ("charset" . "utf-8"))
-        // just verify it's not an error — the exact structure depends on chibi's impl
         assert!(
-            !matches!(result, Value::String(_)),
-            "expected parsed content-type, got error string: {result}"
+            matches!(result, Value::List(_) | Value::Pair(_, _)),
+            "expected parsed content-type alist, got: {result}"
         );
     }
 
@@ -10839,9 +10833,12 @@ mod tests {
         fn test_hash_invalid_input() {
             let ctx = Context::builder().standard_env().build().unwrap();
             ctx.evaluate("(import (tein crypto))").unwrap();
-            let result = ctx.evaluate("(sha256 42)").unwrap();
-            // Result::Err returns a scheme string (see AGENTS.md critical gotchas)
-            assert!(matches!(result, Value::String(s) if s.contains("string or bytevector")));
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(sha256 42)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("string or bytevector"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
         }
 
         #[test]
@@ -10866,8 +10863,12 @@ mod tests {
         fn test_random_bytes_negative() {
             let ctx = Context::builder().standard_env().build().unwrap();
             ctx.evaluate("(import (tein crypto))").unwrap();
-            let result = ctx.evaluate("(random-bytes -1)").unwrap();
-            assert!(matches!(result, Value::String(s) if s.contains("non-negative")));
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(random-bytes -1)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("non-negative"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
         }
 
         #[test]
@@ -10890,8 +10891,12 @@ mod tests {
         fn test_random_integer_invalid() {
             let ctx = Context::builder().standard_env().build().unwrap();
             ctx.evaluate("(import (tein crypto))").unwrap();
-            let result = ctx.evaluate("(random-integer 0)").unwrap();
-            assert!(matches!(result, Value::String(s) if s.contains("positive")));
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(random-integer 0)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("positive"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
         }
 
         #[test]

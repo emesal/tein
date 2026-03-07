@@ -114,20 +114,17 @@ fn test_ext_free_fn_result_ok() {
 
 #[test]
 fn test_ext_free_fn_result_err() {
-    // Result::Err returns a scheme string (not an exception) — same as internal mode.
-    // see tein/tests/tein_fn.rs :: test_tein_fn_result_err for precedent.
+    // Result::Err raises a scheme exception — same as internal mode.
     let ctx = Context::new_standard().expect("context");
     ctx.load_extension(ext_lib_path()).expect("load");
     ctx.evaluate("(import (tein testext))").expect("import");
-    let result = ctx
-        .evaluate("(testext-safe-div 10 0)")
-        .expect("eval (returns string on error)");
+    let result = ctx.evaluate("(testext-safe-div 10 0)");
     match result {
-        Value::String(s) => assert!(
-            s.contains("division by zero"),
-            "expected 'division by zero' in error string, got: {s}"
+        Err(e) => assert!(
+            e.to_string().contains("division by zero"),
+            "expected 'division by zero' in error, got: {e}"
         ),
-        other => panic!("expected error string from Result::Err, got {other:?}"),
+        Ok(v) => panic!("expected error from Result::Err, got {v:?}"),
     }
 }
 

@@ -21,39 +21,29 @@ mod http_integration {
     }
 
     #[test]
-    fn http_get_bad_url_returns_error_string() {
+    fn http_get_bad_url_raises_error() {
         let ctx = ctx();
         ctx.evaluate("(import (tein http))").unwrap();
-        let result = ctx.evaluate("(http-get \"not-a-url\" '())").unwrap();
-        assert!(
-            matches!(result, Value::String(_)),
-            "expected error string, got {result:?}"
-        );
+        let result = ctx.evaluate("(http-get \"not-a-url\" '())");
+        assert!(result.is_err(), "expected error, got {result:?}");
     }
 
     #[test]
-    fn http_request_bad_url_returns_error_string() {
+    fn http_request_bad_url_raises_error() {
         let ctx = ctx();
         ctx.evaluate("(import (tein http))").unwrap();
-        let result = ctx
-            .evaluate("(http-request \"GET\" \"not-a-url\" '() #f)")
-            .unwrap();
-        assert!(
-            matches!(result, Value::String(_)),
-            "expected error string, got {result:?}"
-        );
+        let result = ctx.evaluate("(http-request \"GET\" \"not-a-url\" '() #f)");
+        assert!(result.is_err(), "expected error, got {result:?}");
     }
 
     #[test]
     fn http_request_with_timeout() {
         let ctx = ctx();
         ctx.evaluate("(import (tein http))").unwrap();
-        let result = ctx
-            .evaluate("(http-request \"GET\" \"http://127.0.0.1:1\" '() #f 0.5)")
-            .unwrap();
+        let result = ctx.evaluate("(http-request \"GET\" \"http://127.0.0.1:1\" '() #f 0.5)");
         assert!(
-            matches!(result, Value::String(_)),
-            "expected error string on refused connection, got {result:?}"
+            result.is_err(),
+            "expected error on refused connection, got {result:?}"
         );
     }
 

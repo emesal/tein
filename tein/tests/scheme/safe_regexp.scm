@@ -7,8 +7,9 @@
 (test-true "safe-regexp/regexp-is-regexp" (regexp? (regexp "\\d+")))
 (test-false "safe-regexp/string-not-regexp" (regexp? "hello"))
 (test-false "safe-regexp/integer-not-regexp" (regexp? 42))
-(test-true "safe-regexp/invalid-pattern-returns-string"
-  (string? (regexp "[")))
+;; invalid pattern raises an error (exception), not a string
+(test-error "safe-regexp/invalid-pattern-raises-error"
+  (lambda () (regexp "[")))
 
 ;; --- search ---
 

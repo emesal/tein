@@ -48,8 +48,12 @@ fn value_return_result_ok() {
 fn value_return_result_err() {
     let ctx = Context::new_standard().unwrap();
     valret::register_module_valret(&ctx).unwrap();
-    let result = ctx
-        .evaluate("(import (tein valret)) (maybe-vec -1)")
-        .unwrap();
-    assert_eq!(result, Value::String("negative".into()));
+    let result = ctx.evaluate("(import (tein valret)) (maybe-vec -1)");
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("negative"), "got: {msg}");
+        }
+        Ok(v) => panic!("expected error, got {v:?}"),
+    }
 }

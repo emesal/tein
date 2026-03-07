@@ -125,12 +125,14 @@ fn test_tein_fn_result_err() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("safe-div", __tein_safe_div)
         .expect("define");
-    // division by zero returns error string (not an exception, since chibi
-    // treats the raw return as a value — the string will be the result)
-    let result = ctx.evaluate("(safe-div 10 0)").expect("eval");
+    // division by zero raises a scheme exception → Err(EvalError(...))
+    let result = ctx.evaluate("(safe-div 10 0)");
     match result {
-        Value::String(s) => assert!(s.contains("division by zero"), "got: {}", s),
-        _ => panic!("expected error string, got {:?}", result),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("division by zero"), "got: {msg}");
+        }
+        Ok(v) => panic!("expected error, got {v:?}"),
     }
 }
 
@@ -169,11 +171,14 @@ fn test_tein_fn_panic_safety() {
     let ctx = Context::new().expect("create context");
     ctx.define_fn_variadic("panicker", __tein_panicker)
         .expect("define");
-    // should not crash — panic is caught, returns error string
-    let result = ctx.evaluate("(panicker)").expect("eval");
+    // should not crash — panic is caught, raises scheme exception
+    let result = ctx.evaluate("(panicker)");
     match result {
-        Value::String(s) => assert!(s.contains("panic"), "expected panic message, got: {}", s),
-        _ => panic!("expected error string from panic, got {:?}", result),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains("panic"), "expected panic message, got: {msg}");
+        }
+        Ok(v) => panic!("expected error from panic, got {v:?}"),
     }
 }
 

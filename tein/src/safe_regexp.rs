@@ -640,10 +640,9 @@ mod tests {
 
     #[test]
     fn compile_invalid_pattern() {
-        let result = ctx()
-            .evaluate(r#"(import (tein safe-regexp)) (regexp "[")"#)
-            .unwrap();
-        assert!(matches!(result, Value::String(_)));
+        // invalid pattern raises a scheme exception (see AGENTS.md)
+        let result = ctx().evaluate(r#"(import (tein safe-regexp)) (regexp "[")"#);
+        assert!(result.is_err(), "expected error, got {result:?}");
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! follows the json/toml pattern: plain rust module + hand-written trampoline,
 //! no `#[tein_module]` macro.
 
+use std::ffi::CString;
 use std::time::Duration;
 
 use crate::{Value, ffi};
@@ -31,8 +32,8 @@ pub(crate) const HTTP_SCM: &str = "\
 ;;; this file provides the user-facing API with default timeout.
 ;;;
 ;;; on success, returns an alist: ((status . N) (headers ...) (body . \"...\"))
-;;; on transport error, returns a plain string (not an exception). callers
-;;; should check (pair? result) before accessing fields. see gh #135.
+;;; on transport error, raises a scheme exception (error object).
+;;; use (guard ...) to catch errors. closes gh #135.
 
 (define %default-timeout 30)
 
@@ -203,7 +204,7 @@ fn do_http_request(
 /// - body: string or #f
 /// - timeout: number (seconds, fractional ok)
 ///
-/// returns response alist on success, error string on transport failure.
+/// returns response alist on success, raises exception on transport failure.
 ///
 /// # Safety
 ///
@@ -221,7 +222,9 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         let method_sexp = ffi::sexp_car(args);
         args = ffi::sexp_cdr(args);
         if ffi::sexp_stringp(method_sexp) == 0 {
-            return ffi::scheme_str(ctx, "http-request-internal: method must be a string");
+            let msg = "http-request-internal: method must be a string";
+            let c_msg = CString::new(msg).unwrap();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
         let method = ffi::sexp_to_rust_string(method_sexp);
 
@@ -229,7 +232,9 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         let url_sexp = ffi::sexp_car(args);
         args = ffi::sexp_cdr(args);
         if ffi::sexp_stringp(url_sexp) == 0 {
-            return ffi::scheme_str(ctx, "http-request-internal: url must be a string");
+            let msg = "http-request-internal: url must be a string";
+            let c_msg = CString::new(msg).unwrap();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
         let url = ffi::sexp_to_rust_string(url_sexp);
 
@@ -273,9 +278,16 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         match do_http_request(&method, &url, &headers, body.as_deref(), timeout_secs) {
             Ok(value) => match value.to_raw(ctx) {
                 Ok(raw) => raw,
-                Err(e) => ffi::scheme_str(ctx, &format!("http: response conversion failed: {e}")),
+                Err(e) => {
+                    let msg = format!("http: response conversion failed: {e}");
+                    let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                }
             },
-            Err(msg) => ffi::scheme_str(ctx, &msg),
+            Err(msg) => {
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
         }
     }
 }

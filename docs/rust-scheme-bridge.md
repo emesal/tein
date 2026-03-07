@@ -26,7 +26,7 @@ Generates `__tein_{fn_name}` with chibi's variadic FFI signature.
 | `bool` | boolean |
 | `Value` | any scheme value |
 
-Return `Result<T, E: Display>` — `Err` becomes a scheme error string. Return `()` for void.
+Return `Result<T, E: Display>` — `Err` raises a scheme exception (r7rs error object), catchable with `(guard ...)`. Return `()` for void.
 
 ### the Value argument type
 
