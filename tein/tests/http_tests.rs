@@ -6,8 +6,8 @@
 
 #[cfg(feature = "http")]
 mod http_integration {
-    use tein::{Context, Value};
     use tein::sandbox::Modules;
+    use tein::{Context, Value};
 
     fn ctx() -> Context {
         Context::builder().standard_env().build().unwrap()

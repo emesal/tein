@@ -343,12 +343,10 @@ mod tests {
     fn build_response_alist_empty_headers() {
         let alist = build_response_alist(404, &[], "not found");
         match &alist {
-            Value::List(items) => {
-                match &items[1] {
-                    Value::Pair(_, v) => assert_eq!(**v, Value::Nil),
-                    other => panic!("expected pair, got {other:?}"),
-                }
-            }
+            Value::List(items) => match &items[1] {
+                Value::Pair(_, v) => assert_eq!(**v, Value::Nil),
+                other => panic!("expected pair, got {other:?}"),
+            },
             other => panic!("expected list, got {other:?}"),
         }
     }

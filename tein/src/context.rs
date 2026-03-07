@@ -1513,6 +1513,7 @@ fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
 /// used to inject trampolines into the primitive env BEFORE `load_standard_env`,
 /// so they end up in `*chibi-env*` and are visible to library bodies via
 /// `(import (chibi))`.
+#[cfg(feature = "http")]
 fn register_native_trampoline(
     ctx: ffi::sexp,
     env: ffi::sexp,
