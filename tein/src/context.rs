@@ -451,6 +451,16 @@ fn build_ext_api() -> tein_ext::TeinExtApi {
             // sexp_make_bytes takes sexp_uint_t; API table uses c_long (signed)
             sexp_make_bytes: ext_trampoline_make_bytes,
 
+            // error constructor — same signature as sexp_c_str but returns exception
+            make_error: std::mem::transmute::<
+                unsafe fn(ffi::sexp, *const std::ffi::c_char, ffi::sexp_sint_t) -> ffi::sexp,
+                unsafe extern "C" fn(
+                    *mut OpaqueCtx,
+                    *const std::ffi::c_char,
+                    std::ffi::c_long,
+                ) -> *mut OpaqueVal,
+            >(ffi::make_error),
+
             // sentinels
             get_null: std::mem::transmute::<
                 unsafe fn() -> ffi::sexp,
