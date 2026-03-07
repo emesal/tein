@@ -163,6 +163,16 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
+        path: "tein/http",
+        deps: &["scheme/base"],
+        files: &[],
+        clib: None,
+        default_safe: false,
+        source: VfsSource::Dynamic,
+        feature: Some("http"),
+        shadow_sld: None,
+    },
+    VfsEntry {
         path: "tein/safe-regexp",
         deps: &["scheme/base"],
         files: &[],

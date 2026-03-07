@@ -290,6 +290,7 @@ fn feature_enabled(feature: Option<&str>) -> bool {
         Some("time") => cfg!(feature = "time"),
         Some("regex") => cfg!(feature = "regex"),
         Some("crypto") => cfg!(feature = "crypto"),
+        Some("http") => cfg!(feature = "http"),
         Some(f) => {
             // unknown feature name — conservatively include
             eprintln!("cargo:warning=unknown feature gate in VFS_REGISTRY: {f}");
@@ -359,6 +360,17 @@ const DYNAMIC_MODULE_EXPORTS: &[(&str, &[&str])] = &[
     ),
     // src/context.rs — register_modules_module() trampolines
     ("tein/modules", &["register-module", "module-registered?"]),
+    // src/http.rs — hand-written trampoline, feature=http
+    (
+        "tein/http",
+        &[
+            "http-request",
+            "http-get",
+            "http-post",
+            "http-put",
+            "http-delete",
+        ],
+    ),
 ];
 
 /// extract exported binding names from each module's `.sld` file.

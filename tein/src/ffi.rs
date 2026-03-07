@@ -521,6 +521,35 @@ pub unsafe fn sexp_c_str(ctx: sexp, s: *const c_char, len: sexp_sint_t) -> sexp 
     unsafe { sexp_c_string(ctx, s, len) }
 }
 
+/// extract a rust `String` from a chibi scheme string sexp.
+///
+/// # Safety
+///
+/// caller must ensure `s` is a valid chibi string (`sexp_stringp(s) != 0`).
+#[inline]
+pub unsafe fn sexp_to_rust_string(s: sexp) -> String {
+    unsafe {
+        let ptr = sexp_string_data(s);
+        let len = sexp_string_size(s) as usize;
+        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
+/// return a scheme string from a rust `&str`. convenience for error messages
+/// in `extern "C"` trampolines where you can't return `Result`.
+///
+/// # Safety
+///
+/// caller must ensure `ctx` is a valid chibi context.
+#[inline]
+pub unsafe fn scheme_str(ctx: sexp, msg: &str) -> sexp {
+    unsafe {
+        let c = std::ffi::CString::new(msg).unwrap_or_default();
+        sexp_c_str(ctx, c.as_ptr(), msg.len() as sexp_sint_t)
+    }
+}
+
 #[inline]
 pub unsafe fn sexp_define_foreign(
     ctx: sexp,

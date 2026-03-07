@@ -1508,6 +1508,39 @@ fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
     Ok(())
 }
 
+/// register a single native variadic fn into a given env.
+///
+/// used to inject trampolines into the primitive env BEFORE `load_standard_env`,
+/// so they end up in `*chibi-env*` and are visible to library bodies via
+/// `(import (chibi))`.
+#[allow(dead_code)] // generic utility — currently used by http, ready for future modules
+fn register_native_trampoline(
+    ctx: ffi::sexp,
+    env: ffi::sexp,
+    name: &str,
+    f: unsafe extern "C" fn(ffi::sexp, ffi::sexp, ffi::sexp_sint_t, ffi::sexp) -> ffi::sexp,
+) -> Result<()> {
+    let c_name =
+        CString::new(name).map_err(|_| Error::EvalError(format!("name contains null: {name}")))?;
+    unsafe {
+        let result = ffi::sexp_define_foreign_proc(
+            ctx,
+            env,
+            c_name.as_ptr(),
+            0,
+            ffi::SEXP_PROC_VARIADIC,
+            c_name.as_ptr(),
+            Some(f),
+        );
+        if ffi::sexp_exceptionp(result) != 0 {
+            return Err(Error::EvalError(format!(
+                "failed to define variadic function '{name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // --- (tein modules) trampolines ---
 
 /// `register-module` trampoline: registers a define-library source string
@@ -2156,6 +2189,18 @@ impl ContextBuilder {
                 let prim_env = ffi::sexp_context_env(ctx);
                 register_eval_trampolines(ctx, prim_env)?;
 
+                // register feature-gated trampolines that scheme wrapper code
+                // references as free variables. must be in the primitive env so
+                // they end up in *chibi-env* and are visible to library bodies
+                // via `(import (chibi))`.
+                #[cfg(feature = "http")]
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "http-request-internal",
+                    crate::http::http_request_trampoline,
+                )?;
+
                 let env = ffi::sexp_context_env(ctx);
                 // H9: chibi uses a char[128] stack buffer for the init file path
                 // and does `version + '0'` without range check. version MUST be a
@@ -2388,6 +2433,14 @@ impl ContextBuilder {
                     "lib/tein/safe-regexp.scm",
                     crate::safe_regexp::SAFE_REGEXP_SCM,
                 )?;
+            }
+
+            #[cfg(feature = "http")]
+            if self.standard_env {
+                // http-request-internal trampoline is registered into the primitive
+                // env before load_standard_env (see above). only VFS modules here.
+                context.register_vfs_module("lib/tein/http.sld", crate::http::HTTP_SLD)?;
+                context.register_vfs_module("lib/tein/http.scm", crate::http::HTTP_SCM)?;
             }
 
             if self.standard_env {

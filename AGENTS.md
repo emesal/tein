@@ -34,6 +34,7 @@ cargo test -p tein -- ext          # run extension integration tests
 cargo build -p tein-bin            # build the tein binary
 cargo run -p tein-bin              # run REPL
 cargo run -p tein-bin -- script.scm  # run script
+cargo test -p tein --features http  # http module tests
 cargo test -p tein-bin             # unit tests (arg parsing, shebang, paren_depth)
 ```
 
@@ -57,6 +58,7 @@ src/
   toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso"). feature=toml
   uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
   time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second, timezone-offset-seconds. feature=time
+  http.rs        — HTTP_SLD/HTTP_SCM constants, do_http_request (ureq), http_request_trampoline. feature=http
   safe_regexp.rs — #[tein_module("safe-regexp")]: regexp, regexp?, regexp-search, regexp-matches, regexp-replace,
                    regexp-split, regexp-extract, regexp-fold, match accessors. feature=regex
   sexp_bridge.rs — Value ↔ Sexp; shared layer for format modules
@@ -168,6 +170,8 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 **chibi module cache vs dynamic re-registration**: `register_module` updates the VFS entry but chibi caches module environments after first `(import ...)`. a second `(import (my tool))` in the same context returns the cached (old) version. fresh context or `ManagedContext::reset()` required for updated imports.
 
 **`register_module` collision check**: rejects if module `.sld` exists in the *static* VFS table (built-in modules). dynamic-over-dynamic is allowed (update semantics). collision check uses `tein_vfs_lookup_static` which skips the dynamic linked list.
+
+**native fn visibility in VFS library bodies**: native fns registered via `define_fn_variadic` into the top-level env are NOT visible to library bodies loaded via `(import ...)` — chibi creates a fresh env per library. if a library's `.scm` body uses a native fn as a free variable, the trampoline must be registered into the **primitive env** (via `register_native_trampoline`) BEFORE `load_standard_env` so it ends up in `*chibi-env*`, and the `.sld` must `(import (chibi))`. this applies to `(tein http)`'s `http-request-internal`. native fns that are directly exported (like `json-parse`) work via eval.c patch H without this.
 
 **`register_module` requires `(begin ...)`**: `(include ...)`, `(include-ci ...)`, and `(include-library-declarations ...)` are rejected. dynamically registered modules must be self-contained.
 

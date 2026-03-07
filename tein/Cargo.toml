@@ -23,6 +23,7 @@ regex = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 blake3 = { version = "1", optional = true }
 rand = { version = "0.9", optional = true }
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 
 [dev-dependencies]
 [features]
@@ -46,6 +47,9 @@ regex = ["dep:regex"]
 ## enables `(tein crypto)` module with SHA-256, SHA-512, BLAKE3 hashing and CSPRNG.
 ## pulls in sha2, blake3, and rand crates.
 crypto = ["dep:sha2", "dep:blake3", "dep:rand"]
+## enables `(tein http)` module with HTTP client (GET/POST/PUT/DELETE) and TLS support.
+## pulls in ureq with rustls. not included in default — network access is opt-in.
+http = ["dep:ureq"]
 ## enables chibi-scheme GC debugging instrumentation (+4 bytes/object overhead).
 ## adds magic-number header validation and pointer bounds checking before GC mark.
 ## useful for diagnosing heap corruption, dangling pointers, and unrooted locals.
