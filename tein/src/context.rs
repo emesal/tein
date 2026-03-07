@@ -9083,11 +9083,10 @@ mod tests {
     fn test_json_parse_invalid() {
         let ctx = Context::new_standard().expect("context");
         ctx.evaluate("(import (tein json))").expect("import");
-        let result = ctx.evaluate("(json-parse \"not json\")").expect("parse");
-        // per convention: errors return scheme strings (see AGENTS.md critical gotchas)
+        let result = ctx.evaluate("(json-parse \"not json\")");
         match result {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9154,12 +9153,10 @@ mod tests {
     fn test_toml_parse_invalid() {
         let ctx = Context::new_standard().expect("context");
         ctx.evaluate("(import (tein toml))").expect("import");
-        let result = ctx
-            .evaluate("(toml-parse \"not valid {{toml\")")
-            .expect("parse");
+        let result = ctx.evaluate("(toml-parse \"not valid {{toml\")");
         match result {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9324,11 +9321,10 @@ mod tests {
     fn test_json_parse_wrong_type_integer() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse 42)").unwrap();
-        // type mismatch returns a scheme string (AGENTS.md convention)
+        let r = ctx.evaluate("(json-parse 42)");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9337,10 +9333,10 @@ mod tests {
     fn test_json_parse_wrong_type_boolean() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse #f)").unwrap();
+        let r = ctx.evaluate("(json-parse #f)");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9349,10 +9345,10 @@ mod tests {
     fn test_json_parse_wrong_type_list() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse '(1 2 3))").unwrap();
+        let r = ctx.evaluate("(json-parse '(1 2 3))");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9361,10 +9357,10 @@ mod tests {
     fn test_json_parse_wrong_type_lambda() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-parse (lambda () 42))").unwrap();
+        let r = ctx.evaluate("(json-parse (lambda () 42))");
         match r {
-            Value::String(msg) => assert!(msg.contains("json-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("json-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9382,14 +9378,11 @@ mod tests {
     #[cfg(feature = "json")]
     #[test]
     fn test_json_stringify_lambda_arg() {
-        // lambdas are not json-serialisable — should get an error string, not a crash
+        // lambdas are not json-serialisable — should raise an error, not crash
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein json))").unwrap();
-        let r = ctx.evaluate("(json-stringify (lambda (x) x))").unwrap();
-        match r {
-            Value::String(_) => {} // error string is fine
-            other => panic!("expected error string or string, got {other:?}"),
-        }
+        let r = ctx.evaluate("(json-stringify (lambda (x) x))");
+        assert!(r.is_err(), "expected error, got {r:?}");
     }
 
     // --- toml-parse ---
@@ -9408,10 +9401,10 @@ mod tests {
     fn test_toml_parse_wrong_type_integer() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-parse 42)").unwrap();
+        let r = ctx.evaluate("(toml-parse 42)");
         match r {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9420,10 +9413,10 @@ mod tests {
     fn test_toml_parse_wrong_type_boolean() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-parse #t)").unwrap();
+        let r = ctx.evaluate("(toml-parse #t)");
         match r {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9432,10 +9425,10 @@ mod tests {
     fn test_toml_parse_wrong_type_list() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-parse '(\"a\" \"b\"))").unwrap();
+        let r = ctx.evaluate("(toml-parse '(\"a\" \"b\"))");
         match r {
-            Value::String(msg) => assert!(msg.contains("toml-parse")),
-            other => panic!("expected error string, got {other:?}"),
+            Err(e) => assert!(e.to_string().contains("toml-parse")),
+            Ok(v) => panic!("expected error, got {v:?}"),
         }
     }
 
@@ -9453,14 +9446,11 @@ mod tests {
     #[cfg(feature = "toml")]
     #[test]
     fn test_toml_stringify_integer_arg() {
-        // integers are not valid toml root values — should return an error string
+        // integers are not valid toml root values — should raise an error
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein toml))").unwrap();
-        let r = ctx.evaluate("(toml-stringify 42)").unwrap();
-        match r {
-            Value::String(_) => {} // error string is fine
-            other => panic!("expected error string, got {other:?}"),
-        }
+        let r = ctx.evaluate("(toml-stringify 42)");
+        assert!(r.is_err(), "expected error, got {r:?}");
     }
 
     // --- task 6: Modules enum + sandboxed() builder ---
