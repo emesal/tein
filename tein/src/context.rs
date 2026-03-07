@@ -2312,8 +2312,10 @@ impl ContextBuilder {
                     };
                     let canon_str = canon.to_string_lossy().into_owned();
 
-                    // create a chibi string for the directory path (allocating call —
-                    // no live sexp locals at risk here, so no GcRoot needed)
+                    // create a chibi string for the directory path. root it immediately —
+                    // add_module_directory calls sexp_cons (= sexp_alloc_type) which may
+                    // trigger GC. with SEXP_USE_CONSERVATIVE_GC=0, C stack frames are not
+                    // scanned, so c_dir would be collectible before being stored in the pair.
                     let c_dir = ffi::sexp_c_str(
                         ctx,
                         canon_str.as_ptr() as *const c_char,
@@ -2326,6 +2328,7 @@ impl ContextBuilder {
                         );
                         continue;
                     }
+                    let _dir_root = ffi::GcRoot::new(ctx, c_dir);
                     // prepend: builder paths end up first in search order
                     ffi::add_module_directory(ctx, c_dir, false);
 

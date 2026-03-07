@@ -125,7 +125,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 - **`heap_max` defaults to 128 MiB** (context.rs) — bounds heap growth, prevents memory exhaustion and strengthens heap-overflow mitigation.
 - **version parameter hardcoded to 7** (context.rs) — chibi's `init_file[128]` does `version + '0'` unchecked; version >= 10 overflows.
 - **`SEXP_G_STRICT_P` never set** — `sexp_warn` calls `exit(1)` in strict mode, bypassing all rust error handling. never enable strict mode.
-- **module path list never user-modifiable** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). safe because compiled-in defaults + VFS are never empty. never expose raw module path manipulation.
+- **module path list and the empty-path UB** — `sexp_find_module_file_raw` reads `dir[-1]` on empty path (UB). user-supplied paths via `ContextBuilder::module_path()` / `TEIN_MODULE_PATH` / `-I` are safe because each is run through `std::path::Path::canonicalize()` (which always returns a non-empty absolute path) and empty env-var tokens are filtered before reaching `sexp_add_module_directory`. never add paths to chibi's module list without canonicalization.
 - **`SEXP_USE_STRICT_TOPLEVEL_BINDINGS=1`** (default) — must stay enabled; without it, `analyze_bind_syntax` has a potential NULL deref.
 - **`CHIBI_MODULE_PATH` env var** — read by chibi's module resolver. our VFS gate blocks non-VFS paths at the C level so it can't escape the sandbox, but document that this env var exists.
 

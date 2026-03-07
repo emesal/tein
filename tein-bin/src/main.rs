@@ -40,6 +40,10 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
                     .ok_or_else(|| format!("{} requires a path argument", arg))?;
                 module_paths.push(path);
             }
+            other if other.starts_with("-I") && other.len() > 2 => {
+                // combined form: -I./lib  (no space between flag and value)
+                module_paths.push(other[2..].to_string());
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {}", other));
             }
@@ -625,6 +629,12 @@ mod tests {
     fn include_path_with_sandbox() {
         let args = parse_args(vec!["--sandbox".into(), "-I".into(), "./lib".into()]).unwrap();
         assert!(args.sandbox);
+        assert_eq!(args.module_paths, vec!["./lib".to_string()]);
+    }
+
+    #[test]
+    fn include_path_combined() {
+        let args = parse_args(vec!["-I./lib".into()]).unwrap();
         assert_eq!(args.module_paths, vec!["./lib".to_string()]);
     }
 
