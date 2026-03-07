@@ -163,6 +163,15 @@ thread_local! {
     /// FS policy gate level (0=off, 1=check). set during Context::build(), cleared on drop.
     /// when armed, C-level `open-*-file` opcodes call `tein_fs_policy_check` (rust callback).
     pub(crate) static FS_GATE: Cell<u8> = const { Cell::new(FS_GATE_OFF) };
+
+    /// canonicalised filesystem module search directories.
+    ///
+    /// populated during `Context::build()` when `module_path()` dirs or
+    /// `TEIN_MODULE_PATH` are configured. read by `tein_vfs_gate_check`
+    /// to allow imports from user-supplied directories.
+    /// cleared (restored to previous value) on `Context::drop()`.
+    pub(crate) static FS_MODULE_PATHS: RefCell<Vec<String>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// resolve transitive deps from `VFS_REGISTRY`.
