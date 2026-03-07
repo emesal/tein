@@ -1,10 +1,10 @@
 [package]
 name = "tein-ext"
-version = "0.1.0"
-edition = "2024"
-authors = ["fey"]
-license = "ISC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 publish = false
 description = "C ABI type definitions for tein extension modules"
-repository = "https://github.com/emesal/tein"
+repository.workspace = true
 keywords = ["scheme", "tein", "extension", "ffi"]

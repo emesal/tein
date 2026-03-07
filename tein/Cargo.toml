@@ -1,12 +1,12 @@
 [package]
 name = "tein"
-version = "0.1.0"
-edition = "2024"
-authors = ["fey"]
-license = "ISC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 publish = false
 description = "embeddable r7rs scheme interpreter for rust, built on chibi-scheme"
-repository = "https://github.com/emesal/tein"
+repository.workspace = true
 keywords = ["scheme", "lisp", "scripting", "embedding", "r7rs"]
 categories = ["embedded", "parser-implementations"]
 

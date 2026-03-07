@@ -1,12 +1,12 @@
 [package]
 name = "tein-macros"
-version = "0.1.0"
-edition = "2024"
-authors = ["fey"]
-license = "ISC"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 publish = false
 description = "proc macros for tein scheme interpreter"
-repository = "https://github.com/emesal/tein"
+repository.workspace = true
 
 [lib]
 proc-macro = true
