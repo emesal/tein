@@ -9,7 +9,6 @@
 //! follows the json/toml pattern: plain rust module + hand-written trampoline,
 //! no `#[tein_module]` macro.
 
-use std::ffi::CString;
 use std::time::Duration;
 
 use crate::{Value, ffi};
@@ -30,6 +29,10 @@ pub(crate) const HTTP_SCM: &str = "\
 ;;;
 ;;; http-request-internal is registered by the rust runtime.
 ;;; this file provides the user-facing API with default timeout.
+;;;
+;;; on success, returns an alist: ((status . N) (headers ...) (body . \"...\"))
+;;; on transport error, returns a plain string (not an exception). callers
+;;; should check (pair? result) before accessing fields. see gh #135.
 
 (define %default-timeout 30)
 
@@ -108,6 +111,9 @@ fn extract_response(
         .map(|(k, v)| {
             (
                 k.as_str().to_lowercase(),
+                // non-ASCII header values (rare) become "" — acceptable for
+                // an embedding context; callers needing raw bytes should use
+                // a lower-level HTTP library.
                 v.to_str().unwrap_or("").to_string(),
             )
         })
@@ -132,6 +138,10 @@ fn do_http_request(
     body: Option<&str>,
     timeout_secs: f64,
 ) -> std::result::Result<Value, String> {
+    // clamp to 1ms minimum — Duration::from_secs_f64 panics on negative values
+    // and a zero timeout is meaningless.
+    let timeout_secs = timeout_secs.max(0.001);
+
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs_f64(timeout_secs)))
@@ -149,6 +159,9 @@ fn do_http_request(
             .call()
             .map_err(|e| format!("http: {e}"))?,
         "OPTIONS" => with_headers!(agent.options(url), headers)
+            .call()
+            .map_err(|e| format!("http: {e}"))?,
+        "TRACE" => with_headers!(agent.trace(url), headers)
             .call()
             .map_err(|e| format!("http: {e}"))?,
         "POST" => {
@@ -181,32 +194,6 @@ fn do_http_request(
     extract_response(&mut response)
 }
 
-/// extract a rust `String` from a chibi scheme string sexp.
-///
-/// # Safety
-///
-/// caller must ensure `s` is a valid chibi string (`sexp_stringp(s) != 0`).
-unsafe fn sexp_to_string(s: ffi::sexp) -> String {
-    unsafe {
-        let ptr = ffi::sexp_string_data(s);
-        let len = ffi::sexp_string_size(s) as usize;
-        let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
-        String::from_utf8_lossy(bytes).into_owned()
-    }
-}
-
-/// return a scheme string from a rust `&str`, for error messages in trampolines.
-///
-/// # Safety
-///
-/// caller must ensure `ctx` is a valid chibi context.
-unsafe fn scheme_error_str(ctx: ffi::sexp, msg: &str) -> ffi::sexp {
-    unsafe {
-        let c = CString::new(msg).unwrap_or_default();
-        ffi::sexp_c_str(ctx, c.as_ptr(), msg.len() as ffi::sexp_sint_t)
-    }
-}
-
 /// FFI trampoline for `http-request-internal`.
 ///
 /// scheme signature: `(http-request-internal method url headers body timeout)`
@@ -234,17 +221,17 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         let method_sexp = ffi::sexp_car(args);
         args = ffi::sexp_cdr(args);
         if ffi::sexp_stringp(method_sexp) == 0 {
-            return scheme_error_str(ctx, "http-request-internal: method must be a string");
+            return ffi::scheme_str(ctx, "http-request-internal: method must be a string");
         }
-        let method = sexp_to_string(method_sexp);
+        let method = ffi::sexp_to_rust_string(method_sexp);
 
         // extract url (string)
         let url_sexp = ffi::sexp_car(args);
         args = ffi::sexp_cdr(args);
         if ffi::sexp_stringp(url_sexp) == 0 {
-            return scheme_error_str(ctx, "http-request-internal: url must be a string");
+            return ffi::scheme_str(ctx, "http-request-internal: url must be a string");
         }
-        let url = sexp_to_string(url_sexp);
+        let url = ffi::sexp_to_rust_string(url_sexp);
 
         // extract headers (list of pairs)
         let headers_sexp = ffi::sexp_car(args);
@@ -257,7 +244,7 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
                 let k = ffi::sexp_car(entry);
                 let v = ffi::sexp_cdr(entry);
                 if ffi::sexp_stringp(k) != 0 && ffi::sexp_stringp(v) != 0 {
-                    headers.push((sexp_to_string(k), sexp_to_string(v)));
+                    headers.push((ffi::sexp_to_rust_string(k), ffi::sexp_to_rust_string(v)));
                 }
             }
             h = ffi::sexp_cdr(h);
@@ -267,7 +254,7 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         let body_sexp = ffi::sexp_car(args);
         args = ffi::sexp_cdr(args);
         let body = if ffi::sexp_stringp(body_sexp) != 0 {
-            Some(sexp_to_string(body_sexp))
+            Some(ffi::sexp_to_rust_string(body_sexp))
         } else {
             None // #f or anything else → no body
         };
@@ -286,9 +273,9 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         match do_http_request(&method, &url, &headers, body.as_deref(), timeout_secs) {
             Ok(value) => match value.to_raw(ctx) {
                 Ok(raw) => raw,
-                Err(e) => scheme_error_str(ctx, &format!("http: response conversion failed: {e}")),
+                Err(e) => ffi::scheme_str(ctx, &format!("http: response conversion failed: {e}")),
             },
-            Err(msg) => scheme_error_str(ctx, &msg),
+            Err(msg) => ffi::scheme_str(ctx, &msg),
         }
     }
 }
