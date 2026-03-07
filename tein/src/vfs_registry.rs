@@ -229,7 +229,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     // tein/process: safe — trampolines neuter env vars, command-line, in sandbox
     VfsEntry {
         path: "tein/process",
-        deps: &["scheme/base"],
+        deps: &["scheme/base", "chibi"],
         files: &["lib/tein/process.sld", "lib/tein/process.scm"],
         clib: None,
         default_safe: true,

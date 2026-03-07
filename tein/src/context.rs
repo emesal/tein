@@ -2239,10 +2239,22 @@ impl ContextBuilder {
                 let prim_env = ffi::sexp_context_env(ctx);
                 register_eval_trampolines(ctx, prim_env)?;
 
-                // register feature-gated trampolines that scheme wrapper code
-                // references as free variables. must be in the primitive env so
-                // they end up in *chibi-env* and are visible to library bodies
-                // via `(import (chibi))`.
+                // register trampolines that scheme wrapper code references as
+                // free variables. must be in the primitive env so they end up
+                // in *chibi-env* and are visible to library bodies via
+                // `(import (chibi))`.
+                //
+                // emergency-exit: (tein process) defines `exit` as a scheme
+                // procedure that calls `emergency-exit` (rust trampoline) after
+                // dynamic-wind cleanup. must be pre-registered here so the
+                // library body can reference it as a free variable.
+                register_native_trampoline(
+                    ctx,
+                    prim_env,
+                    "emergency-exit",
+                    exit_trampoline,
+                )?;
+
                 #[cfg(feature = "http")]
                 register_native_trampoline(
                     ctx,
