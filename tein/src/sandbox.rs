@@ -404,6 +404,7 @@ fn feature_enabled(feature: Option<&str>) -> bool {
         Some("time") => cfg!(feature = "time"),
         Some("regex") => cfg!(feature = "regex"),
         Some("crypto") => cfg!(feature = "crypto"),
+        Some("http") => cfg!(feature = "http"),
         Some(f) => {
             // unknown feature name — conservatively include (build.rs handles gating)
             eprintln!("warning: unknown feature gate in VFS_REGISTRY: {f}");
