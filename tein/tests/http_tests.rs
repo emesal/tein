@@ -41,7 +41,10 @@ mod http_integration {
         let ctx = ctx();
         ctx.evaluate("(import (tein http))").unwrap();
         let result = ctx.evaluate("(http-request \"GET\" \"http://127.0.0.1:1\" '() #f 0.5)");
-        assert!(result.is_err(), "expected error on refused connection, got {result:?}");
+        assert!(
+            result.is_err(),
+            "expected error on refused connection, got {result:?}"
+        );
     }
 
     #[test]

@@ -139,7 +139,7 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 **tein_const scheme naming**: constants get no module prefix — `#[tein_const] pub const GREETING` in module `"foo"` → scheme name `greeting`, not `foo-greeting`. free fns do get the prefix (`foo-greet`).
 
-**Result::Err returns a scheme string**: `fn foo() -> Result<i64, String>` — the `Err` path returns `sexp_c_str(msg)` which becomes `Value::String(msg)` in rust. it's not an exception; `(test-error ...)` won't catch it. match on `Value::String` instead. same in internal and ext mode.
+**Result::Err raises a scheme exception**: `fn foo() -> Result<i64, String>` — the `Err` path calls `make_error(msg)` which creates a proper r7rs error object. in scheme, catch with `(guard (exn ((error-object? exn) (error-object-message exn))) ...)`. in rust, `evaluate()` returns `Err(Error::EvalError(msg))`. same in internal and ext mode.
 
 **import warning suppression (eval.c patch E)**: `define_fn_variadic` registers bindings into the top-level env, not the library env. chibi's `sexp_env_import_op` would normally warn "importing undefined variable" for these because they're absent from the library's `.scm`. the fork patch suppresses the warning when `oldcell` (destination env lookup) is non-NULL — meaning the name is already reachable. NOTE: ext foreign type method convenience procs previously had doubled name prefixes (#69, fixed).
 

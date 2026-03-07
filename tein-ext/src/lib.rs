@@ -235,8 +235,7 @@ pub struct TeinExtApi {
     /// Create a scheme exception (error object) from a message string.
     /// Equivalent to `(error msg)` in scheme. Catchable by `guard`.
     /// `len` is byte length; pass -1 for null-terminated C strings.
-    pub make_error:
-        unsafe extern "C" fn(*mut OpaqueCtx, *const c_char, c_long) -> *mut OpaqueVal,
+    pub make_error: unsafe extern "C" fn(*mut OpaqueCtx, *const c_char, c_long) -> *mut OpaqueVal,
 
     // ── sentinels ────────────────────────────────────────────────────
     // These return the canonical singleton values. Do not allocate.

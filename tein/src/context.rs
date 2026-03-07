@@ -821,8 +821,7 @@ unsafe extern "C" fn port_write_trampoline(
 #[cfg(feature = "json")]
 /// Trampoline for `json-parse`: takes one scheme string argument, returns parsed value.
 ///
-/// On parse error or type mismatch, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On parse error or type mismatch, raises a scheme exception.
 unsafe extern "C" fn json_parse_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -9165,11 +9164,11 @@ mod tests {
     // variadic trampolines (define_fn_variadic, num_args=0) receive sexp_null as
     // `args` when called with no arguments — chibi does no arity checking. calling
     // sexp_car on sexp_null is UB (segfault). these tests verify:
-    //   (a) no-args → Err (or scheme error string, per trampoline convention)
-    //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err or error string
+    //   (a) no-args → Err (scheme exception)
+    //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err (scheme exception)
     //   (c) extra args don't crash (variadic; extra args are silently ignored)
     //
-    // note: json/toml parse/stringify errors return a scheme *string* (not an exception),
+    // note: json/toml parse/stringify errors raise scheme exceptions (error objects),
     // per the AGENTS.md convention for native function errors. so we match Value::String.
     // get-environment-variable, file-exists?, delete-file, and load return make_error
     // (proper scheme exceptions) → evaluate() returns Err.
@@ -10283,7 +10282,7 @@ mod tests {
         // just verify it's not an error — the exact structure depends on chibi's impl
         assert!(
             !matches!(result, Value::String(_)),
-            "expected parsed content-type, got error string: {result}"
+            "expected parsed content-type, got error or unexpected value: {result}"
         );
     }
 
@@ -10836,9 +10835,12 @@ mod tests {
         fn test_hash_invalid_input() {
             let ctx = Context::builder().standard_env().build().unwrap();
             ctx.evaluate("(import (tein crypto))").unwrap();
-            let result = ctx.evaluate("(sha256 42)").unwrap();
-            // Result::Err returns a scheme string (see AGENTS.md critical gotchas)
-            assert!(matches!(result, Value::String(s) if s.contains("string or bytevector")));
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(sha256 42)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("string or bytevector"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
         }
 
         #[test]
@@ -10863,8 +10865,12 @@ mod tests {
         fn test_random_bytes_negative() {
             let ctx = Context::builder().standard_env().build().unwrap();
             ctx.evaluate("(import (tein crypto))").unwrap();
-            let result = ctx.evaluate("(random-bytes -1)").unwrap();
-            assert!(matches!(result, Value::String(s) if s.contains("non-negative")));
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(random-bytes -1)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("non-negative"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
         }
 
         #[test]
@@ -10887,8 +10893,12 @@ mod tests {
         fn test_random_integer_invalid() {
             let ctx = Context::builder().standard_env().build().unwrap();
             ctx.evaluate("(import (tein crypto))").unwrap();
-            let result = ctx.evaluate("(random-integer 0)").unwrap();
-            assert!(matches!(result, Value::String(s) if s.contains("positive")));
+            // Result::Err raises a scheme exception (see AGENTS.md)
+            let result = ctx.evaluate("(random-integer 0)");
+            match result {
+                Err(e) => assert!(e.to_string().contains("positive"), "got: {e}"),
+                Ok(v) => panic!("expected error, got {v:?}"),
+            }
         }
 
         #[test]

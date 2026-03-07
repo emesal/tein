@@ -115,10 +115,9 @@ pub mod raw {
     pub use crate::ffi::{
         get_false, get_null, get_true, get_void, make_error, sexp_booleanp, sexp_bytes_data,
         sexp_bytes_length, sexp_bytesp, sexp_c_str, sexp_car, sexp_cdr, sexp_charp, sexp_cons,
-        sexp_exceptionp,
-        sexp_flonum_value, sexp_flonump, sexp_integerp, sexp_make_boolean, sexp_make_bytes,
-        sexp_make_character, sexp_make_fixnum, sexp_make_flonum, sexp_nullp, sexp_pairp,
-        sexp_portp, sexp_string_data, sexp_string_size, sexp_stringp, sexp_symbolp,
+        sexp_exceptionp, sexp_flonum_value, sexp_flonump, sexp_integerp, sexp_make_boolean,
+        sexp_make_bytes, sexp_make_character, sexp_make_fixnum, sexp_make_flonum, sexp_nullp,
+        sexp_pairp, sexp_portp, sexp_string_data, sexp_string_size, sexp_stringp, sexp_symbolp,
         sexp_unbox_character, sexp_unbox_fixnum, sexp_vectorp,
     };
 }
