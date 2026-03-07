@@ -4056,6 +4056,14 @@ impl Context {
     /// `command-line`, and `emergency-exit` native functions.
     ///
     /// Called during `build()` for standard-env contexts.
+    ///
+    /// Note: `emergency-exit` is also registered into the primitive env earlier
+    /// in `build()` via `register_native_trampoline`. Both registrations are
+    /// required: the primitive-env registration makes it visible to library
+    /// bodies (so `process.scm` can call it as a free variable); this
+    /// `define_fn_variadic` registration makes it importable from the top-level
+    /// env via eval.c patch H (needed for `(import (tein process))` to export
+    /// `emergency-exit` transitively).
     fn register_process_module(&self) -> Result<()> {
         self.define_fn_variadic("get-environment-variable", get_env_var_trampoline)?;
         self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
@@ -5813,7 +5821,14 @@ mod tests {
 
     #[test]
     fn test_exit_flushes_output_port() {
-        // exit should flush current-output-port before halting
+        // exit must flush current-output-port before halting (r7rs 6.13.2).
+        //
+        // chibi custom ports use a 4096-byte buffer — the rust Write impl is
+        // only called during sexp_buffered_flush, not on every scheme write.
+        // the flush here comes from `(flush-output-port (current-output-port))`
+        // in process.scm, called before delegating to emergency-exit. without
+        // that flush, `(display "hello")` would stay in chibi's buffer and the
+        // SharedWriter would never see any bytes.
         use std::sync::{Arc, Mutex};
         struct SharedWriter(Arc<Mutex<Vec<u8>>>);
         impl std::io::Write for SharedWriter {

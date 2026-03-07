@@ -225,7 +225,7 @@ ContextBuilder with sandboxed():
 ```
 Scheme code calls (exit) or (exit obj) via (tein process):
   1. exit (scheme proc) unwinds %dk dynamic-wind stack via travel-to-point!
-  2. flushes and closes current output/error ports
+  2. flushes current output/error ports (r7rs requires flush, not close)
   3. calls emergency-exit (rust trampoline)
   4. emergency-exit sets EXIT_REQUESTED + EXIT_VALUE thread-locals
   5. returns an exception sexp to stop VM immediately
