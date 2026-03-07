@@ -9168,10 +9168,9 @@ mod tests {
     //   (b) wrong type (integer, boolean, list, symbol, lambda, continuation) → Err (scheme exception)
     //   (c) extra args don't crash (variadic; extra args are silently ignored)
     //
-    // note: json/toml parse/stringify errors raise scheme exceptions (error objects),
-    // per the AGENTS.md convention for native function errors. so we match Value::String.
-    // get-environment-variable, file-exists?, delete-file, and load return make_error
-    // (proper scheme exceptions) → evaluate() returns Err.
+    // note: all trampoline errors raise scheme exceptions → evaluate() returns Err.
+    // json/toml/http parse/stringify errors, get-environment-variable, file-exists?,
+    // delete-file, and load all use make_error and propagate as Err(EvalError(...)).
 
     // --- get-environment-variable ---
 
@@ -10279,10 +10278,9 @@ mod tests {
             )
             .expect("chibi/mime should load and parse content types");
         // result is an alist like (("text/html") ("charset" . "utf-8"))
-        // just verify it's not an error — the exact structure depends on chibi's impl
         assert!(
-            !matches!(result, Value::String(_)),
-            "expected parsed content-type, got error or unexpected value: {result}"
+            matches!(result, Value::List(_) | Value::Pair(_, _)),
+            "expected parsed content-type alist, got: {result}"
         );
     }
 
