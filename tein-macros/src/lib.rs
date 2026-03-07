@@ -836,7 +836,7 @@ fn generate_ext_method_wrapper(
                 Err(_) => unsafe {
                     let msg = concat!("rust panic in method ", stringify!(#method_ident));
                     let c_msg = ::std::ffi::CString::new(msg).unwrap();
-                    ((*api).sexp_c_str)(
+                    ((*api).make_error)(
                         ctx, c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
                     )
                 }
@@ -917,7 +917,7 @@ fn generate_scheme_fn_ext(input: ItemFn) -> syn::Result<proc_macro2::TokenStream
                     let __tein_api = __TEIN_API.with(|cell| cell.get());
                     let msg = concat!("rust panic in ", stringify!(#fn_name));
                     let c_msg = ::std::ffi::CString::new(msg).unwrap();
-                    ((*__tein_api).sexp_c_str)(
+                    ((*__tein_api).make_error)(
                         ctx as *mut tein_ext::OpaqueCtx,
                         c_msg.as_ptr(),
                         msg.len() as ::std::ffi::c_long,
@@ -1056,12 +1056,11 @@ fn gen_return_conversion_ext_fn(
                 Ok(quote! {
                     match #call_expr {
                         Ok(__tein_ok) => #ok_conv,
-                        // Result::Err returns a scheme string, not an exception. callers
-                        // receive Value::String(msg). (test-error ...) won't catch it.
+                        // Result::Err raises a scheme exception (error object).
                         Err(__tein_err) => {
                             let msg = __tein_err.to_string();
                             let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
-                            ((*__tein_api).sexp_c_str)(
+                            ((*__tein_api).make_error)(
                                 ctx as *mut tein_ext::OpaqueCtx,
                                 c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
                             )
@@ -1150,7 +1149,7 @@ fn gen_return_conversion_ext(
                         Err(__tein_err) => {
                             let msg = __tein_err.to_string();
                             let c_msg = ::std::ffi::CString::new(msg.as_str()).unwrap_or_default();
-                            ((*#api).sexp_c_str)(
+                            ((*#api).make_error)(
                                 ctx, c_msg.as_ptr(), msg.len() as ::std::ffi::c_long,
                             )
                         }
