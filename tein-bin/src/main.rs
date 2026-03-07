@@ -16,6 +16,8 @@ struct Args {
     mode: Mode,
     sandbox: bool,
     all_modules: bool,
+    /// filesystem module search directories from `-I`/`--include-path` flags.
+    module_paths: Vec<String>,
 }
 
 /// Parse CLI args (does not include argv[0]).
@@ -24,13 +26,24 @@ struct Args {
 fn parse_args(raw: Vec<String>) -> Result<Args, String> {
     let mut sandbox = false;
     let mut all_modules = false;
+    let mut module_paths: Vec<String> = vec![];
     let mut positional: Vec<String> = vec![];
+    let mut iter = raw.into_iter();
 
-    for arg in raw {
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--sandbox" => sandbox = true,
             "--all-modules" => all_modules = true,
+            "-I" | "--include-path" => {
+                let path = iter
+                    .next()
+                    .ok_or_else(|| format!("{} requires a path argument", arg))?;
+                module_paths.push(path);
+            }
             other if other.starts_with("--") => {
+                return Err(format!("unknown flag: {}", other));
+            }
+            other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unknown flag: {}", other));
             }
             _ => positional.push(arg),
@@ -53,6 +66,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         mode,
         sandbox,
         all_modules,
+        module_paths,
     })
 }
 
@@ -112,7 +126,7 @@ fn run_script(path: &std::path::Path, args: &Args) -> i32 {
 fn build_context_script(args: &Args, script_path: &std::path::Path) -> tein::Result<tein::Context> {
     use tein::sandbox::Modules;
 
-    if args.sandbox {
+    let builder = if args.sandbox {
         let modules = if args.all_modules {
             Modules::All
         } else {
@@ -129,29 +143,33 @@ fn build_context_script(args: &Args, script_path: &std::path::Path) -> tein::Res
             .standard_env()
             .sandboxed(modules)
             .command_line(&cmd)
-            .build()
     } else {
-        tein::Context::builder().standard_env().build()
-    }
+        tein::Context::builder().standard_env()
+    };
+    args.module_paths
+        .iter()
+        .fold(builder, |b, p| b.module_path(p))
+        .build()
 }
 
 /// Build a tein Context for REPL mode.
 fn build_context_repl(args: &Args) -> tein::Result<tein::Context> {
     use tein::sandbox::Modules;
 
-    if args.sandbox {
+    let builder = if args.sandbox {
         let modules = if args.all_modules {
             Modules::All
         } else {
             Modules::Safe
         };
-        tein::Context::builder()
-            .standard_env()
-            .sandboxed(modules)
-            .build()
+        tein::Context::builder().standard_env().sandboxed(modules)
     } else {
-        tein::Context::builder().standard_env().build()
-    }
+        tein::Context::builder().standard_env()
+    };
+    args.module_paths
+        .iter()
+        .fold(builder, |b, p| b.module_path(p))
+        .build()
 }
 
 /// Compute net paren depth change for a line, skipping strings and comments.
@@ -386,7 +404,9 @@ fn main() {
         Ok(a) => a,
         Err(e) => {
             eprintln!("tein: {}", e);
-            eprintln!("usage: tein [--sandbox] [--all-modules] [script.scm [args...]]");
+            eprintln!(
+                "usage: tein [--sandbox] [--all-modules] [-I path]... [script.scm [args...]]"
+            );
             std::process::exit(2);
         }
     };
@@ -470,6 +490,7 @@ mod tests {
         assert_eq!(args.mode, Mode::Repl);
         assert!(!args.sandbox);
         assert!(!args.all_modules);
+        assert!(args.module_paths.is_empty());
     }
 
     #[test]
@@ -571,5 +592,51 @@ mod tests {
                 extra_args: vec![]
             }
         );
+    }
+
+    #[test]
+    fn include_path_short_flag() {
+        let args = parse_args(vec!["-I".into(), "./lib".into()]).unwrap();
+        assert_eq!(args.module_paths, vec!["./lib".to_string()]);
+    }
+
+    #[test]
+    fn include_path_long_flag() {
+        let args = parse_args(vec!["--include-path".into(), "./lib".into()]).unwrap();
+        assert_eq!(args.module_paths, vec!["./lib".to_string()]);
+    }
+
+    #[test]
+    fn include_path_repeated() {
+        let args = parse_args(vec![
+            "-I".into(),
+            "./lib".into(),
+            "-I".into(),
+            "/usr/share/tein".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            args.module_paths,
+            vec!["./lib".to_string(), "/usr/share/tein".to_string()]
+        );
+    }
+
+    #[test]
+    fn include_path_with_sandbox() {
+        let args = parse_args(vec!["--sandbox".into(), "-I".into(), "./lib".into()]).unwrap();
+        assert!(args.sandbox);
+        assert_eq!(args.module_paths, vec!["./lib".to_string()]);
+    }
+
+    #[test]
+    fn include_path_missing_value() {
+        let result = parse_args(vec!["-I".into()]);
+        assert!(result.is_err(), "-I without path value should error");
+    }
+
+    #[test]
+    fn no_include_path_is_empty() {
+        let args = parse_args(vec![]).unwrap();
+        assert!(args.module_paths.is_empty());
     }
 }
