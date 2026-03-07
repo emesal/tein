@@ -839,7 +839,7 @@ unsafe extern "C" fn json_parse_trampoline(
         if ffi::sexp_stringp(str_sexp) == 0 {
             let msg = "json-parse: expected string argument";
             let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
         let data = ffi::sexp_string_data(str_sexp);
         let len = ffi::sexp_string_size(str_sexp) as usize;
@@ -848,7 +848,7 @@ unsafe extern "C" fn json_parse_trampoline(
             Err(e) => {
                 let msg = format!("json-parse: invalid UTF-8: {e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
             }
         };
         match crate::json::json_parse(input) {
@@ -857,13 +857,13 @@ unsafe extern "C" fn json_parse_trampoline(
                 Err(e) => {
                     let msg = format!("json-parse: {e}");
                     let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
                 }
             },
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -877,8 +877,7 @@ unsafe extern "C" fn json_parse_trampoline(
 /// when the cdr is a proper list (e.g. `("x" . (("y" . 1)))` → `("x" ("y" . 1))`),
 /// losing the structural cue needed to detect alists.
 ///
-/// On conversion error, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On conversion error, raises a scheme exception.
 unsafe extern "C" fn json_stringify_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -900,7 +899,7 @@ unsafe extern "C" fn json_stringify_trampoline(
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -911,8 +910,7 @@ unsafe extern "C" fn json_stringify_trampoline(
 #[cfg(feature = "toml")]
 /// Trampoline for `toml-parse`: takes one scheme string argument, returns parsed value.
 ///
-/// On parse error or type mismatch, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On parse error or type mismatch, raises a scheme exception.
 unsafe extern "C" fn toml_parse_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -929,7 +927,7 @@ unsafe extern "C" fn toml_parse_trampoline(
         if ffi::sexp_stringp(str_sexp) == 0 {
             let msg = "toml-parse: expected string argument";
             let c_msg = CString::new(msg).unwrap_or_default();
-            return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
         }
         let data = ffi::sexp_string_data(str_sexp);
         let len = ffi::sexp_string_size(str_sexp) as usize;
@@ -938,7 +936,7 @@ unsafe extern "C" fn toml_parse_trampoline(
             Err(e) => {
                 let msg = format!("toml-parse: invalid UTF-8: {e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                return ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
             }
         };
         match crate::toml::toml_parse(input) {
@@ -947,13 +945,13 @@ unsafe extern "C" fn toml_parse_trampoline(
                 Err(e) => {
                     let msg = format!("toml-parse: {e}");
                     let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                    ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                    ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
                 }
             },
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
@@ -965,8 +963,7 @@ unsafe extern "C" fn toml_parse_trampoline(
 /// Works directly on raw chibi sexps via `toml::toml_stringify_raw` to preserve
 /// alist structure, then delegates to `toml::to_string()` for correct formatting.
 ///
-/// On conversion error, returns a scheme string with the error message.
-/// This matches tein's convention for native function errors (see AGENTS.md).
+/// On conversion error, raises a scheme exception.
 unsafe extern "C" fn toml_stringify_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -988,7 +985,7 @@ unsafe extern "C" fn toml_stringify_trampoline(
             Err(e) => {
                 let msg = format!("{e}");
                 let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::sexp_c_str(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
             }
         }
     }
