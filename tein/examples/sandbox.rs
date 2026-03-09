@@ -28,15 +28,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sandboxed(Modules::Safe)
         .build()?;
 
-    println!("==> (import (scheme base)) (+ 1 2) in Modules::Safe");
-    ctx.evaluate("(import (scheme base))")?;
+    // scheme/base and scheme/write are auto-imported in sandboxed contexts
+    println!("==> (+ 1 2) in Modules::Safe — scheme/base auto-imported");
     let result = ctx.evaluate("(+ 1 2)")?;
     println!("    {}", result);
 
-    println!("\n==> (import (scheme eval)) blocked in Modules::Safe");
+    println!("\n==> (import (scheme eval)) in Modules::Safe — allowed (in Safe allowlist)");
     match ctx.evaluate("(import (scheme eval))") {
         Err(e) => println!("    blocked: {}", e),
-        Ok(v) => println!("    unexpected: {}", v),
+        Ok(v) => println!("    ok: {}", v),
     }
 
     // Modules::Only: explicit module list with transitive deps resolved
@@ -45,8 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .sandboxed(Modules::only(&["scheme/base"]))
         .build()?;
 
-    println!("\n==> (import (scheme base)) (define (sq x) (* x x)) (sq 7) in Modules::only");
-    ctx.evaluate("(import (scheme base))")?;
+    println!("\n==> (define (sq x) (* x x)) (sq 7) in Modules::only — base auto-imported");
     let result = ctx.evaluate("(define (sq x) (* x x)) (sq 7)")?;
     println!("    {}", result);
 
@@ -68,17 +67,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n--- combining limits + sandboxing ---\n");
 
-    // step limit + Modules::Safe: import first (VFS loading costs many steps),
-    // then the step limit guards user computation.
-    // tip: set a generous limit to cover module loading, tighten for eval-time.
+    // step limit + Modules::Safe: scheme/base + scheme/write are auto-imported
+    // during build() (VFS loading costs steps). set a generous limit to cover
+    // module loading and any additional imports, then tighten for eval-time.
     let ctx = Context::builder()
         .standard_env()
         .sandboxed(Modules::Safe)
         .step_limit(5_000_000)
         .build()?;
-    ctx.evaluate("(import (scheme base))")?;
 
-    println!("==> mutation works in Modules::Safe after import");
+    println!("==> mutation works in Modules::Safe");
     let result = ctx.evaluate("(define x (cons 1 2)) (set-car! x 99) (car x)")?;
     println!("    {}", result);
 
@@ -137,7 +135,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(&test_file, "hello-from-tein")?;
 
     println!("==> reading file from allowed path");
-    ctx.evaluate("(import (scheme base))")?;
     ctx.evaluate("(import (scheme read))")?;
     let code = format!(
         r#"(define p (open-input-file "{}")) (define r (read p)) (close-input-port p) r"#,
@@ -160,7 +157,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .step_limit(5_000_000)
         .build()?;
 
-    ctx.evaluate("(import (scheme base))")?;
     let output_file = io_dir.join("output.txt");
     println!("\n==> writing file to allowed path");
     let code = format!(
