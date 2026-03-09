@@ -21,7 +21,7 @@ Each layer operates independently. You can set a step limit without sandboxing m
 
 ## module restriction — `Modules` variants
 
-`.sandboxed(modules)` activates the module sandbox. It builds a null environment containing only `import` syntax, arms the VFS gate to enforce an allowlist, and registers UX stubs for all excluded module exports.
+`.sandboxed(modules)` activates the module sandbox. It builds a null environment, arms the VFS gate to enforce an allowlist, registers UX stubs for all excluded module exports, and auto-imports `(scheme base)` and `(scheme write)` so the context starts with a usable baseline. `Modules::None` skips the auto-import — it is the "build your own allowlist" entry point for use with `allow_module()`.
 
 `.sandboxed()` requires `.standard_env()` — the full R7RS environment must be loaded before restriction is applied (the null env copies bindings out of it).
 
@@ -57,6 +57,8 @@ let ctx = Context::builder()
 
 The default for sandboxed contexts. Includes all modules marked `default_safe` in the registry with transitive dependencies resolved.
 
+Sandboxed contexts (except `Modules::None`) auto-import `(scheme base)` and `(scheme write)` during `build()`. These modules are available immediately without an explicit `(import ...)`.
+
 Included in Safe:
 
 - `scheme/base`, `scheme/char`, `scheme/write`, `scheme/read`
@@ -82,7 +84,7 @@ Superset of `Modules::Safe`. Includes all vetted modules in the VFS registry, fi
 
 ### `Modules::None`
 
-Syntax only. The `import` form is available (so Scheme code can attempt imports), but the VFS gate rejects every module. UX stubs are registered for all known module exports.
+Syntax only — the "build your own allowlist" entry point. The `import` form is available, but the VFS gate rejects every module. UX stubs are registered for all known module exports. Unlike other `Modules` variants, `Modules::None` does **not** auto-import `scheme/base` or `scheme/write`. Combine with `allow_module()` for precise control — transitive deps are resolved automatically.
 
 ### `Modules::only(&[...])`
 

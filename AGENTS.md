@@ -131,6 +131,8 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 
 ## critical gotchas
 
+**sandbox auto-import**: sandboxed contexts (except `Modules::None`) auto-import `(scheme base)` and `(scheme write)` during `build()`. `scheme/base` failure is fatal (`InitError`); `scheme/write` failure is silently skipped (the allowlist might exclude it). `Modules::None` skips both — it's the "build your own allowlist" entry point. the auto-import happens after the VFS gate is armed, so it goes through normal module resolution.
+
 **`#[tein_module]` inside tein itself**: requires `extern crate self as tein;` in `lib.rs` because the macro generates `tein::*` paths. the mod also needs `pub(crate)` visibility so `context.rs` can call the generated `register_module_*` fn via `crate::mod_name::inner::register_module_name(&ctx)`.
 
 **`Value` arg in `#[tein_fn]` free fns**: use `value: Value` in the fn signature to accept any scheme value. extraction uses `Value::from_raw`; `Value` is brought into scope automatically by the macro. useful for predicates that accept heterogeneous input (e.g. `uuid?`).

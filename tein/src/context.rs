@@ -2481,6 +2481,39 @@ impl ContextBuilder {
                 }
 
                 ffi::sexp_context_env_set(ctx, null_env);
+
+                // auto-import scheme/base + scheme/write so sandboxed contexts
+                // start with a usable baseline. skipped for Modules::None (the
+                // "build your own allowlist" entry point — users combine it with
+                // allow_module() for precise control).
+                // two separate imports: scheme/base failure is fatal; scheme/write
+                // failure is silently skipped (allowlist might exclude it).
+                if !matches!(modules, Modules::None) {
+                    for import in &["(import (scheme base))", "(import (scheme write))"] {
+                        let c_import = CString::new(*import).unwrap();
+                        let import_str = ffi::sexp_c_str(
+                            ctx,
+                            c_import.as_ptr(),
+                            import.len() as ffi::sexp_sint_t,
+                        );
+                        let import_port = ffi::sexp_open_input_string(ctx, import_str);
+                        let _import_str_guard = ffi::GcRoot::new(ctx, import_str);
+                        let _import_port_guard = ffi::GcRoot::new(ctx, import_port);
+                        let expr = ffi::sexp_read(ctx, import_port);
+                        let _expr_guard = ffi::GcRoot::new(ctx, expr);
+                        let result = ffi::sexp_evaluate(ctx, expr, null_env);
+                        if ffi::sexp_exceptionp(result) != 0 && *import == "(import (scheme base))"
+                        {
+                            let msg = Value::from_raw(ctx, result)
+                                .unwrap_or_else(|e| Value::String(format!("{e}")));
+                            ffi::sexp_destroy_context(ctx);
+                            return Err(crate::error::Error::InitError(format!(
+                                "sandbox auto-import of scheme/base failed: {msg}"
+                            )));
+                        }
+                        // scheme/write: silently skip if not in allowlist
+                    }
+                }
             }
 
             // set FsPolicy if file_read() or file_write() was configured.
@@ -9753,6 +9786,97 @@ mod tests {
             .evaluate("(import (scheme write)) (begin (write 1) #t)")
             .expect("sandboxed all with scheme/write");
         assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_sandbox_auto_import_safe_has_base_and_write() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .build()
+            .expect("build");
+        // scheme/base: let and + are available without explicit import
+        let result = ctx
+            .evaluate("(let ((x (+ 1 2))) x)")
+            .expect("let + should work without explicit import");
+        assert_eq!(result, Value::Integer(3));
+        // scheme/write: display is available without explicit import
+        let result = ctx
+            .evaluate("(begin (display \"\") #t)")
+            .expect("display should work without explicit import");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_sandbox_auto_import_all_has_base_and_write() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::All)
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(+ 40 2)")
+            .expect("+ should work in All without explicit import");
+        assert_eq!(result, Value::Integer(42));
+        let result = ctx
+            .evaluate("(begin (display \"\") #t)")
+            .expect("display should work in All without explicit import");
+        assert_eq!(result, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_sandbox_auto_import_only_with_base_and_write() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base", "scheme/write"]))
+            .build()
+            .expect("build");
+        let result = ctx
+            .evaluate("(let ((x 42)) x)")
+            .expect("let should work without explicit import");
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn test_sandbox_auto_import_none_skips() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::None)
+            .build()
+            .expect("build");
+        // + should be stubbed — SandboxViolation (not available without import)
+        let err = ctx.evaluate("(+ 1 2)").expect_err("should fail");
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_sandbox_auto_import_only_base_without_write() {
+        // scheme/write not in allowlist — auto-import skips it silently,
+        // but scheme/base still works
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::only(&["scheme/base"]))
+            .build()
+            .expect("build should succeed even without scheme/write");
+        // base forms work
+        let result = ctx.evaluate("(+ 1 2)").expect("base should work");
+        assert_eq!(result, Value::Integer(3));
+        // display should fail — scheme/write was not imported
+        let err = ctx
+            .evaluate("(display 42)")
+            .expect_err("display should fail without scheme/write");
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {err:?}"
+        );
     }
 
     #[test]
