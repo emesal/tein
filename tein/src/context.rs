@@ -2489,10 +2489,7 @@ impl ContextBuilder {
                 // two separate imports: scheme/base failure is fatal; scheme/write
                 // failure is silently skipped (allowlist might exclude it).
                 if !matches!(modules, Modules::None) {
-                    for import in &[
-                        "(import (scheme base))",
-                        "(import (scheme write))",
-                    ] {
+                    for import in &["(import (scheme base))", "(import (scheme write))"] {
                         let c_import = CString::new(*import).unwrap();
                         let import_str = ffi::sexp_c_str(
                             ctx,
@@ -2505,17 +2502,16 @@ impl ContextBuilder {
                         let expr = ffi::sexp_read(ctx, import_port);
                         let _expr_guard = ffi::GcRoot::new(ctx, expr);
                         let result = ffi::sexp_evaluate(ctx, expr, null_env);
-                        if ffi::sexp_exceptionp(result) != 0 {
-                            if *import == "(import (scheme base))" {
-                                let msg = Value::from_raw(ctx, result)
-                                    .unwrap_or_else(|e| Value::String(format!("{e}")));
-                                ffi::sexp_destroy_context(ctx);
-                                return Err(crate::error::Error::InitError(format!(
-                                    "sandbox auto-import of scheme/base failed: {msg}"
-                                )));
-                            }
-                            // scheme/write: silently skip if not in allowlist
+                        if ffi::sexp_exceptionp(result) != 0 && *import == "(import (scheme base))"
+                        {
+                            let msg = Value::from_raw(ctx, result)
+                                .unwrap_or_else(|e| Value::String(format!("{e}")));
+                            ffi::sexp_destroy_context(ctx);
+                            return Err(crate::error::Error::InitError(format!(
+                                "sandbox auto-import of scheme/base failed: {msg}"
+                            )));
                         }
+                        // scheme/write: silently skip if not in allowlist
                     }
                 }
             }
@@ -9871,9 +9867,7 @@ mod tests {
             .build()
             .expect("build should succeed even without scheme/write");
         // base forms work
-        let result = ctx
-            .evaluate("(+ 1 2)")
-            .expect("base should work");
+        let result = ctx.evaluate("(+ 1 2)").expect("base should work");
         assert_eq!(result, Value::Integer(3));
         // display should fail — scheme/write was not imported
         let err = ctx
