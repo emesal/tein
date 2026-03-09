@@ -2481,6 +2481,43 @@ impl ContextBuilder {
                 }
 
                 ffi::sexp_context_env_set(ctx, null_env);
+
+                // auto-import scheme/base + scheme/write so sandboxed contexts
+                // start with a usable baseline. skipped for Modules::None (the
+                // "build your own allowlist" entry point — users combine it with
+                // allow_module() for precise control).
+                // two separate imports: scheme/base failure is fatal; scheme/write
+                // failure is silently skipped (allowlist might exclude it).
+                if !matches!(modules, Modules::None) {
+                    for import in &[
+                        "(import (scheme base))",
+                        "(import (scheme write))",
+                    ] {
+                        let c_import = CString::new(*import).unwrap();
+                        let import_str = ffi::sexp_c_str(
+                            ctx,
+                            c_import.as_ptr(),
+                            import.len() as ffi::sexp_sint_t,
+                        );
+                        let import_port = ffi::sexp_open_input_string(ctx, import_str);
+                        let _import_str_guard = ffi::GcRoot::new(ctx, import_str);
+                        let _import_port_guard = ffi::GcRoot::new(ctx, import_port);
+                        let expr = ffi::sexp_read(ctx, import_port);
+                        let _expr_guard = ffi::GcRoot::new(ctx, expr);
+                        let result = ffi::sexp_evaluate(ctx, expr, null_env);
+                        if ffi::sexp_exceptionp(result) != 0 {
+                            if *import == "(import (scheme base))" {
+                                let msg = Value::from_raw(ctx, result)
+                                    .unwrap_or_else(|e| Value::String(format!("{e}")));
+                                ffi::sexp_destroy_context(ctx);
+                                return Err(crate::error::Error::InitError(format!(
+                                    "sandbox auto-import of scheme/base failed: {msg}"
+                                )));
+                            }
+                            // scheme/write: silently skip if not in allowlist
+                        }
+                    }
+                }
             }
 
             // set FsPolicy if file_read() or file_write() was configured.
