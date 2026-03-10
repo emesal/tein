@@ -217,6 +217,19 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         shadow_sld: None,
     },
     VfsEntry {
+        path: "tein/filesystem",
+        deps: &["scheme/base"],
+        files: &["lib/tein/filesystem.sld", "lib/tein/filesystem.scm"],
+        clib: None,
+        default_safe: true,
+        // Embedded: provides stub scheme definitions (constants + deferred fns) that
+        // chibi can compile against. register_module_tein_filesystem then overwrites
+        // the stubs with native rust implementations via define_fn_variadic at context init.
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
         path: "tein/load",
         deps: &["scheme/base"],
         files: &["lib/tein/load.sld", "lib/tein/load.scm"],
@@ -486,27 +499,18 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/load: VFS shadow — re-exports VFS-restricted load from (tein load)
-    // and sandboxed environment via tein-environment-internal trampoline.
-    // see also: tein/load.sld exports load as (rename tein-load-vfs-internal load).
-    // tein-environment-internal is registered into the primitive env before load_standard_env
-    // so it propagates into *chibi-env* and is available via (import (chibi)). (#97)
+    // scheme/load: re-exports VFS-restricted load from (tein load) and sandboxed
+    // environment via tein-environment-internal trampoline (registered into primitive
+    // env before load_standard_env → propagates into *chibi-env*). (#97)
     VfsEntry {
         path: "scheme/load",
         deps: &["tein/load"],
-        files: &[],
+        files: &["lib/scheme/load.sld"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Shadow,
+        source: VfsSource::Embedded,
         feature: None,
-        shadow_sld: Some("\
-(define-library (scheme load)
-  (import (tein load) (chibi))
-  (export load environment)
-  (begin
-    (define (environment . specs)
-      (apply tein-environment-internal specs))))
-"),
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/list",
@@ -858,141 +862,72 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/file: VFS shadow — mirrors chibi's native scheme/file.sld.
-    // imports (chibi) for file IO opcodes (open-input-file, call-with-*, etc.)
-    // and (chibi filesystem) for delete-file and file-exists?.
-    // in sandboxed contexts, chibi/filesystem is a generated stub that returns
-    // #f/#t safely; policy enforcement for open-*-file is at the C opcode level
-    // (eval.c patches F and G call tein_fs_check_access() before fopen()).
+    // scheme/file: file IO opcodes from (chibi) + delete-file/file-exists? from
+    // (tein filesystem). policy enforcement for open-*-file at C opcode level
+    // (eval.c patches F, G call tein_fs_check_access() before fopen()).
     VfsEntry {
         path: "scheme/file",
-        deps: &["chibi/filesystem"],
-        files: &[],
+        deps: &["tein/filesystem"],
+        files: &["lib/scheme/file.sld"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Shadow,
-        feature: None,
-        shadow_sld: Some("\
-(define-library (scheme file)
-  (import (chibi) (only (chibi filesystem) delete-file file-exists?))
-  (export file-exists? delete-file
-          open-input-file open-binary-input-file
-          open-output-file open-binary-output-file
-          call-with-input-file call-with-output-file
-          with-input-from-file with-output-to-file))
-"),
-    },
-    // scheme/eval: VFS shadow — sandboxed environment validated against VFS allowlist.
-    // tein-environment-internal is registered into the primitive env before load_standard_env
-    // so it propagates into *chibi-env*; the shadow body finds it via (import (chibi)). (#97)
-    // eval re-exported from (chibi). closes #97.
-    VfsEntry {
-        path: "scheme/eval",
-        deps: &[],
-        files: &[],
-        clib: None,
-        default_safe: true,
-        source: VfsSource::Shadow,
-        feature: None,
-        shadow_sld: Some("\
-(define-library (scheme eval)
-  (import (chibi))
-  (export eval environment)
-  (begin
-    (define (environment . specs)
-      (apply tein-environment-internal specs))))
-"),
-    },
-    // scheme/repl: VFS shadow — sandboxed interaction-environment returns
-    // a persistent mutable env that accumulates definitions across evals.
-    // r7rs compliant: interaction-environment is mutable per context.
-    // tein-interaction-environment-internal is registered into the primitive env before
-    // load_standard_env, propagating into *chibi-env* for (import (chibi)) access. (#97)
-    VfsEntry {
-        path: "scheme/repl",
-        deps: &[],
-        files: &[],
-        clib: None,
-        default_safe: true,
-        source: VfsSource::Shadow,
-        feature: None,
-        shadow_sld: Some("\
-(define-library (scheme repl)
-  (import (chibi))
-  (export interaction-environment)
-  (begin
-    (define (interaction-environment)
-      (tein-interaction-environment-internal))))
-"),
-    },
-    // scheme/process-context: VFS shadow — provides r7rs process-context interface.
-    // scheme/process-context: VFS shadow — self-contained stubs for the chibi/test
-    // load chain. exit / emergency-exit are no-ops here (test-exit is never called).
-    // r7rs exit should run dynamic-wind "after" thunks; tein does not implement this.
-    // see GH #101. emergency-exit intentionally shares the stub implementation.
-    //
-    // NOTE: these stubs do NOT consult SANDBOX_ENV / SANDBOX_COMMAND_LINE. to access
-    // fake env vars in a sandboxed context, import (tein process) directly instead
-    // of relying on (scheme process-context) or (srfi 98).
-    VfsEntry {
-        path: "scheme/process-context",
-        deps: &["scheme/base"],
-        files: &[],
-        clib: None,
-        default_safe: true,
-        source: VfsSource::Shadow,
-        feature: None,
-        shadow_sld: Some("\
-(define-library (scheme process-context)
-  (import (scheme base))
-  (export get-environment-variable get-environment-variables
-          command-line exit emergency-exit)
-  (begin
-    (define (get-environment-variable name) #f)
-    (define (get-environment-variables) (list))
-    (define (command-line) (list \"tein\" \"--sandbox\"))
-    (define (exit . args) #f)
-    (define (emergency-exit . args) #f)))
-"),
-    },
-    // scheme/time: default_safe: false — depends on scheme/process-context + scheme/file
-    // the real chibi scheme/time.sld is embedded for reference but cannot be loaded in tein:
-    // it depends on scheme/time/tai-to-utc-offset which fails due to a runtime error during
-    // module init (update-cache! → raise propagates past module boundary → empty EvalError).
-    // the shadow below (VfsSource::Shadow, feature-gated on "time") overrides this in
-    // sandboxed and with_vfs_shadows contexts, re-exporting from (tein time) trampolines.
-    VfsEntry {
-        path: "scheme/time",
-        deps: &["scheme/time/tai", "scheme/time/tai-to-utc-offset"],
-        files: &["lib/scheme/time.sld"],
-        clib: Some(ClibEntry {
-            source: "lib/scheme/time.c",
-            init_suffix: "scheme_time",
-            vfs_key: "/vfs/lib/scheme/time",
-            posix_only: false,
-        }),
-        default_safe: false,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
     },
-    // scheme/time shadow — overrides the Embedded entry above in sandboxed / with_vfs_shadows
-    // contexts. re-exports from (tein time) which is always available (no C deps).
-    // single source of truth for r7rs time primitives.
-    // registered by register_vfs_shadows(). gated behind "time" feature (matches tein/time).
+    // scheme/eval: sandboxed environment validated against VFS allowlist.
+    // tein-environment-internal is registered into the primitive env before
+    // load_standard_env → propagates into *chibi-env* via (import (chibi)). (#97)
+    VfsEntry {
+        path: "scheme/eval",
+        deps: &[],
+        files: &["lib/scheme/eval.sld"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    // scheme/repl: interaction-environment returns a persistent mutable env that
+    // accumulates definitions across evals. r7rs compliant per context.
+    // tein-interaction-environment-internal registered into primitive env before
+    // load_standard_env → propagates into *chibi-env*. (#97)
+    VfsEntry {
+        path: "scheme/repl",
+        deps: &[],
+        files: &["lib/scheme/repl.sld"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    // scheme/process-context: re-exports from (tein process) which provides
+    // sandbox-aware trampolines. exit runs dynamic-wind "after" thunks (#101).
+    // in sandboxed contexts, env vars neutered, command-line returns sandbox
+    // defaults — all handled by the (tein process) trampolines.
+    VfsEntry {
+        path: "scheme/process-context",
+        deps: &["tein/process"],
+        files: &["lib/scheme/process-context.sld"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    // scheme/time: re-exports from (tein time) which provides rust implementations
+    // of r7rs time primitives. replaces chibi's original scheme/time.sld which
+    // depended on scheme/time/tai-to-utc-offset (broken in tein) and a C clib.
     VfsEntry {
         path: "scheme/time",
         deps: &["tein/time"],
-        files: &[],
+        files: &["lib/scheme/time.sld"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Shadow,
+        source: VfsSource::Embedded,
         feature: Some("time"),
-        shadow_sld: Some(concat!(
-            "(define-library (scheme time)\n",
-            "  (import (tein time))\n",
-            "  (export current-second current-jiffy jiffies-per-second))\n",
-        )),
+        shadow_sld: None,
     },
     VfsEntry {
         path: "scheme/time/tai",
@@ -1269,43 +1204,19 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // srfi/98: env var access. clib for unsandboxed; shadow neuters in sandbox.
-    // needed by srfi/128 (hash salt) in the (scheme show) dep chain.
-    // two entries: Embedded (C clib, unsandboxed) + Shadow (neutered stubs, sandboxed).
+    // srfi/98: env var access via (tein process) trampolines. needed by srfi/128
+    // (hash salt) in the (scheme show) dep chain. replaces dual Embedded+Shadow
+    // entries — the old Embedded had a C clib (lib/srfi/98/env.c), the old Shadow
+    // had hardcoded stubs. now a single Embedded re-export from (tein process).
     VfsEntry {
         path: "srfi/98",
-        deps: &[],
+        deps: &["tein/process"],
         files: &["lib/srfi/98.sld"],
-        clib: Some(ClibEntry {
-            source: "lib/srfi/98/env.c",
-            init_suffix: "srfi_98_env",
-            vfs_key: "/vfs/lib/srfi/98/env",
-            posix_only: false,
-        }),
+        clib: None,
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
         shadow_sld: None,
-    },
-    // srfi/98: VFS shadow — self-contained stubs for sandboxed contexts.
-    // NOTE: these stubs do NOT consult SANDBOX_ENV. to access fake env vars in a
-    // sandboxed context, import (tein process) directly instead of (srfi 98).
-    VfsEntry {
-        path: "srfi/98",
-        deps: &[],
-        files: &[],
-        clib: None,
-        default_safe: true,
-        source: VfsSource::Shadow,
-        feature: None,
-        shadow_sld: Some("\
-(define-library (srfi 98)
-  (import (scheme base))
-  (export get-environment-variable get-environment-variables)
-  (begin
-    (define (get-environment-variable name) #f)
-    (define (get-environment-variables) '())))
-"),
     },
     VfsEntry {
         path: "srfi/101",
@@ -2128,26 +2039,29 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // --- OS-touching modules: sandboxed via generated stub shadows ---
+    // --- OS-touching modules ---
+    // chibi/filesystem and chibi/process are now Embedded re-export SLDs that
+    // delegate to (tein filesystem) and (tein process) respectively. remaining
+    // entries below (chibi/system, chibi/shell, etc.) stay Shadow (sandbox-only).
     VfsEntry {
         path: "chibi/filesystem",
-        deps: &["scheme/base"],
-        files: &[],
+        deps: &["tein/filesystem"],
+        files: &["lib/chibi/filesystem.sld"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Shadow,
+        source: VfsSource::Embedded,
         feature: None,
-        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/process",
-        deps: &["scheme/base"],
-        files: &[],
+        deps: &["tein/process"],
+        files: &["lib/chibi/process.sld"],
         clib: None,
         default_safe: true,
-        source: VfsSource::Shadow,
+        source: VfsSource::Embedded,
         feature: None,
-        shadow_sld: None, // generated from SHADOW_STUBS by build.rs
+        shadow_sld: None,
     },
     VfsEntry {
         path: "chibi/system",
@@ -3030,7 +2944,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     },
     VfsEntry {
         path: "chibi/term/ansi",
-        deps: &["scheme/base"],
+        deps: &["scheme/base", "scheme/write", "scheme/process-context"],
         files: &["lib/chibi/term/ansi.sld", "lib/chibi/term/ansi.scm"],
         clib: None,
         default_safe: true,
@@ -4031,72 +3945,9 @@ struct ShadowStub {
 
 #[allow(dead_code)]
 const SHADOW_STUBS: &[ShadowStub] = &[
-    // --- C-backed OS modules ---
-    ShadowStub {
-        path: "chibi/filesystem",
-        fn_exports: &[
-            "duplicate-file-descriptor", "duplicate-file-descriptor-to",
-            "close-file-descriptor", "renumber-file-descriptor",
-            "open-input-file-descriptor", "open-output-file-descriptor",
-            "delete-file", "link-file", "symbolic-link-file", "rename-file",
-            "directory-files", "directory-fold", "directory-fold-tree",
-            "delete-file-hierarchy", "delete-directory",
-            "create-directory", "create-directory*",
-            "current-directory", "change-directory", "with-directory",
-            "open", "open-pipe", "make-fifo", "open-output-file/append",
-            "read-link",
-            "file-status", "file-link-status",
-            "file-device", "file-inode", "file-mode", "file-num-links",
-            "file-owner", "file-group", "file-represented-device",
-            "file-size", "file-block-size", "file-num-blocks",
-            "file-access-time", "file-change-time",
-            "file-modification-time", "file-modification-time/safe",
-            "file-regular?", "file-directory?", "file-character?",
-            "file-block?", "file-fifo?", "file-link?", "file-socket?",
-            "file-exists?",
-            "get-file-descriptor-flags", "set-file-descriptor-flags!",
-            "get-file-descriptor-status", "set-file-descriptor-status!",
-            "file-lock", "file-truncate",
-            "file-is-readable?", "file-is-writable?", "file-is-executable?",
-            "chmod", "chown", "is-a-tty?",
-        ],
-        const_exports: &[
-            "open/read", "open/write", "open/read-write",
-            "open/create", "open/exclusive", "open/truncate",
-            "open/append", "open/non-block",
-            "lock/shared", "lock/exclusive", "lock/non-blocking", "lock/unlock",
-        ],
-        macro_exports: &[],
-    },
-    ShadowStub {
-        path: "chibi/process",
-        fn_exports: &[
-            "exit", "emergency-exit", "sleep", "alarm",
-            "%fork", "fork", "kill", "execute",
-            "waitpid", "system", "system?",
-            "process-command-line", "process-running?",
-            "set-signal-action!",
-            "make-signal-set", "signal-set?", "signal-set-contains?",
-            "signal-set-fill!", "signal-set-add!", "signal-set-delete!",
-            "current-signal-mask", "current-process-id", "parent-process-id",
-            "signal-mask-block!", "signal-mask-unblock!", "signal-mask-set!",
-            "call-with-process-io",
-            "process->bytevector", "process->string", "process->sexp",
-            "process->string-list",
-            "process->output+error", "process->output+error+status",
-        ],
-        const_exports: &[
-            "signal/hang-up", "signal/interrupt", "signal/quit",
-            "signal/illegal", "signal/abort", "signal/fpe",
-            "signal/kill", "signal/segv", "signal/pipe",
-            "signal/alarm", "signal/term",
-            "signal/user1", "signal/user2",
-            "signal/child", "signal/continue", "signal/stop",
-            "signal/tty-stop", "signal/tty-input", "signal/tty-output",
-            "wait/no-hang",
-        ],
-        macro_exports: &[],
-    },
+    // chibi/filesystem and chibi/process removed — now Embedded re-export SLDs
+    // that delegate to (tein filesystem) and (tein process) respectively.
+    // remaining entries are sandbox-only safety stubs.
     ShadowStub {
         path: "chibi/system",
         fn_exports: &[
