@@ -539,31 +539,74 @@ file-size, directory-files, create-directory, delete-directory,
 rename-file, current-directory. sandbox-aware via FsPolicy."
 ```
 
-### task 6: remove old file-exists?/delete-file trampolines
+### task 6: remove old file-exists?/delete-file trampolines + update `(tein file)`
 
 the old hand-written trampolines in `context.rs` (`file_exists_trampoline`, `delete_file_trampoline`, `register_file_module`) are superseded by `(tein filesystem)`.
 
+**critical**: `(tein file)` currently gets `file-exists?` and `delete-file` via env parent-chain lookup — the old trampolines are registered into the top-level env by `register_file_module()`, and `(tein file)` picks them up through `(import (chibi))`. removing the trampolines breaks `(tein file)` unless we update it to import from `(tein filesystem)` directly.
+
 **Files:**
 - Modify: `tein/src/context.rs`
+- Modify: `~/forks/chibi-scheme/lib/tein/file.sld`
+- Modify: `~/forks/chibi-scheme/lib/tein/file.scm`
+- Modify: `tein/src/vfs_registry.rs` (tein/file deps)
 
-- [ ] **step 1: remove trampoline functions and registration**
+- [ ] **step 1: update `lib/tein/file.sld` in chibi fork**
+
+```scheme
+(define-library (tein file)
+  (import (chibi) (only (tein filesystem) file-exists? delete-file))
+  (export file-exists? delete-file
+          open-input-file open-binary-input-file
+          open-output-file open-binary-output-file
+          call-with-input-file call-with-output-file
+          with-input-from-file with-output-to-file)
+  (include "file.scm"))
+```
+
+- [ ] **step 2: update `lib/tein/file.scm` comments in chibi fork**
+
+update the comment block at the top to reflect that `file-exists?` and `delete-file` now come from `(tein filesystem)` instead of `register_file_module()` trampolines.
+
+- [ ] **step 3: push chibi fork changes**
+
+```bash
+cd ~/forks/chibi-scheme
+git add lib/tein/file.sld lib/tein/file.scm
+git commit -m "refactor: (tein file) imports file-exists?/delete-file from (tein filesystem)
+
+previously relied on env parent-chain lookup from top-level trampolines
+registered by register_file_module(). now imports directly from the
+new (tein filesystem) module."
+git push origin emesal-tein
+```
+
+- [ ] **step 4: update `tein/file` VFS registry deps**
+
+in `tein/src/vfs_registry.rs`, find the `tein/file` entry (~line 210). change:
+- `deps: &["scheme/base"]` -> `deps: &["scheme/base", "tein/filesystem"]`
+
+- [ ] **step 5: remove trampoline functions and registration in context.rs**
 
 remove `file_exists_trampoline` (~lines 1132-1156), `delete_file_trampoline` (~lines 1162-1189), `register_file_module` (~lines 4075-4079), and the call `context.register_file_module()?;` at ~line 2611.
 
-- [ ] **step 2: verify build and full test suite**
+- [ ] **step 6: verify build and full test suite**
 
 ```bash
-cargo build -p tein && just test
+just clean && cargo build -p tein && just test
 ```
 
-- [ ] **step 3: commit**
+note: `just clean` needed because chibi fork changes require re-fetch.
+
+- [ ] **step 7: commit**
 
 ```bash
-git add tein/src/context.rs
+git add tein/src/context.rs tein/src/vfs_registry.rs
 git commit -m "refactor: remove old file-exists?/delete-file trampolines
 
-superseded by (tein filesystem) module. file-exists? and delete-file
-are now #[tein_fn] functions in src/filesystem.rs."
+superseded by (tein filesystem) module. (tein file) now imports from
+(tein filesystem) directly. file-exists? and delete-file are now
+#[tein_fn] functions in src/filesystem.rs."
 ```
 
 ## chunk 3: extend `(tein process)` + integration tests

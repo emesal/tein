@@ -4,17 +4,14 @@
 
 - **spec**: `docs/plans/2026-03-10-universal-module-availability-design.md` — committed to `dev`
 - **implementation plan**: `docs/plans/2026-03-10-universal-module-availability.md` — committed to `dev`
-- **plan review**: not yet completed (subagent quota hit). review chunks 1-3 before executing. key things to verify:
-  - chunk 1 (tasks 1-4): chibi fork SLD files + VFS registry changes
-  - chunk 2 (tasks 5-6): `(tein filesystem)` rust module + old trampoline removal
-  - chunk 3 (tasks 7-9): extend `(tein process)` + integration tests + docs
+- **plan review**: completed. all 3 concerns verified:
+  - `file-exists?` trampolines: safe to remove, only accessed via module import. **amendment**: `(tein file)` needs updating to import from `(tein filesystem)` — added to task 6.
+  - `#[tein_module]` double-registration: harmless, dynamic VFS shadows static VFS (intended pattern).
+  - POSIX constants: verified correct for linux x86_64.
 
 ## what to do next
 
-1. **review the plan** — read the plan doc, cross-reference against the spec and codebase. the plan reviewers didn't get to run, so check for:
-   - `file-exists?` trampoline is used by sandbox/VFS gate code independently — removing `register_file_module()` in task 6 may break things if `file-exists?` and `delete-file` are registered there for non-module purposes. check whether those trampolines are only accessed via `(import (tein filesystem))` or also via the top-level env directly.
-   - the `#[tein_module]` pattern generates `register_vfs_module` calls for `.sld`/`.scm` — but for Embedded modules, the files are already in the static VFS. double-registration could be an issue (or a no-op if VFS overwrites). check how `(tein time)` handles this — it's Embedded AND calls `register_module_time()`.
-   - POSIX constant values in `filesystem.scm` need verification against actual linux values (the plan uses common linux values but they're platform-dependent).
+1. ~~**review the plan**~~ — DONE. plan amended (task 6 updated to handle `(tein file)` dep).
 
 2. **create feature branch**: `just feature universal-module-availability-2603`
 
