@@ -14,6 +14,10 @@
 
 ## chunk 1: chibi fork SLD files + VFS registry conversion
 
+> **tasks 1-3 COMPLETE** — all chibi fork SLD/SCM files created/overwritten and pushed to emesal-tein.
+> commits: f6723102 (task 1), 684ddaf8 (task 2), 5c6f562a (task 3).
+> task 4 (VFS registry) is next — reading done, edits not started.
+
 ### task 1: create `(tein filesystem)` SLD and SCM in chibi fork
 
 the new module follows the `(tein time)` pattern — .sld declares exports, .scm is comment-only (plus constants), native fns registered by rust at context init.
@@ -22,7 +26,7 @@ the new module follows the `(tein time)` pattern — .sld declares exports, .scm
 - Create: `~/forks/chibi-scheme/lib/tein/filesystem.sld`
 - Create: `~/forks/chibi-scheme/lib/tein/filesystem.scm`
 
-- [ ] **step 1: create the .sld file**
+- [x] **step 1: create the .sld file** ✓ (commit f6723102)
 
 the export list includes all functions from the SHADOW_STUBS `chibi/filesystem` entry in `vfs_registry.rs:4035-4069` plus all constants. every function and constant that `chibi/filesystem` exports, `(tein filesystem)` also exports.
 

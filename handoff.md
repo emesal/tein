@@ -2,60 +2,89 @@
 
 ## status
 
-- **spec**: `docs/plans/2026-03-10-universal-module-availability-design.md` — committed to `dev`
-- **implementation plan**: `docs/plans/2026-03-10-universal-module-availability.md` — committed to `dev`
-- **plan review**: completed. all 3 concerns verified:
-  - `file-exists?` trampolines: safe to remove, only accessed via module import. **amendment**: `(tein file)` needs updating to import from `(tein filesystem)` — added to task 6.
-  - `#[tein_module]` double-registration: harmless, dynamic VFS shadows static VFS (intended pattern).
-  - POSIX constants: verified correct for linux x86_64.
+- **branch**: `feature/universal-module-availability-2603`
+- **spec**: `docs/plans/2026-03-10-universal-module-availability-design.md`
+- **implementation plan**: `docs/plans/2026-03-10-universal-module-availability.md`
+- **plan review**: completed. all 3 concerns verified clean.
+- **execution mode**: direct (no subagents) — easier to resume after rate limits
 
-## what to do next
+## progress
 
-1. ~~**review the plan**~~ — DONE. plan amended (task 6 updated to handle `(tein file)` dep).
+- [x] task 1: create `(tein filesystem)` SLD/SCM in chibi fork — pushed to emesal-tein
+- [x] task 2: overwrite r7rs SLD files in chibi fork — pushed to emesal-tein
+- [x] task 3: overwrite chibi/filesystem + chibi/process SLDs, update tein/process — pushed to emesal-tein
+- [ ] **task 4: update VFS registry** ← NEXT (reading done, edits not started)
+- [ ] task 5: implement src/filesystem.rs
+- [ ] task 6: remove old trampolines + update (tein file)
+- [ ] task 7: add current-process-id and system to (tein process)
+- [ ] task 8: integration tests
+- [ ] task 9: update AGENTS.md and docs
 
-2. **create feature branch**: `just feature universal-module-availability-2603`
+## task 4 notes (ready to execute)
 
-3. **execute the plan** using `superpowers:executing-plans` or `superpowers:subagent-driven-development`
+all the VFS registry sections have been read. here's exactly what to do:
 
-4. **commit after each task**, lint after each batch
+### add new entry — `tein/filesystem`
+insert after `tein/file` entry (~line 218), before `tein/load`:
+```rust
+VfsEntry {
+    path: "tein/filesystem",
+    deps: &["scheme/base"],
+    files: &["lib/tein/filesystem.sld", "lib/tein/filesystem.scm"],
+    clib: None,
+    default_safe: true,
+    source: VfsSource::Embedded,
+    feature: None,
+    shadow_sld: None,
+},
+```
+
+### convert 7 shadow entries to embedded
+for each: change `files: &[]` → `files: &["lib/<path>.sld"]`, `source: Shadow` → `Embedded`, `shadow_sld: Some(...)` → `None`, update deps and comments.
+
+| entry | ~line | new deps | new files |
+|-------|-------|----------|-----------|
+| scheme/load | 494 | keep `&["tein/load"]` | `&["lib/scheme/load.sld"]` |
+| scheme/file | 867 | `&["tein/filesystem"]` | `&["lib/scheme/file.sld"]` |
+| scheme/eval | 890 | keep `&[]` | `&["lib/scheme/eval.sld"]` |
+| scheme/repl | 911 | keep `&[]` | `&["lib/scheme/repl.sld"]` |
+| scheme/process-context | 937 | `&["tein/process"]` | `&["lib/scheme/process-context.sld"]` |
+| scheme/time (shadow at ~983) | convert; keep `&["tein/time"]` + `feature: Some("time")` | `&["lib/scheme/time.sld"]` |
+| srfi/98 (shadow at ~1293) | `&["tein/process"]` | `&["lib/srfi/98.sld"]` |
+
+### convert 2 shadow stubs to embedded
+| entry | ~line | new deps | new files |
+|-------|-------|----------|-----------|
+| chibi/filesystem | ~2133 | `&["tein/filesystem"]` | `&["lib/chibi/filesystem.sld"]` |
+| chibi/process | ~2143 | `&["tein/process"]` | `&["lib/chibi/process.sld"]` |
+
+### remove 2 broken entries
+- scheme/time Embedded entry at ~964 (depends on tai-to-utc-offset, has ClibEntry for scheme/time.c) — DELETE entire entry
+- srfi/98 Embedded entry at ~1275 (has ClibEntry for srfi/98/env.c) — DELETE entire entry
+
+### remove from SHADOW_STUBS (~4033)
+remove the `ShadowStub` entries for `"chibi/filesystem"` and `"chibi/process"`. keep `chibi/system`, `chibi/shell`, etc.
+
+### fix chibi/term/ansi deps (~3032)
+change `deps: &["scheme/base"]` → `deps: &["scheme/base", "scheme/write", "scheme/process-context"]`
+
+### verify
+`just clean && cargo build` — must succeed (chibi fork re-fetched with new SLDs)
 
 ## key architectural decisions
 
-- override modules (scheme/process-context, scheme/file, etc.) become `VfsSource::Embedded` with real `.sld` files in the chibi fork — they exist in the static VFS and work in ALL contexts
-- safety stubs (chibi/stty, chibi/system, chibi/net/*) stay `VfsSource::Shadow` — sandbox-only
-- `(tein filesystem)` new rust module provides real fs ops, `chibi/filesystem` re-exports from it
-- `(tein process)` extended with `current-process-id` and `system`, `chibi/process` re-exports from it
-- deferred functions (fork, signals, fd ops, etc.) defined as scheme stubs that raise "not implemented" errors
-- `call-with-process-io` deferred to follow-up (needs custom port piping)
-
-## files involved
-
-### chibi fork (`~/forks/chibi-scheme`, branch `emesal-tein`)
-- `lib/tein/filesystem.sld` + `.scm` — NEW
-- `lib/tein/process.sld` + `.scm` — MODIFIED (add exports + deferred stubs)
-- `lib/scheme/process-context.sld` — OVERWRITE
-- `lib/scheme/eval.sld` — OVERWRITE
-- `lib/scheme/load.sld` — OVERWRITE
-- `lib/scheme/repl.sld` — OVERWRITE
-- `lib/scheme/file.sld` — OVERWRITE
-- `lib/scheme/time.sld` — OVERWRITE
-- `lib/srfi/98.sld` — OVERWRITE
-- `lib/chibi/filesystem.sld` — OVERWRITE
-- `lib/chibi/process.sld` — OVERWRITE
-
-### tein repo
-- `tein/src/filesystem.rs` — NEW
-- `tein/src/lib.rs` — add `mod filesystem;`
-- `tein/src/context.rs` — register filesystem module, add process trampolines, remove old file trampolines, add tests
-- `tein/src/vfs_registry.rs` — convert 9 Shadow->Embedded, remove broken entries, fix deps
-- `tein/tests/vfs_module_tests.rs` — try un-ignoring chibi_diff
-- `AGENTS.md` — update docs
+- override modules become `VfsSource::Embedded` with real `.sld` files in chibi fork
+- safety stubs (chibi/stty, chibi/system, chibi/net/*) stay `VfsSource::Shadow`
+- `(tein filesystem)` new rust module provides real fs ops
+- `(tein process)` extended with `current-process-id` and `system`
+- deferred functions raise "not implemented" errors at call time
+- `call-with-process-io` deferred to follow-up
 
 ## context notes
 
-- the root cause is: `VfsSource::Shadow` modules have `files: &[]` so they're not in the static VFS. they only exist when dynamically registered by `register_vfs_shadows()` which only runs in sandbox mode.
-- the VFS lookup (`tein_vfs_lookup` in eval.c patch A) works in ALL contexts. the gate (`tein_module_allowed`) allows everything when gate=0. modules just need to BE in the VFS.
-- `(tein time)` is the template pattern: Embedded with `.sld`/`.scm` in fork, `#[tein_module]` in rust, registered before `load_standard_env`.
-- existing `file-exists?`/`delete-file` trampolines are in `context.rs` at ~lines 1132-1189, registered via `register_file_module()` at ~line 2611.
-- existing `(tein process)` trampolines are in `context.rs` at ~lines 1664-1881, registered into both primitive env (~line 2255) and top-level env (~line 2614).
-- `SHADOW_STUBS` at `vfs_registry.rs:4033` has the canonical export lists for `chibi/filesystem` (42 fns + 12 consts) and `chibi/process` (25 fns + 20 consts).
+- `VfsSource::Shadow` has `files: &[]` → not in static VFS → only exists when `register_vfs_shadows()` runs (sandbox only)
+- `(tein time)` is the template: Embedded + `#[tein_module]` + registered before `load_standard_env`
+- `#[tein_module]` double-registration with Embedded is harmless (dynamic VFS shadows static, first-match wins)
+- existing `file-exists?`/`delete-file` trampolines: `context.rs` ~lines 1132-1189, registered via `register_file_module()` ~line 2611
+- existing `(tein process)` trampolines: `context.rs` ~lines 1664-1881, registered into primitive env (~2255) and top-level env (~2614)
+- `(tein file)` must be updated (task 6) to import from `(tein filesystem)` before removing old trampolines
