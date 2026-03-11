@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "tein"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "blake3",
  "cc",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "tein-bin"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rustyline",
  "tein",
@@ -772,11 +772,11 @@ dependencies = [
 
 [[package]]
 name = "tein-ext"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "tein-macros"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "tein-sexp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "tein-test-ext"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "tein-ext",
  "tein-macros",
@@ -801,9 +801,9 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.26.0"
+version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
  "getrandom 0.4.2",

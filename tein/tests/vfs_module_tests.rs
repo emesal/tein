@@ -267,12 +267,10 @@ fn test_chibi_csv() {
     run_chibi_test("(chibi csv-test)");
 }
 
-/// chibi/diff-test's `edits->string/color` tests require ANSI terminal color codes
-/// from `(chibi term ansi)`. the `with_vfs_shadows` scheme/process-context stub
-/// returns `#f` for env vars, causing `get-environment-variable "TERM"` to return `#f`,
-/// which differs from what the test expects. actual diff logic tests pass.
+/// chibi/diff-test: now works because scheme/process-context is Embedded
+/// (re-exports real trampolines from (tein process)) — `get-environment-variable "TERM"`
+/// returns the real value instead of #f.
 #[test]
-#[ignore]
 fn test_chibi_diff() {
     run_chibi_test("(chibi diff-test)");
 }
