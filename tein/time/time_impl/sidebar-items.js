@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["JIFFIES_PER_SECOND"],"fn":["__tein_current_jiffy","__tein_current_second","__tein_timezone_offset_seconds","current_jiffy","current_second","register_module_time","timezone_offset_seconds"]};

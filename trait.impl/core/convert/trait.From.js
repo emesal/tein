@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["tein",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/core/convert/trait.From.html\" title=\"trait core::convert::From\">From</a>&lt;<a class=\"struct\" href=\"https://doc.rust-lang.org/1.94.0/alloc/string/struct.FromUtf8Error.html\" title=\"struct alloc::string::FromUtf8Error\">FromUtf8Error</a>&gt; for <a class=\"enum\" href=\"tein/enum.Error.html\" title=\"enum tein::Error\">Error</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/core/convert/trait.From.html\" title=\"trait core::convert::From\">From</a>&lt;<a class=\"struct\" href=\"https://doc.rust-lang.org/1.94.0/core/str/error/struct.Utf8Error.html\" title=\"struct core::str::error::Utf8Error\">Utf8Error</a>&gt; for <a class=\"enum\" href=\"tein/enum.Error.html\" title=\"enum tein::Error\">Error</a>",0],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.94.0/core/convert/trait.From.html\" title=\"trait core::convert::From\">From</a>&lt;<a class=\"struct\" href=\"https://doc.rust-lang.org/1.94.0/std/io/error/struct.Error.html\" title=\"struct std::io::error::Error\">Error</a>&gt; for <a class=\"enum\" href=\"tein/enum.Error.html\" title=\"enum tein::Error\">Error</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[1201]}

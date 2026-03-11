@@ -1,0 +1,67 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Foreign type protocol — typed Rust objects accessible from Scheme."><title>tein::foreign - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tein" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module foreign</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tein/index.html">tein</a><span class="version">0.2.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module foreign</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#dispatch-chain" title="Dispatch chain">Dispatch chain</a></li><li><a href="#complete-example" title="Complete example">Complete example</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tein</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tein</a></div><h1>Module <span>foreign</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tein/foreign.rs.html#1-523">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Foreign type protocol — typed Rust objects accessible from Scheme.</p>
+<p>Enables Rust types to be exposed as first-class Scheme objects with
+method dispatch, introspection, and clear error messages.</p>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2>
+<p>Foreign objects are stored in a per-context <code>ForeignStore</code> keyed by
+unpredictable <code>u64</code> handle IDs generated via xorshift64 seeded from
+<code>SystemTime</code>. Scheme sees them as tagged lists
+<code>(__tein-foreign "type-name" handle-id)</code>. The actual data lives
+Rust-side — Scheme never touches it directly.</p>
+<p>This Rust-side storage design is also <strong>safety-critical</strong>: it bypasses
+chibi’s C-level <code>sexp_register_type</code> + finaliser system, which has
+known GC bugs (resurrection → use-after-free, re-entrant GC from
+allocating finalisers, unordered finalisation of referenced objects).
+See findings M19-M21 in <code>docs/plans/2026-02-25-chibi-scheme-review.md</code>.
+Do NOT migrate to chibi-native type registration without first fixing
+the upstream GC finaliser model.</p>
+<p>Unpredictable IDs prevent a Scheme program from enumerating sequential
+values to access foreign objects it doesn’t hold a reference to.</p>
+<h2 id="dispatch-chain"><a class="doc-anchor" href="#dispatch-chain">§</a>Dispatch chain</h2>
+<p>When Scheme calls e.g. <code>(counter-get obj)</code>:</p>
+<ol>
+<li>auto-generated convenience proc calls <code>(apply foreign-call obj 'get args)</code></li>
+<li><code>foreign-call</code> (native fn) reads <code>FOREIGN_STORE_PTR</code> from thread-local storage</li>
+<li><code>dispatch_foreign_call</code> extracts handle ID, looks up type + method</li>
+<li>method’s <a href="type.MethodFn.html" title="type tein::foreign::MethodFn"><code>MethodFn</code></a> is called with <code>&amp;mut dyn Any</code> + <a href="struct.MethodContext.html" title="struct tein::foreign::MethodContext"><code>MethodContext</code></a> + args</li>
+<li>returned <a href="../enum.Value.html" title="enum tein::Value"><code>crate::Value</code></a> is converted back to a scheme sexp</li>
+</ol>
+<p><code>FOREIGN_STORE_PTR</code> is set by <a href="../struct.Context.html#method.evaluate" title="method tein::Context::evaluate"><code>crate::Context::evaluate()</code></a> /
+<a href="../struct.Context.html#method.call" title="method tein::Context::call"><code>crate::Context::call()</code></a> via an RAII guard and cleared on return,
+so foreign dispatch is only active during evaluation.</p>
+<h2 id="complete-example"><a class="doc-anchor" href="#complete-example">§</a>Complete example</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>tein::{Context, ForeignType, MethodFn, Value};
+
+<span class="kw">struct </span>Counter { n: i64 }
+
+<span class="kw">impl </span>ForeignType <span class="kw">for </span>Counter {
+    <span class="kw">fn </span>type_name() -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>str { <span class="string">"counter" </span>}
+    <span class="kw">fn </span>methods() -&gt; <span class="kw-2">&amp;</span><span class="lifetime">'static </span>[(<span class="kw-2">&amp;</span><span class="lifetime">'static </span>str, MethodFn)] {
+        <span class="kw-2">&amp;</span>[
+            (<span class="string">"increment"</span>, |obj, _ctx, _args| {
+                <span class="kw">let </span>c = obj.downcast_mut::&lt;Counter&gt;().unwrap();
+                c.n += <span class="number">1</span>;
+                <span class="prelude-val">Ok</span>(Value::Integer(c.n))
+            }),
+            (<span class="string">"get"</span>, |obj, _ctx, _args| {
+                <span class="kw">let </span>c = obj.downcast_ref::&lt;Counter&gt;().unwrap();
+                <span class="prelude-val">Ok</span>(Value::Integer(c.n))
+            }),
+        ]
+    }
+}
+
+<span class="kw">let </span>ctx = Context::new_standard()<span class="question-mark">?</span>;
+
+<span class="comment">// register type — auto-generates counter?, counter-increment, counter-get
+</span>ctx.register_foreign_type::&lt;Counter&gt;()<span class="question-mark">?</span>;
+
+<span class="comment">// create a foreign value and call methods via ctx.call
+</span><span class="kw">let </span>c = ctx.foreign_value(Counter { n: <span class="number">0 </span>})<span class="question-mark">?</span>;
+<span class="kw">let </span>inc = ctx.evaluate(<span class="string">"counter-increment"</span>)<span class="question-mark">?</span>;
+<span class="kw">let </span>get = ctx.evaluate(<span class="string">"counter-get"</span>)<span class="question-mark">?</span>;
+
+ctx.call(<span class="kw-2">&amp;</span>inc, std::slice::from_ref(<span class="kw-2">&amp;</span>c))<span class="question-mark">?</span>;
+ctx.call(<span class="kw-2">&amp;</span>inc, std::slice::from_ref(<span class="kw-2">&amp;</span>c))<span class="question-mark">?</span>;
+<span class="kw">let </span>result = ctx.call(<span class="kw-2">&amp;</span>get, std::slice::from_ref(<span class="kw-2">&amp;</span>c))<span class="question-mark">?</span>;
+<span class="macro">assert_eq!</span>(result, Value::Integer(<span class="number">2</span>));</code></pre></div></div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ExtMethodEntry.html" title="struct tein::foreign::ExtMethodEntry">ExtMethod<wbr>Entry</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A method entry for dynamically registered ext types.</dd><dt><a class="struct" href="struct.ExtTypeEntry.html" title="struct tein::foreign::ExtTypeEntry">ExtType<wbr>Entry</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Entry for a dynamically registered ext type.</dd><dt><a class="struct" href="struct.ForeignObject.html" title="struct tein::foreign::ForeignObject">Foreign<wbr>Object</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A live foreign object instance.</dd><dt><a class="struct" href="struct.ForeignStore.html" title="struct tein::foreign::ForeignStore">Foreign<wbr>Store</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Per-context storage for foreign type registrations and live instances.</dd><dt><a class="struct" href="struct.MethodContext.html" title="struct tein::foreign::MethodContext">Method<wbr>Context</a></dt><dd>Limited context passed to foreign methods.</dd><dt><a class="struct" href="struct.TypeEntry.html" title="struct tein::foreign::TypeEntry">Type<wbr>Entry</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Type registration entry.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.MethodLookup.html" title="enum tein::foreign::MethodLookup">Method<wbr>Lookup</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Result of a method lookup — either a static (rust-native) or ext (cdylib) method.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.XOR_STATE.html" title="constant tein::foreign::XOR_STATE">XOR_<wbr>STATE</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>xorshift64 state for unpredictable handle ID generation.
+seeded from SystemTime on first use to prevent sequential ID guessing.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.ForeignType.html" title="trait tein::foreign::ForeignType">Foreign<wbr>Type</a></dt><dd>A Rust type that can be exposed to Scheme as a foreign object.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.dispatch_foreign_call.html" title="fn tein::foreign::dispatch_foreign_call">dispatch_<wbr>foreign_<wbr>call</a><span title="Restricted Visibility">&nbsp;🔒</span> <sup title="unsafe function">⚠</sup></dt><dd>Dispatch a method call on a foreign object.</dd><dt><a class="fn" href="fn.next_handle_id.html" title="fn tein::foreign::next_handle_id">next_<wbr>handle_<wbr>id</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Generate the next unpredictable handle ID via xorshift64.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.MethodFn.html" title="type tein::foreign::MethodFn">Method<wbr>Fn</a></dt><dd>A method on a foreign type, callable from Scheme.</dd></dl></section></div></main></body></html>

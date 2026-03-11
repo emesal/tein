@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Scheme value representation."><title>tein::value - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="tein" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module value</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../tein/index.html">tein</a><span class="version">0.2.3</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module value</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#variants-1" title="Variants">Variants</a></li><li><a href="#conversion" title="Conversion">Conversion</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate tein</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">tein</a></div><h1>Module <span>value</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/tein/value.rs.html#1-993">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Scheme value representation.</p>
+<p><a href="../enum.Value.html" title="enum tein::Value"><code>Value</code></a> is the safe Rust representation of a Chibi-Scheme sexp.
+Most variants own their data; <code>Procedure</code>, <code>Port</code>, and <code>HashTable</code>
+hold raw sexp pointers valid only within the originating
+<a href="../struct.Context.html" title="struct tein::Context"><code>crate::Context</code></a>.</p>
+<h2 id="variants-1"><a class="doc-anchor" href="#variants-1">§</a>Variants</h2><div><table><thead><tr><th>variant</th><th>scheme type</th><th>rust extraction</th></tr></thead><tbody>
+<tr><td><code>Integer(i64)</code></td><td>fixnum</td><td><code>as_integer()</code></td></tr>
+<tr><td><code>Float(f64)</code></td><td>flonum</td><td><code>as_float()</code></td></tr>
+<tr><td><code>Bignum(String)</code></td><td>bignum (arbitrary precision)</td><td><code>as_bignum()</code></td></tr>
+<tr><td><code>Rational(Box, Box)</code></td><td>exact ratio <code>n/d</code></td><td><code>as_rational()</code></td></tr>
+<tr><td><code>Complex(Box, Box)</code></td><td>complex <code>a+bi</code></td><td><code>as_complex()</code></td></tr>
+<tr><td><code>String(String)</code></td><td>string</td><td><code>as_str()</code></td></tr>
+<tr><td><code>Symbol(String)</code></td><td>symbol</td><td><code>as_symbol()</code></td></tr>
+<tr><td><code>Boolean(bool)</code></td><td><code>#t</code> / <code>#f</code></td><td><code>as_bool()</code></td></tr>
+<tr><td><code>List(Vec&lt;Value&gt;)</code></td><td>proper list</td><td><code>as_list()</code></td></tr>
+<tr><td><code>Pair(Box, Box)</code></td><td>dotted pair</td><td><code>as_pair()</code></td></tr>
+<tr><td><code>Vector(Vec&lt;Value&gt;)</code></td><td><code>#(...)</code></td><td><code>as_vector()</code></td></tr>
+<tr><td><code>Char(char)</code></td><td>character</td><td><code>as_char()</code></td></tr>
+<tr><td><code>Bytevector(Vec&lt;u8&gt;)</code></td><td><code>#u8(...)</code></td><td><code>as_bytevector()</code></td></tr>
+<tr><td><code>Port(sexp)</code></td><td>port</td><td><code>as_port()</code></td></tr>
+<tr><td><code>HashTable(sexp)</code></td><td>hash-table</td><td><code>as_hash_table()</code></td></tr>
+<tr><td><code>Nil</code></td><td><code>'()</code></td><td>—</td></tr>
+<tr><td><code>Unspecified</code></td><td>void</td><td>—</td></tr>
+<tr><td><code>Exit(i32)</code></td><td>—</td><td>exit code from <code>(exit n)</code></td></tr>
+<tr><td><code>Procedure(sexp)</code></td><td>lambda/opcode</td><td><code>as_procedure()</code></td></tr>
+<tr><td><code>Foreign { .. }</code></td><td>foreign object</td><td><code>ctx.foreign_ref::&lt;T&gt;()</code></td></tr>
+<tr><td><code>Other(String)</code></td><td>unhandled type</td><td>—</td></tr>
+</tbody></table>
+</div><h2 id="conversion"><a class="doc-anchor" href="#conversion">§</a>Conversion</h2>
+<p><code>Value::from_raw()</code> converts Chibi sexps to safe values. Type checking
+order matters: <code>complex → ratio → bignum → flonum → integer</code> (broadest first).
+Chibi’s integer predicate matches flonums like <code>4.0</code>, so flonum must come
+before integer. Complex/ratio/bignum must precede flonum for similar reasons.</p>
+<p><code>Value::to_raw()</code> converts back to Chibi sexps for calling into Scheme.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Value.html" title="enum tein::value::Value">Value</a></dt><dd>A Scheme value.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_DEPTH.html" title="constant tein::value::MAX_DEPTH">MAX_<wbr>DEPTH</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Maximum nesting depth for recursive value conversion.
+Prevents stack overflow on deeply nested or (theoretically) circular structures.</dd></dl></section></div></main></body></html>

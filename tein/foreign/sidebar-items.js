@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["XOR_STATE"],"enum":["MethodLookup"],"fn":["dispatch_foreign_call","next_handle_id"],"struct":["ExtMethodEntry","ExtTypeEntry","ForeignObject","ForeignStore","MethodContext","TypeEntry"],"trait":["ForeignType"],"type":["MethodFn"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["parse","parse_all","parse_all_preserving","parse_number_string","parse_preserving"],"struct":["Parser"]};

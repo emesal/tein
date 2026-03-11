@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["UUID_NIL"],"fn":["__tein_make_uuid","__tein_uuid_q","make_uuid","register_module_uuid","uuid_q"]};

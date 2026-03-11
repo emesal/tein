@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TEIN_EXT_API_VERSION","TEIN_EXT_ERR_INIT","TEIN_EXT_ERR_VERSION","TEIN_EXT_OK"],"struct":["OpaqueCtx","OpaqueVal","TeinExtApi","TeinMethodDesc","TeinTypeDesc"],"type":["SexpFn","TeinExtInitFn","TeinMethodFn"]};

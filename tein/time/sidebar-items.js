@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["local_utc_offset_seconds"],"mod":["time_impl"],"static":["JIFFY_EPOCH"]};
