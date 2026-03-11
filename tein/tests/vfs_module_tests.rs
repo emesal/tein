@@ -278,10 +278,14 @@ fn test_chibi_diff() {
         .with_vfs_shadows()
         .build()
         .expect("context");
-    ctx.evaluate("(import (chibi test))").expect("import chibi/test");
-    ctx.evaluate("(import (chibi term ansi))").expect("import chibi/term/ansi");
-    ctx.evaluate("(ansi-escapes-enabled? #t)").expect("enable ansi escapes");
-    ctx.evaluate("(import (chibi diff-test))").expect("import chibi/diff-test");
+    ctx.evaluate("(import (chibi test))")
+        .expect("import chibi/test");
+    ctx.evaluate("(import (chibi term ansi))")
+        .expect("import chibi/term/ansi");
+    ctx.evaluate("(ansi-escapes-enabled? #t)")
+        .expect("enable ansi escapes");
+    ctx.evaluate("(import (chibi diff-test))")
+        .expect("import chibi/diff-test");
     ctx.evaluate("(run-tests)").expect("run-tests");
     let failures = ctx
         .evaluate("(test-failure-count)")
