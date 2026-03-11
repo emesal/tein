@@ -406,9 +406,10 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
-    // scheme/eval: Embedded entry for unsandboxed contexts. the VFS shadow (below,
-    // near scheme/file shadow) replaces this in sandboxed contexts with
-    // tein-environment-internal trampoline for allowlist validation (#97).
+    // scheme/eval: Embedded SLD — tein-environment-internal trampoline for
+    // allowlist validation in sandboxed contexts, eval re-exported from (chibi).
+    // tein-environment-internal registered into primitive env before load_standard_env
+    // → propagates into *chibi-env* via (import (chibi)). (#97)
     VfsEntry {
         path: "scheme/eval",
         deps: &[],
@@ -791,8 +792,8 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     },
     VfsEntry {
         // r7rs "small" standard — the 14-library bundle. all deps are now safe
-        // (scheme/eval, scheme/load, scheme/repl use VFS shadows with allowlist
-        // validation, closes #97).
+        // (scheme/eval, scheme/load, scheme/repl are Embedded SLDs with tein
+        // trampolines for allowlist validation, closes #97).
         path: "scheme/small",
         deps: &[
             "scheme/base",
@@ -819,7 +820,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     },
     VfsEntry {
         // r7rs "red" edition — comprehensive re-export bundle. all deps are now
-        // safe (scheme/eval, scheme/load, scheme/repl use VFS shadows, closes #97).
+        // safe (scheme/eval, scheme/load, scheme/repl are Embedded SLDs, closes #97).
         path: "scheme/red",
         deps: &[
             "scheme/base",
@@ -1650,7 +1651,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         deps: &[
             "scheme/base",
             "scheme/char",
-            "scheme/file",   // shadow — resolves via (tein file) in sandbox
+            "scheme/file",   // Embedded — re-exports from (tein filesystem)
             "srfi/1",
             "srfi/117",
             "srfi/130",
@@ -1659,7 +1660,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         ],
         files: &["lib/srfi/166/columnar.sld", "lib/srfi/166/column.scm"],
         clib: None,
-        // scheme/file dep satisfied via VFS shadow → (tein file)
+        // scheme/file dep satisfied via Embedded SLD → (tein filesystem)
         default_safe: true,
         source: VfsSource::Embedded,
         feature: None,
