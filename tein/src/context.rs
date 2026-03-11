@@ -1047,7 +1047,7 @@ unsafe extern "C" fn ux_stub(
 ///
 /// # Safety
 /// `args` must be a valid scheme list (may be null/empty — arity error returned in that case).
-unsafe fn extract_string_arg<'a>(
+pub(crate) unsafe fn extract_string_arg<'a>(
     ctx: ffi::sexp,
     args: ffi::sexp,
     fn_name: &str,
@@ -2608,6 +2608,7 @@ impl ContextBuilder {
             }
 
             if self.standard_env {
+                crate::filesystem::register_filesystem_trampolines(&context)?;
                 context.register_file_module()?;
                 context.register_load_module()?;
                 context.register_eval_module()?;
@@ -7133,8 +7134,8 @@ mod tests {
         // drop ctx1 — must NOT clear ctx2's VFS gate
         drop(ctx1);
 
-        // ctx2 must still block filesystem modules
-        let err = ctx2.evaluate("(import (chibi process))").unwrap_err();
+        // ctx2 must still block non-safe modules (tein/modules is default_safe: false)
+        let err = ctx2.evaluate("(import (tein modules))").unwrap_err();
         assert!(
             matches!(err, Error::SandboxViolation(_) | Error::EvalError(_)),
             "ctx2 VFS gate must still be active after ctx1 dropped, got: {:?}",
@@ -10239,16 +10240,11 @@ mod tests {
     fn test_shadow_stubs_not_registered_in_unsandboxed_context() {
         let _lock = IO_TEST_LOCK.lock().unwrap();
         use crate::sandbox::Modules;
-        // shadow stubs are only injected during sandboxed context build (via register_vfs_shadows).
-        // unsandboxed contexts must NOT set IS_SANDBOXED=true — verify by checking that:
-        // 1. a sandboxed context raises a stub error when calling chibi/filesystem procs
-        // 2. an unsandboxed context runs with IS_SANDBOXED=false: real file ops work freely
-        //
-        // note: VFS is process-global — stubs registered by earlier sandbox tests persist
-        // in the binary's VFS table for the lifetime of the process. the invariant being tested
-        // is IS_SANDBOXED=false (no policy gate, no stub-via-FS-gate), not VFS isolation.
+        // chibi/filesystem is now Embedded (re-exports from (tein filesystem)).
+        // sandboxed: real trampoline checks FsPolicy — denied without policy.
+        // unsandboxed: IS_SANDBOXED=false — real file ops work freely.
 
-        // sandboxed: stub proc raises a scheme error (not available in sandbox)
+        // sandboxed: real trampoline denies without read policy
         let sandboxed = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
@@ -10257,8 +10253,8 @@ mod tests {
         let stub_err = sandboxed.evaluate("(import (chibi filesystem)) (directory-files \".\")");
         let err_msg = format!("{:?}", stub_err.unwrap_err());
         assert!(
-            err_msg.contains("sandbox") || err_msg.contains("not available"),
-            "sandboxed chibi/filesystem call should raise stub error: {err_msg}"
+            err_msg.contains("sandbox") || err_msg.contains("not permitted"),
+            "sandboxed chibi/filesystem call should raise policy error: {err_msg}"
         );
         // drop sandboxed context before building unsandboxed — restores IS_SANDBOXED=false
         // and clears the FS gate. both are RAII thread-locals scoped to the context.
@@ -10294,16 +10290,15 @@ mod tests {
     }
 
     #[test]
-    fn test_srfi_98_shadow_stubs_in_sandbox() {
+    fn test_srfi_98_in_sandbox() {
         use crate::sandbox::Modules;
         let ctx = Context::builder()
             .standard_env()
             .sandboxed(Modules::Safe)
             .build()
             .expect("builder");
-        // srfi/98 in sandboxed contexts uses a self-contained stub shadow (not (tein process))
-        // because shadow SLDs cannot import VfsSource::Embedded modules via chibi's module
-        // machinery. for fake env access, import (tein process) directly.
+        // srfi/98 now re-exports from (tein process) which provides sandbox-aware
+        // trampolines. TEIN_SANDBOX is in SANDBOX_ENV so it returns "true".
         let r = ctx
             .evaluate(
                 "(import (scheme base) (srfi 98)) (get-environment-variable \"TEIN_SANDBOX\")",
@@ -10311,13 +10306,18 @@ mod tests {
             .expect("srfi/98 importable in sandbox");
         assert_eq!(
             r,
-            Value::Boolean(false),
-            "srfi/98 stub always returns #f (use (tein process) for fake env)"
+            Value::String("true".to_string()),
+            "srfi/98 in sandbox returns SANDBOX_ENV values"
         );
+        // non-existent var returns #f
         let r = ctx
-            .evaluate("(get-environment-variables)")
-            .expect("get-environment-variables");
-        assert_eq!(r, Value::Nil, "srfi/98 stub returns empty list");
+            .evaluate("(get-environment-variable \"NONEXISTENT_VAR_12345\")")
+            .expect("get-environment-variable");
+        assert_eq!(
+            r,
+            Value::Boolean(false),
+            "srfi/98 returns #f for unknown vars in sandbox"
+        );
     }
 
     #[test]
@@ -10505,11 +10505,12 @@ mod tests {
             .build()
             .unwrap();
         let result = ctx.evaluate("(import (chibi filesystem)) (create-directory \"/tmp/test\")");
-        // stub raises an error containing the sandbox marker
+        // real trampoline checks write policy; sandbox without policy → denied
         match result {
             Err(e) => assert!(
-                e.to_string().contains("[sandbox:chibi/filesystem]"),
-                "expected sandbox error, got: {e}"
+                e.to_string().contains("write not permitted")
+                    || e.to_string().contains("[sandbox:file]"),
+                "expected sandbox write error, got: {e}"
             ),
             Ok(v) => panic!("expected error, got: {v:?}"),
         }
