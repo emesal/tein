@@ -20,8 +20,8 @@ embeddable r7rs scheme interpreter for rust, built on vendored chibi-scheme 0.11
 
 ```bash
 cargo build                        # build (compiles vendored chibi-scheme via build.rs)
-just test                         # all tests (439 lib + 40 scheme + 58 vfs_module_tests (5 ignored) + tein-macros + ext_loading + doc-tests + 11 tein-bin)
-cargo test -p tein --test vfs_module_tests  # chibi/srfi test suite integration (58 pass, 5 ignored)
+just test                         # all tests (549 lib + 40 scheme + 59 vfs_module_tests (4 ignored) + tein-macros + ext_loading + doc-tests + 11 tein-bin)
+cargo test -p tein --test vfs_module_tests  # chibi/srfi test suite integration (59 pass, 4 ignored)
 cargo test test_name               # single test by name
 cargo test --lib -- --nocapture    # lib tests with stdout
 just lint                          # lint (cargo fmt + cargo clippy)
@@ -44,7 +44,8 @@ cargo test -p tein-bin             # unit tests (arg parsing, shebang, paren_dep
 src/
   lib.rs         — public api re-exports
   context.rs     — Context, ContextBuilder: eval, fuel, env restriction, all tests;
-                   load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII
+                   load_extension(), build_ext_api(), ext trampolines, ExtApiGuard RAII;
+                   process trampolines (exit, env vars, command-line, current-process-id, system)
   value.rs       — Value enum: scheme↔rust conversion, cycle detection, Display
   error.rs       — Error enum
   ffi.rs         — unsafe c bindings + safe wrappers, GcRoot, `raw` module
@@ -57,6 +58,9 @@ src/
   json.rs        — json_parse + json_stringify_raw (raw sexp level, preserves alist)
   toml.rs        — toml_parse + toml_stringify_raw; datetimes as (toml-datetime "iso"). feature=toml
   uuid.rs        — #[tein_module]: make-uuid, uuid?, uuid-nil. feature=uuid
+  filesystem.rs  — (tein filesystem) trampolines: file-exists?, delete-file, file-directory?,
+                   file-regular?, file-link?, file-size, directory-files, create-directory,
+                   delete-directory, rename-file, current-directory. sandbox-aware via FsPolicy.
   time.rs        — #[tein_module]: current-second, current-jiffy, jiffies-per-second, timezone-offset-seconds. feature=time
   http.rs        — HTTP_SLD/HTTP_SCM constants, do_http_request (ureq), http_request_trampoline. feature=http
   safe_regexp.rs — #[tein_module("safe-regexp")]: regexp, regexp?, regexp-search, regexp-matches, regexp-replace,
@@ -84,9 +88,9 @@ tests/           — scheme_tests.rs (integration runner), scheme/*.scm
 
 **standard env flow**: ContextBuilder with `.standard_env()` → load_standard_env (init-7 + meta-7 via VFS) → load_standard_ports → ~200 bindings (map, for-each, values, dynamic-wind, etc.)
 
-**sandboxing flow**: ContextBuilder with presets → set IS_SANDBOXED thread-local → build full standard env → arm FS policy gate (C-level `tein_fs_policy_gate` + rust thread-local `FS_GATE`) → seed `SANDBOX_ENV` (`{"TEIN_SANDBOX": "true"}` merged with `.environment_variables()`) + `SANDBOX_COMMAND_LINE` (`["tein", "--sandbox"]` or `.command_line()` override) → inject VFS shadow modules (`register_vfs_shadows()`: dynamic VFS overrides for scheme/eval, scheme/load, scheme/repl, scheme/file, scheme/process-context, srfi/98) → resolve module allowlist from `Modules` variant via `VFS_REGISTRY` → set VFS gate + allowlist → GC-root source env + null env → create null env (syntax-only) → copy `import` via env_copy_named → register UX stubs for bindings not in the allowlist (each stub looks up providing module in `STUB_MODULE_MAP`) → set null env as active. IS_SANDBOXED + FS_GATE + SANDBOX_ENV + SANDBOX_COMMAND_LINE restored to previous values on drop. unsandboxed contexts ignore `.environment_variables()` / `.command_line()`.
+**sandboxing flow**: ContextBuilder with presets → set IS_SANDBOXED thread-local → build full standard env → arm FS policy gate (C-level `tein_fs_policy_gate` + rust thread-local `FS_GATE`) → seed `SANDBOX_ENV` (`{"TEIN_SANDBOX": "true"}` merged with `.environment_variables()`) + `SANDBOX_COMMAND_LINE` (`["tein", "--sandbox"]` or `.command_line()` override) → inject VFS shadow modules (`register_vfs_shadows()`: dynamic VFS overrides for remaining safety stubs — chibi/stty, chibi/system, chibi/shell, chibi/temp-file, chibi/net/*) → resolve module allowlist from `Modules` variant via `VFS_REGISTRY` → set VFS gate + allowlist → GC-root source env + null env → create null env (syntax-only) → copy `import` via env_copy_named → register UX stubs for bindings not in the allowlist (each stub looks up providing module in `STUB_MODULE_MAP`) → set null env as active. IS_SANDBOXED + FS_GATE + SANDBOX_ENV + SANDBOX_COMMAND_LINE restored to previous values on drop. unsandboxed contexts ignore `.environment_variables()` / `.command_line()`. **note**: override modules (scheme/eval, scheme/load, scheme/repl, scheme/file, scheme/process-context, scheme/time, srfi/98, chibi/filesystem, chibi/process) are now `VfsSource::Embedded` — available in ALL contexts, not just sandboxed.
 
-**IO policy flow**: ContextBuilder with file_read/file_write → set FsPolicy thread-local → arm FS policy gate (sandboxed contexts only). `open-input-file` / `open-output-file` are chibi opcodes; eval.c patches F and G call `tein_fs_check_access()` before `fopen()` → C dispatcher checks gate level → if gate=1, calls rust callback `tein_fs_policy_check` → checks IS_SANDBOXED + FsPolicy prefix matching via canonicalisation → allows or denies. `file-exists?` and `delete-file` remain rust trampolines (no opcode equivalents).
+**IO policy flow**: ContextBuilder with file_read/file_write → set FsPolicy thread-local → arm FS policy gate (sandboxed contexts only). `open-input-file` / `open-output-file` are chibi opcodes; eval.c patches F and G call `tein_fs_check_access()` before `fopen()` → C dispatcher checks gate level → if gate=1, calls rust callback `tein_fs_policy_check` → checks IS_SANDBOXED + FsPolicy prefix matching via canonicalisation → allows or denies. `file-exists?` and `delete-file` are rust trampolines in `src/filesystem.rs` (no opcode equivalents), also checking IS_SANDBOXED + FsPolicy.
 
 **exit escape hatch flow**: `(import (tein process))` → `(exit)` / `(exit obj)` unwinds the `%dk` dynamic-wind stack via `travel-to-point!` (runs all "after" thunks innermost-first), flushes current output/error ports (r7rs requires flush, not close — closing may raise on custom ports), then calls `emergency-exit` (rust trampoline). `emergency-exit` sets EXIT_REQUESTED + EXIT_VALUE thread-locals + returns exception to stop VM immediately → eval loop (`evaluate`/`evaluate_port`/`call`) intercepts via `check_exit()` → clears flags → converts EXIT_VALUE to `Value` → returns `Ok(Value::Exit(n))` to rust caller. `(exit)` → 0, `(exit #t)` → 0, `(exit #f)` → 1, `(exit obj)` → obj. EXIT_REQUESTED/EXIT_VALUE cleared on Context::drop(). `emergency-exit` is r7rs-compliant: immediate halt, no cleanup. `exit` is r7rs-compliant: runs `dynamic-wind` "after" thunks and flushes ports before halting.
 
@@ -208,14 +212,13 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
 `tests/vfs_module_tests.rs` wires chibi's bundled srfi/chibi test suites into cargo test.
 - `run_chibi_test(module)` builds a `standard_env().with_vfs_shadows()` context, imports the module, calls `(run-tests)`, checks `(test-failure-count)`.
 - `(chibi test)` is in the VFS as `default_safe: false` — not available in sandboxed contexts.
-- **5 tests permanently ignored** (see `#[ignore]` annotations in source):
+- **4 tests permanently ignored** (see `#[ignore]` annotations in source):
   - `srfi_33`: `bitwise-merge` implementation quirk in chibi
   - `srfi_35`: imports `(chibi repl)` — not in VFS
   - `srfi_166`: needs real `delete-file` — `chibi/filesystem` stub blocks it
-  - `chibi_diff`: `edits->string/color` needs real TERM env var
   - `chibi_weak`: `(gc)` in test body → SIGSEGV in embedded chibi
 - **excluded from harness entirely**: `chibi/regexp-test` (needs pcre), crypto/mime/memoize (fs/network), filesystem/process/system-test (OS-level), `srfi/179/231` (fuel concerns)
-- **shadow SLD rules**: `VfsSource::Shadow` bodies must not import other `VfsSource::Shadow` modules (circular/ordering hazard). importing `VfsSource::Embedded` tein modules (e.g. `(tein load)`, `(tein time)`) is fine. allowed imports in shadow bodies: `(chibi)`, `(scheme base)`, and `VfsSource::Embedded` tein modules. **exception**: `scheme/file` imports `(only (chibi filesystem) ...)` — `chibi/filesystem` is a `VfsSource::Shadow` (generated safe stub in sandboxed contexts). this is intentional: the stub only exposes `delete-file` and `file-exists?` with safe semantics; no real FS access. never use `(define x x)` pattern — letrec* pre-binds to `#<unspecified>`.
+- **shadow SLD rules**: `VfsSource::Shadow` bodies must not import other `VfsSource::Shadow` modules (circular/ordering hazard). importing `VfsSource::Embedded` tein modules is fine. allowed imports in shadow bodies: `(chibi)`, `(scheme base)`, and `VfsSource::Embedded` tein modules. remaining Shadow modules are safety stubs only (chibi/stty, chibi/system, chibi/shell, chibi/temp-file, chibi/net/*). never use `(define x x)` pattern — letrec* pre-binds to `#<unspecified>`.
 
 ## license
 - ISC
