@@ -1814,6 +1814,58 @@ unsafe extern "C" fn exit_trampoline(
     }
 }
 
+// --- (tein process) additional trampolines ---
+
+/// `current-process-id`: returns the current process PID as a fixnum.
+///
+/// in sandboxed contexts, returns 0 (no real PID leakage).
+unsafe extern "C" fn current_process_id_trampoline(
+    _ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    if IS_SANDBOXED.with(|c| c.get()) {
+        unsafe { ffi::sexp_make_fixnum(0) }
+    } else {
+        unsafe { ffi::sexp_make_fixnum(std::process::id() as ffi::sexp_sint_t) }
+    }
+}
+
+/// `system`: runs a shell command via `/bin/sh -c`, returns exit code as fixnum.
+///
+/// raises an error in sandboxed contexts.
+unsafe extern "C" fn system_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if IS_SANDBOXED.with(|c| c.get()) {
+            let msg = "[sandbox:process] system: not permitted in sandbox";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let cmd = match extract_string_arg(ctx, args, "system") {
+            Ok(s) => s,
+            Err(e) => return e,
+        };
+        match std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(cmd)
+            .status()
+        {
+            Ok(status) => ffi::sexp_make_fixnum(status.code().unwrap_or(-1) as ffi::sexp_sint_t),
+            Err(e) => {
+                let msg = format!("system: {}", e);
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
 // --- default sizes ---
 
 const DEFAULT_HEAP_SIZE: usize = 8 * 1024 * 1024;
@@ -4044,6 +4096,8 @@ impl Context {
         self.define_fn_variadic("get-environment-variables", get_env_vars_trampoline)?;
         self.define_fn_variadic("command-line", command_line_trampoline)?;
         self.define_fn_variadic("emergency-exit", exit_trampoline)?;
+        self.define_fn_variadic("current-process-id", current_process_id_trampoline)?;
+        self.define_fn_variadic("system", system_trampoline)?;
         Ok(())
     }
 
