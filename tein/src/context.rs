@@ -1122,72 +1122,6 @@ pub(crate) fn check_fs_access(path: &str, access: FsAccess) -> bool {
     })
 }
 
-// --- (tein file) trampolines ---
-
-/// `file-exists?` trampoline: checks FsPolicy read access, returns boolean.
-///
-/// when no FsPolicy is set (unsandboxed context), allows unconditionally.
-/// in sandboxed contexts without file_read configured, returns a policy
-/// violation exception.
-unsafe extern "C" fn file_exists_trampoline(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        let path = match extract_string_arg(ctx, args, "file-exists?") {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        if !check_fs_access(path, FsAccess::Read) {
-            let msg = format!("[sandbox:file] {} (read not permitted)", path);
-            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        if std::path::Path::new(path).exists() {
-            ffi::get_true()
-        } else {
-            ffi::get_false()
-        }
-    }
-}
-
-/// `delete-file` trampoline: checks FsPolicy write access, deletes file.
-///
-/// when no FsPolicy is set (unsandboxed context), allows unconditionally.
-/// returns void on success, exception on policy violation or IO error.
-unsafe extern "C" fn delete_file_trampoline(
-    ctx: ffi::sexp,
-    _self: ffi::sexp,
-    _n: ffi::sexp_sint_t,
-    args: ffi::sexp,
-) -> ffi::sexp {
-    unsafe {
-        let path = match extract_string_arg(ctx, args, "delete-file") {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
-
-        if !check_fs_access(path, FsAccess::Write) {
-            let msg = format!("[sandbox:file] {} (write not permitted)", path);
-            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
-        }
-
-        match std::fs::remove_file(path) {
-            Ok(()) => ffi::get_void(),
-            Err(e) => {
-                let msg = format!("delete-file: {}", e);
-                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
-                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
-            }
-        }
-    }
-}
-
 // --- open-*-file enforcement ---
 //
 // open-*-file policy enforcement is handled at the C opcode level
@@ -2609,7 +2543,6 @@ impl ContextBuilder {
 
             if self.standard_env {
                 crate::filesystem::register_filesystem_trampolines(&context)?;
-                context.register_file_module()?;
                 context.register_load_module()?;
                 context.register_eval_module()?;
                 context.register_process_module()?;
@@ -4063,19 +3996,6 @@ impl Context {
     fn register_toml_module(&self) -> Result<()> {
         self.define_fn_variadic("toml-parse", toml_parse_trampoline)?;
         self.define_fn_variadic("toml-stringify", toml_stringify_trampoline)?;
-        Ok(())
-    }
-
-    /// Register `file-exists?` and `delete-file` trampolines for `(tein file)`.
-    ///
-    /// `open-*-file` enforcement is handled at the C opcode level via the FS
-    /// policy gate (eval.c patches F, G) — no rust trampolines are needed for
-    /// those. `(tein file)` also exports 4 higher-order wrappers
-    /// (`call-with-*`, `with-*-from/to-file`) defined in `file.scm`.
-    /// Called during `build()` after context creation.
-    fn register_file_module(&self) -> Result<()> {
-        self.define_fn_variadic("file-exists?", file_exists_trampoline)?;
-        self.define_fn_variadic("delete-file", delete_file_trampoline)?;
         Ok(())
     }
 

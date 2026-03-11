@@ -208,7 +208,7 @@ const VFS_REGISTRY: &[VfsEntry] = &[
     },
     VfsEntry {
         path: "tein/file",
-        deps: &["scheme/base"],
+        deps: &["scheme/base", "tein/filesystem"],
         files: &["lib/tein/file.sld", "lib/tein/file.scm"],
         clib: None,
         default_safe: true,
