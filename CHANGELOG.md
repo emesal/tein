@@ -157,6 +157,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 - **context:** Register process trampolines into primitive env to override chibi builtins ([`656a7a4`](https://github.com/emesal/tein/commit/656a7a44bffaba186e94293f53b91aac354a3fde))
 
+- Make test_chibi_diff robust against terminal environment ([`27f1ce7`](https://github.com/emesal/tein/commit/27f1ce7def2fdbe272d4ffae7b90208d9f6a68e6))
+
+- Make test_chibi_diff robust against terminal environment ([`1680f94`](https://github.com/emesal/tein/commit/1680f943d1b67441806fa469f7251c07ac114a2d))
+
 
 ### Chores
 
@@ -630,6 +634,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Update AGENTS.md for universal module availability ([`3ada205`](https://github.com/emesal/tein/commit/3ada205f785c4379881235973bcf3f0bc7a3f2ba))
 
 - Fix stale shadow SLD references in vfs_registry comments ([`19d18fd`](https://github.com/emesal/tein/commit/19d18fdf4f0493bf392185590bd4742949ecee3a))
+
+- Update CHANGELOG for v0.2.3 ([`3089149`](https://github.com/emesal/tein/commit/3089149b64a2ea65b5ff81c73bb94ca53a788d8f))
 
 
 ### Features
