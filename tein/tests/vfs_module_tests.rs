@@ -267,12 +267,28 @@ fn test_chibi_csv() {
     run_chibi_test("(chibi csv-test)");
 }
 
-/// chibi/diff-test: now works because scheme/process-context is Embedded
-/// (re-exports real trampolines from (tein process)) — `get-environment-variable "TERM"`
-/// returns the real value instead of #f.
+/// chibi/diff-test includes `edits->string/color` cases that hardcode ANSI escape
+/// sequences. those sequences are only emitted when `(ansi-escapes-enabled?)` is `#t`,
+/// which depends on `TERM`/`ANSI_ESCAPES_ENABLED` env vars. we force the parameter on
+/// so the test is robust against environment variation — it's testing diff, not ANSI.
 #[test]
 fn test_chibi_diff() {
-    run_chibi_test("(chibi diff-test)");
+    let ctx = Context::builder()
+        .standard_env()
+        .with_vfs_shadows()
+        .build()
+        .expect("context");
+    ctx.evaluate("(import (chibi test))").expect("import chibi/test");
+    ctx.evaluate("(import (chibi term ansi))").expect("import chibi/term/ansi");
+    ctx.evaluate("(ansi-escapes-enabled? #t)").expect("enable ansi escapes");
+    ctx.evaluate("(import (chibi diff-test))").expect("import chibi/diff-test");
+    ctx.evaluate("(run-tests)").expect("run-tests");
+    let failures = ctx
+        .evaluate("(test-failure-count)")
+        .expect("test-failure-count");
+    if failures != tein::Value::Integer(0) {
+        panic!("(chibi diff-test): {failures} test failure(s)");
+    }
 }
 
 #[test]
