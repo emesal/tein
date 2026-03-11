@@ -11493,4 +11493,228 @@ mod tests {
             .expect("import via TEIN_MODULE_PATH env var");
         assert_eq!(result, Value::String("hi".into()));
     }
+
+    // --- universal module availability tests ---
+
+    #[test]
+    fn test_unsandboxed_scheme_process_context() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate(
+                "(import (scheme process-context)) (string? (get-environment-variable \"PATH\"))",
+            )
+            .expect("scheme/process-context importable unsandboxed");
+        assert_eq!(r, Value::Boolean(true), "PATH should be a string");
+    }
+
+    #[test]
+    fn test_unsandboxed_scheme_time() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (scheme time)) (> (current-second) 0)")
+            .expect("scheme/time importable unsandboxed");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_unsandboxed_srfi_98() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (srfi 98)) (string? (get-environment-variable \"PATH\"))")
+            .expect("srfi/98 importable unsandboxed");
+        assert_eq!(
+            r,
+            Value::Boolean(true),
+            "PATH should be a string via srfi/98"
+        );
+    }
+
+    #[test]
+    fn test_unsandboxed_chibi_filesystem() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (chibi filesystem)) (file-exists? \"Cargo.toml\")")
+            .expect("chibi/filesystem importable unsandboxed");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_unsandboxed_chibi_process() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (chibi process)) (> (current-process-id) 0)")
+            .expect("chibi/process importable unsandboxed");
+        assert_eq!(
+            r,
+            Value::Boolean(true),
+            "PID should be positive unsandboxed"
+        );
+    }
+
+    #[test]
+    fn test_unsandboxed_chibi_diff() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(10_000_000)
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (chibi diff)) (diff \"hello\" \"world\")");
+        assert!(
+            r.is_ok(),
+            "chibi/diff should import and run unsandboxed: {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_deferred_function_raises_error() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (chibi filesystem)) (make-fifo \"/tmp/x\")");
+        match r {
+            Err(e) => assert!(
+                e.to_string().contains("not implemented"),
+                "deferred fn should raise 'not implemented', got: {e}"
+            ),
+            Ok(v) => panic!("deferred fn should raise error, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_current_process_id_unsandboxed() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (tein process)) (> (current-process-id) 0)")
+            .expect("current-process-id");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_current_process_id_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (tein process)) (current-process-id)")
+            .expect("current-process-id sandboxed");
+        assert_eq!(r, Value::Integer(0), "PID should be 0 in sandbox");
+    }
+
+    #[test]
+    fn test_system_unsandboxed() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (tein process)) (system \"true\")")
+            .expect("system unsandboxed");
+        assert_eq!(r, Value::Integer(0), "true should exit 0");
+    }
+
+    #[test]
+    fn test_system_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Safe)
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx.evaluate("(import (tein process)) (system \"true\")");
+        match r {
+            Err(e) => assert!(
+                e.to_string().contains("sandbox") || e.to_string().contains("not permitted"),
+                "system should be blocked in sandbox, got: {e}"
+            ),
+            Ok(v) => panic!("system should be blocked in sandbox, got: {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tein_filesystem_real_functions() {
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let r = ctx
+            .evaluate("(import (tein filesystem)) (file-exists? \"Cargo.toml\")")
+            .expect("file-exists?");
+        assert_eq!(r, Value::Boolean(true));
+        let r = ctx
+            .evaluate("(file-directory? \".\")")
+            .expect("file-directory?");
+        assert_eq!(r, Value::Boolean(true));
+        let r = ctx
+            .evaluate("(file-regular? \"Cargo.toml\")")
+            .expect("file-regular?");
+        assert_eq!(r, Value::Boolean(true));
+        let r = ctx
+            .evaluate("(string? (current-directory))")
+            .expect("current-directory");
+        assert_eq!(r, Value::Boolean(true));
+        let r = ctx
+            .evaluate("(list? (directory-files \".\"))")
+            .expect("directory-files");
+        assert_eq!(r, Value::Boolean(true));
+        let r = ctx
+            .evaluate("(> (file-size \"Cargo.toml\") 0)")
+            .expect("file-size");
+        assert_eq!(r, Value::Boolean(true));
+    }
+
+    #[test]
+    fn test_tein_filesystem_create_delete_directory() {
+        let _lock = IO_TEST_LOCK.lock().unwrap();
+        let ctx = Context::builder()
+            .standard_env()
+            .step_limit(5_000_000)
+            .build()
+            .expect("build");
+        let dir = format!("/tmp/tein_test_dir_{}", std::process::id());
+        let code = format!(
+            "(import (tein filesystem)) \
+             (create-directory \"{dir}\") \
+             (let ((exists (file-directory? \"{dir}\"))) \
+               (delete-directory \"{dir}\") \
+               exists)"
+        );
+        let r = ctx
+            .evaluate(&code)
+            .expect("create/delete directory roundtrip");
+        assert_eq!(r, Value::Boolean(true));
+    }
 }

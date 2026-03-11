@@ -22,7 +22,7 @@
 
 use std::ffi::CString;
 
-use crate::context::{check_fs_access, extract_string_arg, FsAccess};
+use crate::context::{FsAccess, check_fs_access, extract_string_arg};
 use crate::ffi;
 
 // --- helpers ---

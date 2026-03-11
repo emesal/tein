@@ -64,6 +64,7 @@ mod context;
 mod crypto;
 mod error;
 mod ffi;
+mod filesystem;
 pub mod foreign;
 #[cfg(feature = "http")]
 mod http;
@@ -74,8 +75,6 @@ mod port;
 #[cfg(feature = "regex")]
 mod safe_regexp;
 pub mod sandbox;
-#[cfg(feature = "json")]
-mod filesystem;
 mod sexp_bridge;
 mod thread;
 #[cfg(feature = "time")]
