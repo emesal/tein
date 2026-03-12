@@ -110,13 +110,27 @@ granted, no way to reach outside the sandbox via side channels.
 what an agent sees is what it gets. `(define x 1)` binds `x` in the null env and
 nowhere else. imports work exactly as documented.
 
-## what's coming for agent tooling
+## environment introspection: (tein introspect)
 
-**(tein introspect)** — planned in milestone 9 (issue #83). environment introspection API:
-query live bindings, procedure arity, module exports, binding metadata — all from within
-a running scheme context. an agent inside a tein sandbox would be able to ask "what
-procedures are in scope?" and "what arguments does this function take?" without an
-external LSP or static analyser.
+`(tein introspect)` lets scheme code discover its own environment at runtime — no
+external LSP or static analyser required. available in all contexts including sandboxed.
+
+```scheme
+(import (tein introspect))
+
+(available-modules)            ; what can I import?
+(imported-modules)             ; what's already imported?
+(module-exports '(tein json))  ; what does this module provide?
+(procedure-arity map)          ; how many args? => (2 . #f)
+(env-bindings "json-")         ; what json-* bindings are in scope?
+(binding-info 'json-parse)     ; everything about this binding
+(describe-environment/text)    ; full text dump for prompt injection
+```
+
+`describe-environment/text` returns a multi-line string listing all available modules,
+their export counts, and docstrings for tein modules — ready to inject into an LLM context.
+
+## what's coming for agent tooling
 
 **fake environment variables** — planned (issue #99). host-injectable env var overrides
 so agents can run with a controlled `getenv` view, separate from the host process environment.

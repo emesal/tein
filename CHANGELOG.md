@@ -3,7 +3,7 @@
 All notable changes to tein are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.2.3] - 2026-03-11
+## [0.2.4] - 2026-03-12
 
 ### Bug Fixes
 
@@ -160,6 +160,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Make test_chibi_diff robust against terminal environment ([`27f1ce7`](https://github.com/emesal/tein/commit/27f1ce7def2fdbe272d4ffae7b90208d9f6a68e6))
 
 - Make test_chibi_diff robust against terminal environment ([`1680f94`](https://github.com/emesal/tein/commit/1680f943d1b67441806fa469f7251c07ac114a2d))
+
+- **introspect:** Use CONTEXT_PTR for env_bindings ctx ([`be14973`](https://github.com/emesal/tein/commit/be149731579b59e4ac26f7d20bcc0f151b123db2))
+
+- **introspect:** GC root sexp accumulators in rust list-building loops ([`06785e9`](https://github.com/emesal/tein/commit/06785e9ac31f2fbce6f8c8cf9da1723878e4af5b))
 
 
 ### Chores
@@ -637,6 +641,22 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 - Update CHANGELOG for v0.2.3 ([`3089149`](https://github.com/emesal/tein/commit/3089149b64a2ea65b5ff81c73bb94ca53a788d8f))
 
+- Update CHANGELOG for v0.2.3 ([`71e76e7`](https://github.com/emesal/tein/commit/71e76e71209ca20954b994efacb65b3ca34e8172))
+
+- Design spec for (tein introspect) — environment introspection API ([`f0ff01a`](https://github.com/emesal/tein/commit/f0ff01adcc043698abc9d3bda6f3a3925198a1d2))
+
+- Address spec review feedback for (tein introspect) ([`8e73bb9`](https://github.com/emesal/tein/commit/8e73bb948d6fa31a4a2fc1f5c68ac2efeb891ef7))
+
+- Address second-pass review feedback for (tein introspect) ([`29d0b59`](https://github.com/emesal/tein/commit/29d0b59453973381599034aeb16cac6a6240cc80))
+
+- Implementation plan for (tein introspect) + spec fix ([`55639db`](https://github.com/emesal/tein/commit/55639db85559a4870eb29f964784f2e9131076c3))
+
+- Update implementation plan with progress + registration fix notes ([`0b67e9d`](https://github.com/emesal/tein/commit/0b67e9d5b06708e62a51451c2af38eacc5fe17fd))
+
+- Add (tein introspect) to reference, modules, tein-for-agents, AGENTS.md ([`73897b5`](https://github.com/emesal/tein/commit/73897b5e6b95c25f53cceda6e0a85f2c9a79cbff))
+
+- Update implementation plan — all tasks complete ([`2de089a`](https://github.com/emesal/tein/commit/2de089ac0ac29245125707b4a6fd68a20e8ebe83))
+
 
 ### Features
 
@@ -910,6 +930,16 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 - Add current-process-id and system to (tein process) ([`19ec4ca`](https://github.com/emesal/tein/commit/19ec4ca7f2f29afe4a7dbdeb489f7567e0237cac))
 
+- FFI declarations and safe wrappers for introspection shims ([`97ad3e4`](https://github.com/emesal/tein/commit/97ad3e4ab6edaaa333001ee23e0aa8ff3e65e06d))
+
+- **introspect:** Available-modules trampoline + VFS registration ([`62a3f82`](https://github.com/emesal/tein/commit/62a3f82df3124bd3e35cd242b6ef8a695b9e0bce))
+
+- **introspect:** Module-exports trampoline ([`abb93e0`](https://github.com/emesal/tein/commit/abb93e0c379222e3239a8e9fe40976c832f83a5e))
+
+- **introspect:** Procedure-arity + env-bindings + imported-modules trampolines (task 9 blocked on GC bug) ([`381c171`](https://github.com/emesal/tein/commit/381c1712823486bd502457a08f4e15056e38f259))
+
+- **introspect:** Binding-info + describe-environment + describe-environment/text ([`33bc6cb`](https://github.com/emesal/tein/commit/33bc6cbbd15e6d68d266e5f7f429e35d55246570))
+
 
 ### Refactoring
 
@@ -1027,5 +1057,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - **sandbox:** Add tests for auto-import behaviour ([`4c00754`](https://github.com/emesal/tein/commit/4c00754766c9c0afd5844c8c547cf6c35803963d))
 
 - Unsandboxed module availability + chibi/diff integration ([`d660b80`](https://github.com/emesal/tein/commit/d660b8093598db832f39ef7d040c2c19a9c5f4ec))
+
+- **introspect:** Scheme integration tests ([`6b68961`](https://github.com/emesal/tein/commit/6b68961f812810941f89153c13826fd2f139e6d4))
 
 

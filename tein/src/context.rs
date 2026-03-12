@@ -1221,7 +1221,10 @@ unsafe extern "C" fn load_trampoline(
 /// Each element must be a symbol (converted via `sexp_symbol_to_string`) or an
 /// integer (converted via `sexp_unbox_fixnum`). Returns `Err(error_sexp)` on
 /// malformed input.
-unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<String, ffi::sexp> {
+pub(crate) unsafe fn spec_to_path(
+    ctx: ffi::sexp,
+    spec: ffi::sexp,
+) -> std::result::Result<String, ffi::sexp> {
     unsafe {
         let mut parts = Vec::new();
         let mut cursor = spec;
@@ -1473,7 +1476,7 @@ fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
 /// so they end up in `*chibi-env*` and are visible to library bodies via
 /// `(import (chibi))`.
 #[allow(dead_code)] // generic utility — currently used by http, ready for future modules
-fn register_native_trampoline(
+pub(crate) fn register_native_trampoline(
     ctx: ffi::sexp,
     env: ffi::sexp,
     name: &str,
@@ -2260,6 +2263,8 @@ impl ContextBuilder {
                     "http-request-internal",
                     crate::http::http_request_trampoline,
                 )?;
+
+                crate::introspect::register_introspect_trampolines(ctx, prim_env)?;
 
                 let env = ffi::sexp_context_env(ctx);
                 // H9: chibi uses a char[128] stack buffer for the init file path
@@ -11716,5 +11721,283 @@ mod tests {
             .evaluate(&code)
             .expect("create/delete directory roundtrip");
         assert_eq!(r, Value::Boolean(true));
+    }
+
+    // --- (tein introspect) tests ---
+
+    #[test]
+    fn test_available_modules_unsandboxed() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(available-modules)").unwrap();
+        // unsandboxed: returns all registry modules; must include scheme/base
+        if let Value::List(modules) = &r {
+            let has_scheme_base = modules.iter().any(|m| {
+                if let Value::List(parts) = m {
+                    parts.len() == 2
+                        && parts[0] == Value::Symbol("scheme".into())
+                        && parts[1] == Value::Symbol("base".into())
+                } else {
+                    false
+                }
+            });
+            assert!(
+                has_scheme_base,
+                "should include (scheme base), got: {:?}",
+                r
+            );
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_available_modules_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Only(vec![
+                "scheme/base".into(),
+                "tein/introspect".into(),
+            ]))
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(length (available-modules))").unwrap();
+        // Only scheme/base, tein/introspect, and their resolved deps
+        if let Value::Integer(n) = r {
+            assert!(n >= 2, "should have at least 2 modules, got {}", n);
+        } else {
+            panic!("expected integer, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_module_exports() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(module-exports '(scheme write))").unwrap();
+        // scheme/write exports: write, display, write-shared
+        if let Value::List(exports) = &r {
+            let has_display = exports
+                .iter()
+                .any(|e| *e == Value::Symbol("display".into()));
+            assert!(has_display, "should include display, got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_module_exports_sandboxed_blocked() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Only(vec![
+                "scheme/base".into(),
+                "tein/introspect".into(),
+            ]))
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        // scheme/regex is not in the allowlist — should error
+        let r = ctx.evaluate("(module-exports '(scheme regex))");
+        assert!(r.is_err(), "should error for disallowed module");
+    }
+
+    #[test]
+    fn test_procedure_arity_lambda() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(procedure-arity (lambda (a b) a))").unwrap();
+        assert_eq!(
+            r,
+            Value::Pair(Box::new(Value::Integer(2)), Box::new(Value::Integer(2)))
+        );
+    }
+
+    #[test]
+    fn test_procedure_arity_variadic() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx
+            .evaluate("(procedure-arity (lambda (a . rest) a))")
+            .unwrap();
+        assert_eq!(
+            r,
+            Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Boolean(false)))
+        );
+    }
+
+    #[test]
+    fn test_procedure_arity_builtin() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(procedure-arity cons)").unwrap();
+        assert_eq!(
+            r,
+            Value::Pair(Box::new(Value::Integer(2)), Box::new(Value::Integer(2)))
+        );
+    }
+
+    #[test]
+    fn test_procedure_arity_non_procedure() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(procedure-arity 42)").unwrap();
+        assert_eq!(r, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_env_bindings() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        ctx.evaluate("(define my-test-var 42)").unwrap();
+        let r = ctx.evaluate("(env-bindings \"my-test\")").unwrap();
+        if let Value::List(bindings) = &r {
+            let has_var = bindings.iter().any(|b| {
+                if let Value::Pair(name, kind) = b {
+                    **name == Value::Symbol("my-test-var".into())
+                        && **kind == Value::Symbol("variable".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_var, "should find my-test-var, got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_env_bindings_no_prefix() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(length (env-bindings))").unwrap();
+        if let Value::Integer(n) = r {
+            assert!(n > 10, "standard env should have many bindings, got {}", n);
+        } else {
+            panic!("expected integer, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_env_bindings_kind_procedure() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(assq 'map (env-bindings \"map\"))").unwrap();
+        if let Value::Pair(name, kind) = &r {
+            assert_eq!(**name, Value::Symbol("map".into()));
+            assert_eq!(**kind, Value::Symbol("procedure".into()));
+        } else {
+            panic!("expected (map . procedure), got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_imported_modules() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        ctx.evaluate("(import (scheme write))").unwrap();
+        let r = ctx.evaluate("(imported-modules)").unwrap();
+        if let Value::List(modules) = &r {
+            let has_introspect = modules.iter().any(|m| {
+                if let Value::List(parts) = m {
+                    parts.len() == 2
+                        && parts[0] == Value::Symbol("tein".into())
+                        && parts[1] == Value::Symbol("introspect".into())
+                } else {
+                    false
+                }
+            });
+            assert!(
+                has_introspect,
+                "should include (tein introspect), got: {:?}",
+                r
+            );
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_binding_info_procedure() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(binding-info 'map)").unwrap();
+        // should be an alist with at least name and kind
+        if let Value::List(entries) = &r {
+            let has_name = entries.iter().any(|e| {
+                if let Value::Pair(k, v) = e {
+                    **k == Value::Symbol("name".into()) && **v == Value::Symbol("map".into())
+                } else {
+                    false
+                }
+            });
+            let has_kind = entries.iter().any(|e| {
+                if let Value::Pair(k, v) = e {
+                    **k == Value::Symbol("kind".into()) && **v == Value::Symbol("procedure".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_name, "should have name entry, got: {:?}", r);
+            assert!(has_kind, "should have kind entry, got: {:?}", r);
+        } else {
+            panic!("expected list (alist), got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_binding_info_undefined() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(binding-info 'nonexistent-xyz-42)").unwrap();
+        assert_eq!(r, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_describe_environment() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(describe-environment)").unwrap();
+        // should be an alist with a 'modules key.
+        // note: (cons 'modules list) collapses to Value::List([Symbol("modules"), ...])
+        // via from_raw's dotted-pair-with-list-cdr collapsing.
+        if let Value::List(entries) = &r {
+            let has_modules = entries.iter().any(|e| {
+                if let Value::List(items) = e {
+                    items.first() == Some(&Value::Symbol("modules".into()))
+                } else if let Value::Pair(k, _) = e {
+                    **k == Value::Symbol("modules".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_modules, "should have modules key, got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_describe_environment_text() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(describe-environment/text)").unwrap();
+        if let Value::String(text) = &r {
+            assert!(
+                text.contains("scheme base"),
+                "should mention scheme base, got: {}",
+                text
+            );
+            assert!(
+                text.contains("modules available"),
+                "should have header, got: {}",
+                text
+            );
+        } else {
+            panic!("expected string, got: {:?}", r);
+        }
     }
 }

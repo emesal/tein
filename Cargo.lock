@@ -409,9 +409,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.3"
+version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "percent-encoding"
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "tein"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "cc",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "tein-bin"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "rustyline",
  "tein",
@@ -772,11 +772,11 @@ dependencies = [
 
 [[package]]
 name = "tein-ext"
-version = "0.2.3"
+version = "0.2.4"
 
 [[package]]
 name = "tein-macros"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "tein-sexp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "tein-test-ext"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "tein-ext",
  "tein-macros",
