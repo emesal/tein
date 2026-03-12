@@ -25,8 +25,8 @@ the LLM's harness communicates via `scheme_eval` — so the solution is to make 
 ```rust
 VfsEntry {
     path: "tein/introspect",
-    // scheme/write needed by describe-environment/text for display/write
-    deps: &["scheme/base", "scheme/write", "tein/docs"],
+    // scheme/write for describe-environment/text, scheme/eval for doc alist loading
+    deps: &["scheme/base", "scheme/write", "scheme/eval"],
     files: &["lib/tein/introspect.sld", "lib/tein/introspect.scm",
              "lib/tein/introspect/docs.sld", "lib/tein/introspect/docs.scm"],
     clib: None,
