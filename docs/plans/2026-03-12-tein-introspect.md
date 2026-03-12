@@ -20,7 +20,13 @@
 
 - **Chunk 1 (tasks 1–5): COMPLETE** — all C shims committed to chibi fork, FFI wrappers in ffi.rs
 - **Task 6 (available-modules): COMPLETE** — trampoline + VFS entry + scheme skeleton + tests pass
-- **Tasks 7–17: PENDING** — next session starts at task 7 (module-exports)
+- **Task 7 (module-exports): COMPLETE** — trampoline + tests pass (commit abb93e0)
+- **Task 8 (procedure-arity): COMPLETE** — trampoline + tests pass; fixed C shim (raw short, not fixnum)
+- **Task 9 (env-bindings): IN PROGRESS** — trampoline written, tests registered, scheme files updated, but `tein_env_bindings_list` still has a SIGSEGV from a GC bug in the C shim (see notes below)
+- **Task 10 (imported-modules): PENDING** — trampoline written, registered, scheme files updated; not yet tested
+- **Tasks 11–17: PENDING**
+
+**Next session: fix Task 9 SIGSEGV first, then verify Task 10, then Tasks 11–17**
 
 ## Implementation Notes for Continuity
 
@@ -38,18 +44,29 @@ The plan originally used `define_fn_variadic` for trampoline registration, but t
 - `tein/introspect/docs` deps: `["scheme/base"]`
 
 ### `spec_to_path` (task 7)
-- exists at `context.rs:1224` as `unsafe fn spec_to_path`
-- needs `pub(crate)` visibility for `introspect.rs` to import it
-- plan's note about this is correct
+- now `pub(crate)` at `context.rs:1224`
 
 ### Imports in introspect.rs
-- uses `crate::sandbox::{VFS_ALLOWLIST, registry_all_allowlist}` (NOT the `vfs_registry` module directly — it's `include!`'d into `sandbox.rs`)
+- uses `crate::sandbox::{VFS_ALLOWLIST, module_exports as vfs_module_exports, registry_all_allowlist}`
 - `VFS_REGISTRY` and `feature_enabled` are private to sandbox; use `registry_all_allowlist()` instead
+
+### `tein_procedure_arity` fix
+- `sexp_procedure_num_args(proc)` returns a raw `short` (not a boxed fixnum)
+- the shim originally called `sexp_unbox_fixnum()` on it — wrong! fixed to `(sexp_sint_t) sexp_procedure_num_args(proc)`
+
+### `tein_env_bindings_list` — SIGSEGV in GC (Task 9 BLOCKER)
+- env bindings use `sexp_env_next_cell` (pair source field) for iteration, NOT `sexp_cdr` — this was fixed
+- `env` variable MUST be GC-rooted (sexp_gc_var6) — this was fixed (commit a927303e in fork)
+- the inner pair `(name . kind)` must be built via `sym_str` (gc-rooted) to survive `sexp_cons` calls
+- despite these fixes, a SIGSEGV still occurs after ~453 bindings when trying `sexp_env_parent(env)`
+- debug shows: env is GC-rooted, `sym_str` is GC-rooted, the crash is still in `sexp_env_parent(env)`
+- **root cause not yet fully identified** — possible the `sexp_gc_var6`/`sexp_gc_preserve6` expansion uses a stack slot that gets smashed by 453 iterations of 3x `sexp_cons`
+- **strategy for next session**: try gc_debug build (`cargo test --features debug-chibi`) to see GC errors, or verify sexp_gc_var macros expand correctly for 6 vars
 
 ### Chibi fork state
 - branch: `emesal-tein`
-- 2 commits pushed: C shims + scheme skeleton (introspect.sld, introspect.scm, introspect/docs.sld, introspect/docs.scm)
-- scheme files are minimal stubs — will be extended as trampolines are added
+- latest commit: a927303e (fix: remove duplicate cell_n declaration)
+- scheme files: introspect.sld exports available-modules, module-exports, procedure-arity, env-bindings, imported-modules; introspect.scm has all 5 wrappers
 
 ---
 

@@ -140,6 +140,91 @@ unsafe extern "C" fn module_exports_trampoline(
     }
 }
 
+/// `procedure-arity` trampoline: returns `(min . max)` or `#f`.
+///
+/// delegates to `tein_procedure_arity` C shim. max is `#f` for variadic.
+unsafe extern "C" fn procedure_arity_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "procedure-arity: expected 1 argument";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let proc = ffi::sexp_car(args);
+        ffi::procedure_arity(ctx, proc)
+    }
+}
+
+/// `env-bindings` trampoline: returns alist of `(name . kind)` pairs.
+///
+/// optional string prefix argument for filtering.
+/// delegates to `tein_env_bindings_list` C shim.
+unsafe extern "C" fn env_bindings_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let prefix = if ffi::sexp_nullp(args) != 0 {
+            ffi::get_false()
+        } else {
+            let arg = ffi::sexp_car(args);
+            if ffi::sexp_stringp(arg) != 0 {
+                arg
+            } else {
+                let msg = "env-bindings: optional argument must be a string prefix";
+                let c_msg = CString::new(msg).unwrap_or_default();
+                return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+            }
+        };
+        ffi::env_bindings_list(ctx, prefix)
+    }
+}
+
+/// `imported-modules` trampoline: returns list of actually-imported module paths.
+///
+/// walks chibi's `*modules*` in meta env. in sandboxed contexts, filters
+/// results to VFS_ALLOWLIST to prevent information leakage.
+unsafe extern "C" fn imported_modules_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    _args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        let raw_list = ffi::imported_modules_list(ctx);
+
+        // in sandboxed contexts, filter to allowlist
+        VFS_ALLOWLIST.with(|cell| {
+            let list = cell.borrow();
+            if list.is_empty() {
+                return raw_list; // unsandboxed: return all
+            }
+
+            // filter: keep only modules whose path is in the allowlist
+            let mut result = ffi::get_null();
+            let mut ls = raw_list;
+            while ffi::sexp_pairp(ls) != 0 {
+                let name = ffi::sexp_car(ls);
+                // convert module name list to path string for allowlist check
+                if let Ok(path) = crate::context::spec_to_path(ctx, name) {
+                    if list.iter().any(|p| p == &path) {
+                        result = ffi::sexp_cons(ctx, name, result);
+                    }
+                }
+                ls = ffi::sexp_cdr(ls);
+            }
+            result
+        })
+    }
+}
+
 /// register all (tein introspect) trampolines into the primitive env.
 ///
 /// called from `Context::build()` BEFORE `load_standard_env` so that
@@ -160,6 +245,24 @@ pub(crate) fn register_introspect_trampolines(
         prim_env,
         "tein-module-exports-internal",
         module_exports_trampoline,
+    )?;
+    crate::context::register_native_trampoline(
+        ctx,
+        prim_env,
+        "tein-procedure-arity-internal",
+        procedure_arity_trampoline,
+    )?;
+    crate::context::register_native_trampoline(
+        ctx,
+        prim_env,
+        "tein-env-bindings-internal",
+        env_bindings_trampoline,
+    )?;
+    crate::context::register_native_trampoline(
+        ctx,
+        prim_env,
+        "tein-imported-modules-internal",
+        imported_modules_trampoline,
     )?;
     Ok(())
 }

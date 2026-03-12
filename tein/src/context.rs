@@ -11801,4 +11801,130 @@ mod tests {
         let r = ctx.evaluate("(module-exports '(scheme regex))");
         assert!(r.is_err(), "should error for disallowed module");
     }
+
+    #[test]
+    fn test_procedure_arity_lambda() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(procedure-arity (lambda (a b) a))").unwrap();
+        assert_eq!(
+            r,
+            Value::Pair(
+                Box::new(Value::Integer(2)),
+                Box::new(Value::Integer(2))
+            )
+        );
+    }
+
+    #[test]
+    fn test_procedure_arity_variadic() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx
+            .evaluate("(procedure-arity (lambda (a . rest) a))")
+            .unwrap();
+        assert_eq!(
+            r,
+            Value::Pair(
+                Box::new(Value::Integer(1)),
+                Box::new(Value::Boolean(false))
+            )
+        );
+    }
+
+    #[test]
+    fn test_procedure_arity_builtin() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(procedure-arity cons)").unwrap();
+        assert_eq!(
+            r,
+            Value::Pair(
+                Box::new(Value::Integer(2)),
+                Box::new(Value::Integer(2))
+            )
+        );
+    }
+
+    #[test]
+    fn test_procedure_arity_non_procedure() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(procedure-arity 42)").unwrap();
+        assert_eq!(r, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_env_bindings() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        ctx.evaluate("(define my-test-var 42)").unwrap();
+        let r = ctx.evaluate("(env-bindings \"my-test\")").unwrap();
+        if let Value::List(bindings) = &r {
+            let has_var = bindings.iter().any(|b| {
+                if let Value::Pair(name, kind) = b {
+                    **name == Value::Symbol("my-test-var".into())
+                        && **kind == Value::Symbol("variable".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_var, "should find my-test-var, got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_env_bindings_no_prefix() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(length (env-bindings))").unwrap();
+        if let Value::Integer(n) = r {
+            assert!(n > 10, "standard env should have many bindings, got {}", n);
+        } else {
+            panic!("expected integer, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_env_bindings_kind_procedure() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx
+            .evaluate("(assq 'map (env-bindings \"map\"))")
+            .unwrap();
+        if let Value::Pair(name, kind) = &r {
+            assert_eq!(**name, Value::Symbol("map".into()));
+            assert_eq!(**kind, Value::Symbol("procedure".into()));
+        } else {
+            panic!("expected (map . procedure), got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_imported_modules() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        ctx.evaluate("(import (scheme write))").unwrap();
+        let r = ctx.evaluate("(imported-modules)").unwrap();
+        if let Value::List(modules) = &r {
+            let has_introspect = modules.iter().any(|m| {
+                if let Value::List(parts) = m {
+                    parts.len() == 2
+                        && parts[0] == Value::Symbol("tein".into())
+                        && parts[1] == Value::Symbol("introspect".into())
+                } else {
+                    false
+                }
+            });
+            assert!(
+                has_introspect,
+                "should include (tein introspect), got: {:?}",
+                r
+            );
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
 }
