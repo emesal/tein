@@ -22,11 +22,17 @@
 - **Task 6 (available-modules): COMPLETE** — trampoline + VFS entry + scheme skeleton + tests pass
 - **Task 7 (module-exports): COMPLETE** — trampoline + tests pass (commit abb93e0)
 - **Task 8 (procedure-arity): COMPLETE** — trampoline + tests pass; fixed C shim (raw short, not fixnum)
-- **Task 9 (env-bindings): IN PROGRESS** — trampoline written, tests registered, scheme files updated, but `tein_env_bindings_list` still has a SIGSEGV from a GC bug in the C shim (see notes below)
-- **Task 10 (imported-modules): PENDING** — trampoline written, registered, scheme files updated; not yet tested
-- **Tasks 11–17: PENDING**
+- **Task 9 (env-bindings): COMPLETE** — SIGSEGV fixed: two-part fix — null-guard `env &&` in C shim (root envs have C NULL parent, sexp_pointerp(NULL)==true) + use CONTEXT_PTR for real ctx in rust trampoline (child apply-ctx has NULL env)
+- **Task 10 (imported-modules): COMPLETE** — tests pass
+- **Task 11 (binding-info): COMPLETE** — tein-binding-kind-internal trampoline + scheme layer
+- **Task 12 (describe-environment): COMPLETE** — describe-environment + describe-environment/text
+- **Task 13 (finalise .sld): COMPLETE** — all 9 exports + introspect-docs
+- **Task 14 (scheme integration tests): COMPLETE** — tests/scheme/introspect.scm passing
+- **Task 15 (full test suite): COMPLETE** — 1017/1017 passing
+- **Task 16 (docs): COMPLETE** — reference.md, modules.md, tein-for-agents.md, AGENTS.md
+- **Task 17 (lint + final): COMPLETE** — lint clean, closes #27 and #83
 
-**Next session: fix Task 9 SIGSEGV first, then verify Task 10, then Tasks 11–17**
+**BRANCH COMPLETE**
 
 ## Implementation Notes for Continuity
 
