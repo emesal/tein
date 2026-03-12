@@ -27,7 +27,8 @@ VfsEntry {
     path: "tein/introspect",
     // scheme/write needed by describe-environment/text for display/write
     deps: &["scheme/base", "scheme/write", "tein/docs"],
-    files: &["lib/tein/introspect.sld", "lib/tein/introspect.scm"],
+    files: &["lib/tein/introspect.sld", "lib/tein/introspect.scm",
+             "lib/tein/introspect/docs.sld", "lib/tein/introspect/docs.scm"],
     clib: None,
     default_safe: true,
     source: VfsSource::Embedded,
@@ -38,22 +39,9 @@ VfsEntry {
 
 `default_safe: true` — the primary consumer is LLMs in sandboxed contexts. the module exposes only read-only introspection; it grants no new capabilities beyond seeing what the sandbox already provides.
 
-a hand-written docs sub-library is also registered:
+a hand-written docs sub-library is also provided: `lib/tein/introspect/docs.sld` + `lib/tein/introspect/docs.scm` in the chibi fork. these are registered as embedded VFS files alongside the parent module's files (added to the parent's `files` array), **not** as a separate `VfsEntry`. this matches the convention established by `#[tein_module]`-generated doc sub-libraries, which are registered as VFS files without their own registry entries. the VFS gate's prefix matching already allows `tein/introspect/docs` when `tein/introspect` is in the allowlist.
 
-```rust
-VfsEntry {
-    path: "tein/introspect/docs",
-    deps: &["scheme/base"],
-    files: &["lib/tein/introspect/docs.sld", "lib/tein/introspect/docs.scm"],
-    clib: None,
-    default_safe: true,
-    source: VfsSource::Embedded,
-    feature: None,
-    shadow_sld: None,
-}
-```
-
-the docs sub-library exports `introspect-docs`, matching the convention established by `#[tein_module]`-generated doc sub-libraries.
+the docs sub-library exports `introspect-docs`, matching the naming convention (`X-docs`) used by macro-generated doc sub-libraries.
 
 ### implementation approach: layered hybrid
 
@@ -106,7 +94,7 @@ raises an error if the module is not in the current allowlist (no peeking at mod
 
 returns an alist of `(name . kind)` pairs for all bindings visible in the current environment. walks `sexp_env_bindings` + `sexp_env_parent` chain up to (but not including) the global env boundary. kind is one of: `procedure`, `syntax`, `variable`.
 
-**scope**: walks the full parent chain starting from `sexp_context_env(ctx)`. in sandboxed contexts this is the null env → only explicitly granted bindings + user defines are visible. in unsandboxed standard-env contexts this includes stdlib bindings from parent envs. shadowed bindings are deduplicated — the innermost (most local) binding wins.
+**scope**: walks the full parent chain starting from `sexp_context_env(ctx)`, terminating when `!sexp_envp(sexp_env_parent(env))` (standard chibi termination — parent is `SEXP_NULL`). in sandboxed contexts the chain is short (null env) — only explicitly granted bindings + user defines are visible. in unsandboxed standard-env contexts this includes stdlib bindings from parent envs (may be large; use prefix filtering to narrow). shadowed bindings are deduplicated — the innermost (most local) binding wins.
 
 optional prefix argument filters by symbol name prefix (done in C for performance — avoids scheme-level string ops in a loop over potentially hundreds of bindings). the prefix match compares against the symbol's string representation obtained via `sexp_symbol_to_string`.
 
@@ -199,9 +187,9 @@ four new functions in the chibi fork's `tein_shim.c`. all shims must use `sexp_g
 
 walks `sexp_env_bindings(sexp_context_env(ctx))` and parent chain. each binding cell is `(name . value)`. determines kind by inspecting the value: `sexp_procedurep` or `sexp_opcodep` → `procedure`, `sexp_syntacticp` → `syntax`, else → `variable`. if `prefix` is non-NULL, filters by prefix match on the symbol's string representation (obtained via `sexp_symbol_to_string(ctx, sym)`, then compared with `sexp_string_data`). returns a scheme list of `(name-symbol . kind-symbol)` pairs.
 
-**GC rooting**: the accumulator list and kind symbols (`procedure`, `syntax`, `variable`) must be GC-rooted across the loop. intern the three kind symbols once before the loop and root them.
+**GC rooting**: the accumulator list and kind symbols (`procedure`, `syntax`, `variable`) must be GC-rooted across the loop. intern the three kind symbols once before the loop and root them. in the prefix-match path, `sexp_symbol_to_string` may allocate — its result must be consumed (via `sexp_string_data` + `strncmp`) before the next allocating call (`sexp_cons`) in the loop body.
 
-**deduplication**: track seen symbol names. if a binding name was already seen (from an inner env), skip it — innermost wins.
+**deduplication**: maintain a separate seen-symbols list (GC-rooted) alongside the accumulator. chibi symbols are interned, so use pointer equality (`==`) for O(1) lookup when checking if a symbol was already seen. alternatively, O(n²) via `sexp_memq` on the seen list is acceptable for the expected binding count (~500 max).
 
 #### `tein_procedure_arity(ctx, proc)`
 
@@ -211,7 +199,7 @@ for `sexp_procedurep`: returns `sexp_cons(sexp_make_fixnum(sexp_procedure_num_ar
 
 #### `tein_imported_modules_list(ctx)`
 
-accesses `sexp_global(ctx, SEXP_G_META_ENV)` to get the meta env, then looks up the `*modules*` binding via `sexp_intern(ctx, "*modules*")` + `sexp_env_ref`. walks the resulting alist, collecting module names (car of each entry) where `module-env` (`sexp_vector_ref(mod, 1)`) is non-`SEXP_FALSE`. returns a scheme list of module name lists.
+accesses `sexp_global(ctx, SEXP_G_META_ENV)` to get the meta env, then looks up the `*modules*` binding via `sexp_intern(ctx, "*modules*")` + `sexp_env_ref`. walks the resulting alist, collecting module names (car of each entry) where `module-env` (`sexp_vector_ref(mod, 1)`) is non-`SEXP_FALSE`. returns the raw `car` of each alist entry directly (already a proper list like `(scheme base)`) — no new list construction needed per entry, only `sexp_cons` for the result accumulator.
 
 **GC rooting**: the `*modules*` symbol, the meta-env lookup result, and the accumulator list must be rooted. `sexp_intern` is an allocating call.
 
@@ -219,7 +207,7 @@ accesses `sexp_global(ctx, SEXP_G_META_ENV)` to get the meta env, then looks up 
 
 #### `tein_binding_kind(ctx, sym)`
 
-looks up `sym` in `sexp_context_env(ctx)` via `sexp_env_ref`. classifies the value and returns a kind symbol (`procedure`, `syntax`, `variable`, `unknown`).
+looks up `sym` in `sexp_context_env(ctx)` via `sexp_env_ref`. classifies the value and returns a kind symbol: `procedure` (if `sexp_procedurep` or `sexp_opcodep`), `syntax` (if `sexp_syntacticp`), or `variable` (everything else). consistent with the three kinds used by `env-bindings`.
 
 **GC rooting**: minimal — `sexp_env_ref` doesn't allocate, `sexp_intern` for the kind symbol does.
 
@@ -284,7 +272,7 @@ the doc sub-library convention (`(tein X docs)` exports `X-docs`) is leveraged b
 
 - `src/ffi.rs` — extern declarations + safe wrappers for the 4 C shims
 - `src/context.rs` — trampoline registration in `build()`, rust trampoline functions for `available-modules` and `module-exports`
-- `src/vfs_registry.rs` — 2 new VfsEntry entries
+- `src/vfs_registry.rs` — 1 new VfsEntry (parent module includes docs sub-library files)
 - `build.rs` — if MODULE_EXPORTS data needs adjustment (likely no changes)
 - `docs/reference.md` — add `(tein introspect)` to VFS module list
 - `docs/tein-for-agents.md` — move `(tein introspect)` from "what's coming" to "what's here" with usage examples
