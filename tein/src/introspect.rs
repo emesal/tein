@@ -44,13 +44,18 @@ unsafe extern "C" fn available_modules_trampoline(
 
 /// convert a slash-separated path to a scheme list of symbols.
 /// e.g. "scheme/base" -> (scheme base)
+///
+/// **gc note**: `sexp_intern` and `sexp_cons` both allocate. `result` is rooted
+/// across each iteration so the already-built tail survives the next alloc.
 unsafe fn path_to_module_list(ctx: ffi::sexp, path: &str) -> ffi::sexp {
     unsafe {
         let parts: Vec<&str> = path.split('/').collect();
         let mut result = ffi::get_null();
         for part in parts.iter().rev() {
+            let _result_root = ffi::GcRoot::new(ctx, result);
             let c_part = CString::new(*part).unwrap_or_default();
             let sym = ffi::sexp_intern(ctx, c_part.as_ptr(), part.len() as ffi::sexp_sint_t);
+            let _sym_root = ffi::GcRoot::new(ctx, sym);
             result = ffi::sexp_cons(ctx, sym, result);
         }
         result
@@ -58,11 +63,16 @@ unsafe fn path_to_module_list(ctx: ffi::sexp, path: &str) -> ffi::sexp {
 }
 
 /// build a scheme list of module path lists from slash-separated path strings.
+///
+/// **gc note**: `path_to_module_list` and `sexp_cons` both allocate. `result` and
+/// `module_list` are rooted so neither is collected before the cons.
 unsafe fn build_module_path_list(ctx: ffi::sexp, paths: &[&str]) -> ffi::sexp {
     unsafe {
         let mut result = ffi::get_null();
         for path in paths.iter().rev() {
+            let _result_root = ffi::GcRoot::new(ctx, result);
             let module_list = path_to_module_list(ctx, path);
+            let _list_root = ffi::GcRoot::new(ctx, module_list);
             result = ffi::sexp_cons(ctx, module_list, result);
         }
         result
@@ -119,11 +129,14 @@ unsafe extern "C" fn module_exports_trampoline(
         // look up exports
         match vfs_module_exports(&module_path) {
             Some(exports) => {
+                // gc note: sexp_intern + sexp_cons both allocate; root result + sym each iter.
                 let mut result = ffi::get_null();
                 for name in exports.iter().rev() {
+                    let _result_root = ffi::GcRoot::new(ctx, result);
                     let c_name = CString::new(*name).unwrap_or_default();
                     let sym =
                         ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+                    let _sym_root = ffi::GcRoot::new(ctx, sym);
                     result = ffi::sexp_cons(ctx, sym, result);
                 }
                 result
@@ -220,15 +233,21 @@ unsafe extern "C" fn imported_modules_trampoline(
                 return raw_list; // unsandboxed: return all
             }
 
-            // filter: keep only modules whose path is in the allowlist
+            // filter: keep only modules whose path is in the allowlist.
+            // gc note: spec_to_path calls sexp_intern; sexp_cons allocates.
+            // raw_list, ls, and result must all be rooted across each iteration.
+            let _raw_root = ffi::GcRoot::new(ctx, raw_list);
             let mut result = ffi::get_null();
             let mut ls = raw_list;
             while ffi::sexp_pairp(ls) != 0 {
+                let _ls_root = ffi::GcRoot::new(ctx, ls);
+                let _result_root = ffi::GcRoot::new(ctx, result);
                 let name = ffi::sexp_car(ls);
                 // convert module name list to path string for allowlist check
                 if let Ok(path) = crate::context::spec_to_path(ctx, name)
                     && list.iter().any(|p| p == &path)
                 {
+                    let _name_root = ffi::GcRoot::new(ctx, name);
                     result = ffi::sexp_cons(ctx, name, result);
                 }
                 ls = ffi::sexp_cdr(ls);
