@@ -231,3 +231,39 @@ The built-in chibi `load` is not exported globally (overriding it breaks module 
 
 ### exports
 `load`
+
+---
+
+## (tein introspect)
+
+**feature:** none | **sandbox:** included in `Modules::Safe`
+
+Environment introspection API for LLM agents and tooling. Lets scheme code discover
+available modules, inspect exports, query procedure arity, and dump structured
+environment overviews — all from within a running context.
+
+```scheme
+(import (tein introspect))
+
+(available-modules)           ; => ((scheme base) (scheme write) (tein json) ...)
+(imported-modules)            ; => ((scheme base) (tein introspect) ...)
+(module-exports '(tein json)) ; => (json-parse json-stringify ...)
+(env-bindings)                ; => ((map . procedure) (filter . procedure) ...)
+(env-bindings "json-")        ; => ((json-parse . procedure) ...)
+(procedure-arity map)         ; => (2 . #f)  ; min=2, variadic
+(procedure-arity cons)        ; => (2 . 2)   ; exactly 2
+(procedure-arity 42)          ; => #f        ; not a procedure
+(binding-info 'json-parse)
+; => ((name . json-parse) (kind . procedure) (arity . (1 . 1))
+;     (module tein json) (doc . "parse a json string to scheme"))
+(describe-environment/text)   ; => "(tein introspect) — environment overview\n..."
+```
+
+`*binding-module-index*` and `*doc-alist-cache*` are built once at import time
+(O(modules × exports)). `describe-environment/text` produces a prompt-injectable
+overview of all available modules, their exports, and any tein module docstrings.
+
+### exports
+`available-modules`, `imported-modules`, `module-exports`, `env-bindings`,
+`procedure-arity`, `binding-info`, `describe-environment`, `describe-environment/text`,
+`introspect-docs`

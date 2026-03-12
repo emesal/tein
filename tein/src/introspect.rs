@@ -194,11 +194,7 @@ unsafe extern "C" fn env_bindings_trampoline(
         // from the CONTEXT_PTR thread-local, which is set by evaluate()/call().
         let real_ctx = crate::context::CONTEXT_PTR.with(|c| {
             let ptr = c.get();
-            if ptr.is_null() {
-                ctx
-            } else {
-                (*ptr).raw_ctx()
-            }
+            if ptr.is_null() { ctx } else { (*ptr).raw_ctx() }
         });
         ffi::env_bindings_list(real_ctx, prefix)
     }
@@ -230,10 +226,10 @@ unsafe extern "C" fn imported_modules_trampoline(
             while ffi::sexp_pairp(ls) != 0 {
                 let name = ffi::sexp_car(ls);
                 // convert module name list to path string for allowlist check
-                if let Ok(path) = crate::context::spec_to_path(ctx, name) {
-                    if list.iter().any(|p| p == &path) {
-                        result = ffi::sexp_cons(ctx, name, result);
-                    }
+                if let Ok(path) = crate::context::spec_to_path(ctx, name)
+                    && list.iter().any(|p| p == &path)
+                {
+                    result = ffi::sexp_cons(ctx, name, result);
                 }
                 ls = ffi::sexp_cdr(ls);
             }

@@ -78,7 +78,7 @@ target/chibi-scheme/  — fetched from emesal/chibi-scheme (branch emesal-tein) 
   sexp.c         — 1 patch: reader dispatch before hardcoded # switch
   vm.c           — 2-line patch: fuel consumption at timeslice boundary
   lib/tein/      — tein scheme modules: foreign, reader, macro, test, json, toml,
-                   uuid, time, file, load, process (see each .sld/.scm for exports)
+                   uuid, time, file, load, process, introspect (see each .sld/.scm for exports)
 build.rs         — fetches chibi fork, compiles it, generates install.h, tein_vfs_data.h, tein_clibs.c
 examples/        — basic, floats, ffi, debug, sandbox, foreign_types, managed
 tests/           — scheme_tests.rs (integration runner), scheme/*.scm
@@ -219,6 +219,18 @@ tein mitigates known chibi-scheme bugs via configuration. if any of these change
   - `chibi_weak`: `(gc)` in test body → SIGSEGV in embedded chibi
 - **excluded from harness entirely**: `chibi/regexp-test` (needs pcre), crypto/mime/memoize (fs/network), filesystem/process/system-test (OS-level), `srfi/179/231` (fuel concerns)
 - **shadow SLD rules**: `VfsSource::Shadow` bodies must not import other `VfsSource::Shadow` modules (circular/ordering hazard). importing `VfsSource::Embedded` tein modules is fine. allowed imports in shadow bodies: `(chibi)`, `(scheme base)`, and `VfsSource::Embedded` tein modules. remaining Shadow modules are safety stubs only (chibi/stty, chibi/system, chibi/shell, chibi/temp-file, chibi/net/*). never use `(define x x)` pattern — letrec* pre-binds to `#<unspecified>`.
+
+## (tein introspect) gotchas
+
+**`*binding-module-index*` and `*doc-alist-cache*`**: built once at import time by `(tein introspect)` — O(modules × exports) cost paid on first `(import (tein introspect))`. subsequent calls to `binding-info`, `describe-environment`, etc. are cheap.
+
+**`procedure-arity` on trampolines**: `define_fn_variadic`-registered trampolines (native fns like `tein-env-bindings-internal`) report `(0 . #f)` — chibi stores them as variadic opcodes with 0 required args.
+
+**`imported-modules` relies on chibi's `*modules*`**: walks the meta-env's `*modules*` alist. only reports modules whose module-vector has a non-`#f` env (i.e. already loaded, not just registered).
+
+**`env-bindings` and `binding-kind`: use CONTEXT_PTR**: chibi passes a child apply-context to native fns during dispatch. `sexp_context_env(child_ctx)` returns NULL. both trampolines use `CONTEXT_PTR` thread-local to get the real top-level ctx. `sexp_pointerp(NULL)==true` (SEXP_POINTER_TAG=0) so `sexp_envp(NULL)` would deref NULL without the `env &&` null-guard in the C shim.
+
+**doc alist loading uses `(scheme eval)`**: `*doc-alist-cache*` uses `eval` to import `(tein X docs)` sub-libraries. `scheme/eval` must be in the allowlist for full doc output. for `Modules::Only` without `scheme/eval`, the `guard` clause silently skips doc loading.
 
 ## license
 - ISC

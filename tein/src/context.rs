@@ -1221,7 +1221,10 @@ unsafe extern "C" fn load_trampoline(
 /// Each element must be a symbol (converted via `sexp_symbol_to_string`) or an
 /// integer (converted via `sexp_unbox_fixnum`). Returns `Err(error_sexp)` on
 /// malformed input.
-pub(crate) unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<String, ffi::sexp> {
+pub(crate) unsafe fn spec_to_path(
+    ctx: ffi::sexp,
+    spec: ffi::sexp,
+) -> std::result::Result<String, ffi::sexp> {
     unsafe {
         let mut parts = Vec::new();
         let mut cursor = spec;
@@ -11809,10 +11812,7 @@ mod tests {
         let r = ctx.evaluate("(procedure-arity (lambda (a b) a))").unwrap();
         assert_eq!(
             r,
-            Value::Pair(
-                Box::new(Value::Integer(2)),
-                Box::new(Value::Integer(2))
-            )
+            Value::Pair(Box::new(Value::Integer(2)), Box::new(Value::Integer(2)))
         );
     }
 
@@ -11825,10 +11825,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             r,
-            Value::Pair(
-                Box::new(Value::Integer(1)),
-                Box::new(Value::Boolean(false))
-            )
+            Value::Pair(Box::new(Value::Integer(1)), Box::new(Value::Boolean(false)))
         );
     }
 
@@ -11839,10 +11836,7 @@ mod tests {
         let r = ctx.evaluate("(procedure-arity cons)").unwrap();
         assert_eq!(
             r,
-            Value::Pair(
-                Box::new(Value::Integer(2)),
-                Box::new(Value::Integer(2))
-            )
+            Value::Pair(Box::new(Value::Integer(2)), Box::new(Value::Integer(2)))
         );
     }
 
@@ -11891,9 +11885,7 @@ mod tests {
     fn test_env_bindings_kind_procedure() {
         let ctx = Context::new_standard().unwrap();
         ctx.evaluate("(import (tein introspect))").unwrap();
-        let r = ctx
-            .evaluate("(assq 'map (env-bindings \"map\"))")
-            .unwrap();
+        let r = ctx.evaluate("(assq 'map (env-bindings \"map\"))").unwrap();
         if let Value::Pair(name, kind) = &r {
             assert_eq!(**name, Value::Symbol("map".into()));
             assert_eq!(**kind, Value::Symbol("procedure".into()));
@@ -11944,8 +11936,7 @@ mod tests {
             });
             let has_kind = entries.iter().any(|e| {
                 if let Value::Pair(k, v) = e {
-                    **k == Value::Symbol("kind".into())
-                        && **v == Value::Symbol("procedure".into())
+                    **k == Value::Symbol("kind".into()) && **v == Value::Symbol("procedure".into())
                 } else {
                     false
                 }
