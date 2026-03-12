@@ -1221,7 +1221,7 @@ unsafe extern "C" fn load_trampoline(
 /// Each element must be a symbol (converted via `sexp_symbol_to_string`) or an
 /// integer (converted via `sexp_unbox_fixnum`). Returns `Err(error_sexp)` on
 /// malformed input.
-unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<String, ffi::sexp> {
+pub(crate) unsafe fn spec_to_path(ctx: ffi::sexp, spec: ffi::sexp) -> std::result::Result<String, ffi::sexp> {
     unsafe {
         let mut parts = Vec::new();
         let mut cursor = spec;
@@ -11767,5 +11767,38 @@ mod tests {
         } else {
             panic!("expected integer, got: {:?}", r);
         }
+    }
+
+    #[test]
+    fn test_module_exports() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(module-exports '(scheme write))").unwrap();
+        // scheme/write exports: write, display, write-shared
+        if let Value::List(exports) = &r {
+            let has_display = exports
+                .iter()
+                .any(|e| *e == Value::Symbol("display".into()));
+            assert!(has_display, "should include display, got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_module_exports_sandboxed_blocked() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Only(vec![
+                "scheme/base".into(),
+                "tein/introspect".into(),
+            ]))
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        // scheme/regex is not in the allowlist — should error
+        let r = ctx.evaluate("(module-exports '(scheme regex))");
+        assert!(r.is_err(), "should error for disallowed module");
     }
 }

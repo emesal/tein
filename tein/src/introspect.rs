@@ -7,7 +7,7 @@
 use std::ffi::CString;
 
 use crate::ffi;
-use crate::sandbox::{VFS_ALLOWLIST, registry_all_allowlist};
+use crate::sandbox::{VFS_ALLOWLIST, module_exports as vfs_module_exports, registry_all_allowlist};
 
 /// `available-modules` trampoline: returns list of importable module paths.
 ///
@@ -69,6 +69,77 @@ unsafe fn build_module_path_list(ctx: ffi::sexp, paths: &[&str]) -> ffi::sexp {
     }
 }
 
+/// `module-exports` trampoline: returns list of exported binding symbols.
+///
+/// reads from build-generated MODULE_EXPORTS table. validates the module
+/// is in the current allowlist for sandboxed contexts.
+unsafe extern "C" fn module_exports_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "module-exports: expected 1 argument (module path list)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let spec = ffi::sexp_car(args);
+        if ffi::sexp_pairp(spec) == 0 {
+            let msg = "module-exports: argument must be a list, e.g. '(scheme base)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        // convert (scheme base) → "scheme/base"
+        let module_path = match crate::context::spec_to_path(ctx, spec) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+
+        // check allowlist in sandboxed contexts
+        let allowed = VFS_ALLOWLIST.with(|cell| {
+            let list = cell.borrow();
+            if list.is_empty() {
+                true // unsandboxed
+            } else {
+                list.iter().any(|p| p == &module_path)
+            }
+        });
+        if !allowed {
+            let msg = format!(
+                "module-exports: module ({}) not available in current context",
+                module_path.replace('/', " ")
+            );
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        // look up exports
+        match vfs_module_exports(&module_path) {
+            Some(exports) => {
+                let mut result = ffi::get_null();
+                for name in exports.iter().rev() {
+                    let c_name = CString::new(*name).unwrap_or_default();
+                    let sym =
+                        ffi::sexp_intern(ctx, c_name.as_ptr(), name.len() as ffi::sexp_sint_t);
+                    result = ffi::sexp_cons(ctx, sym, result);
+                }
+                result
+            }
+            None => {
+                let msg = format!(
+                    "module-exports: unknown module ({})",
+                    module_path.replace('/', " ")
+                );
+                let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t)
+            }
+        }
+    }
+}
+
 /// register all (tein introspect) trampolines into the primitive env.
 ///
 /// called from `Context::build()` BEFORE `load_standard_env` so that
@@ -83,6 +154,12 @@ pub(crate) fn register_introspect_trampolines(
         prim_env,
         "tein-available-modules-internal",
         available_modules_trampoline,
+    )?;
+    crate::context::register_native_trampoline(
+        ctx,
+        prim_env,
+        "tein-module-exports-internal",
+        module_exports_trampoline,
     )?;
     Ok(())
 }
