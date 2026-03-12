@@ -164,6 +164,11 @@ unsafe extern "C" fn procedure_arity_trampoline(
 ///
 /// optional string prefix argument for filtering.
 /// delegates to `tein_env_bindings_list` C shim.
+///
+/// **important**: chibi passes a child apply-context as `ctx` during native
+/// fn dispatch. `sexp_context_env` on the child ctx returns NULL. we must
+/// use the real top-level context from `CONTEXT_PTR` thread-local so that
+/// `tein_env_bindings_list` can walk `sexp_context_env(ctx)` correctly.
 unsafe extern "C" fn env_bindings_trampoline(
     ctx: ffi::sexp,
     _self: ffi::sexp,
@@ -183,7 +188,19 @@ unsafe extern "C" fn env_bindings_trampoline(
                 return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
             }
         };
-        ffi::env_bindings_list(ctx, prefix)
+
+        // chibi's native fn dispatch passes a child apply-context as `ctx`.
+        // `sexp_context_env(child_ctx)` is NULL — use the real top-level ctx
+        // from the CONTEXT_PTR thread-local, which is set by evaluate()/call().
+        let real_ctx = crate::context::CONTEXT_PTR.with(|c| {
+            let ptr = c.get();
+            if ptr.is_null() {
+                ctx
+            } else {
+                (*ptr).raw_ctx()
+            }
+        });
+        ffi::env_bindings_list(real_ctx, prefix)
     }
 }
 
