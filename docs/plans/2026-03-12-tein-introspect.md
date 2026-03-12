@@ -10,20 +10,80 @@
 
 **Spec:** `docs/plans/2026-03-12-tein-introspect-design.md`
 
-**Branch:** create with `just feature introspect-2603`
+**Branch:** `feature/tein-introspect-2603` (already created and active)
 
 **Closes:** #27, #83
 
 ---
 
+## Progress
+
+- **Chunk 1 (tasks 1–5): COMPLETE** — all C shims committed to chibi fork, FFI wrappers in ffi.rs
+- **Task 6 (available-modules): COMPLETE** — trampoline + VFS entry + scheme skeleton + tests pass
+- **Task 7 (module-exports): COMPLETE** — trampoline + tests pass (commit abb93e0)
+- **Task 8 (procedure-arity): COMPLETE** — trampoline + tests pass; fixed C shim (raw short, not fixnum)
+- **Task 9 (env-bindings): COMPLETE** — SIGSEGV fixed: two-part fix — null-guard `env &&` in C shim (root envs have C NULL parent, sexp_pointerp(NULL)==true) + use CONTEXT_PTR for real ctx in rust trampoline (child apply-ctx has NULL env)
+- **Task 10 (imported-modules): COMPLETE** — tests pass
+- **Task 11 (binding-info): COMPLETE** — tein-binding-kind-internal trampoline + scheme layer
+- **Task 12 (describe-environment): COMPLETE** — describe-environment + describe-environment/text
+- **Task 13 (finalise .sld): COMPLETE** — all 9 exports + introspect-docs
+- **Task 14 (scheme integration tests): COMPLETE** — tests/scheme/introspect.scm passing
+- **Task 15 (full test suite): COMPLETE** — 1017/1017 passing
+- **Task 16 (docs): COMPLETE** — reference.md, modules.md, tein-for-agents.md, AGENTS.md
+- **Task 17 (lint + final): COMPLETE** — lint clean, closes #27 and #83
+
+**BRANCH COMPLETE**
+
+## Implementation Notes for Continuity
+
+### Critical: trampoline registration pattern
+The plan originally used `define_fn_variadic` for trampoline registration, but this puts trampolines in the **top-level env** which is invisible to library bodies (chibi creates fresh envs per library). The fix: use `register_native_trampoline(ctx, prim_env, ...)` to register into the **primitive env** BEFORE `load_standard_env`. This puts them into `*chibi-env*`, visible via `(import (chibi))`. The `.sld` already imports `(chibi)`.
+
+- `register_native_trampoline` was made `pub(crate)` for `introspect.rs` to use
+- `register_introspect_trampolines(ctx, prim_env)` takes raw sexp pointers, not `&Context`
+- call site is in `build()` at line ~2265, alongside other prim_env registrations
+- **ALL remaining trampolines (tasks 7–10) must follow this same pattern** — add to `register_introspect_trampolines`, NOT use `define_fn_variadic`
+
+### VFS registry entries
+- `tein/introspect` and `tein/introspect/docs` both added to `vfs_registry.rs`
+- `tein/introspect` deps: `["scheme/base", "scheme/write", "scheme/eval"]`
+- `tein/introspect/docs` deps: `["scheme/base"]`
+
+### `spec_to_path` (task 7)
+- now `pub(crate)` at `context.rs:1224`
+
+### Imports in introspect.rs
+- uses `crate::sandbox::{VFS_ALLOWLIST, module_exports as vfs_module_exports, registry_all_allowlist}`
+- `VFS_REGISTRY` and `feature_enabled` are private to sandbox; use `registry_all_allowlist()` instead
+
+### `tein_procedure_arity` fix
+- `sexp_procedure_num_args(proc)` returns a raw `short` (not a boxed fixnum)
+- the shim originally called `sexp_unbox_fixnum()` on it — wrong! fixed to `(sexp_sint_t) sexp_procedure_num_args(proc)`
+
+### `tein_env_bindings_list` — SIGSEGV in GC (Task 9 BLOCKER)
+- env bindings use `sexp_env_next_cell` (pair source field) for iteration, NOT `sexp_cdr` — this was fixed
+- `env` variable MUST be GC-rooted (sexp_gc_var6) — this was fixed (commit a927303e in fork)
+- the inner pair `(name . kind)` must be built via `sym_str` (gc-rooted) to survive `sexp_cons` calls
+- despite these fixes, a SIGSEGV still occurs after ~453 bindings when trying `sexp_env_parent(env)`
+- debug shows: env is GC-rooted, `sym_str` is GC-rooted, the crash is still in `sexp_env_parent(env)`
+- **root cause not yet fully identified** — possible the `sexp_gc_var6`/`sexp_gc_preserve6` expansion uses a stack slot that gets smashed by 453 iterations of 3x `sexp_cons`
+- **strategy for next session**: try gc_debug build (`cargo test --features debug-chibi`) to see GC errors, or verify sexp_gc_var macros expand correctly for 6 vars
+
+### Chibi fork state
+- branch: `emesal-tein`
+- latest commit: a927303e (fix: remove duplicate cell_n declaration)
+- scheme files: introspect.sld exports available-modules, module-exports, procedure-arity, env-bindings, imported-modules; introspect.scm has all 5 wrappers
+
+---
+
 ## Chunk 1: C Shims and FFI Wrappers
 
-### Task 1: Add C shim — `tein_procedure_arity`
+### Task 1: Add C shim — `tein_procedure_arity` ✓
 
 **Files:**
 - Modify: `~/forks/chibi-scheme/tein_shim.c` (append after line ~648)
 
-- [ ] **Step 1: Write the C shim**
+- [x] **Step 1: Write the C shim**
 
 Add to `~/forks/chibi-scheme/tein_shim.c`:
 
@@ -49,7 +109,7 @@ sexp tein_procedure_arity(sexp ctx, sexp proc) {
 }
 ```
 
-- [ ] **Step 2: Push the chibi fork changes**
+- [x] **Step 2: Push the chibi fork changes**
 
 ```bash
 cd ~/forks/chibi-scheme
@@ -58,7 +118,7 @@ git commit -m "feat: add tein_procedure_arity shim for (tein introspect)"
 git push
 ```
 
-- [ ] **Step 3: Rebuild tein to pull the fork change**
+- [x] **Step 3: Rebuild tein to pull the fork change**
 
 ```bash
 cd ~/projects/tein
@@ -67,18 +127,18 @@ cargo build -p tein 2>&1 | tail -5
 
 Expected: build succeeds (the shim compiles but isn't called yet)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Nothing to commit in tein yet — the fork change is upstream.
 
 ---
 
-### Task 2: Add C shim — `tein_binding_kind`
+### Task 2: Add C shim — `tein_binding_kind` ✓
 
 **Files:**
 - Modify: `~/forks/chibi-scheme/tein_shim.c`
 
-- [ ] **Step 1: Write the C shim**
+- [x] **Step 1: Write the C shim**
 
 Append to `~/forks/chibi-scheme/tein_shim.c`:
 
@@ -96,7 +156,7 @@ sexp tein_binding_kind(sexp ctx, sexp value) {
 }
 ```
 
-- [ ] **Step 2: Push the chibi fork**
+- [x] **Step 2: Push the chibi fork**
 
 ```bash
 cd ~/forks/chibi-scheme
@@ -105,7 +165,7 @@ git commit -m "feat: add tein_binding_kind shim for (tein introspect)"
 git push
 ```
 
-- [ ] **Step 3: Rebuild tein**
+- [x] **Step 3: Rebuild tein**
 
 ```bash
 cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
@@ -113,12 +173,12 @@ cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
 
 ---
 
-### Task 3: Add C shim — `tein_env_bindings_list`
+### Task 3: Add C shim — `tein_env_bindings_list` ✓
 
 **Files:**
 - Modify: `~/forks/chibi-scheme/tein_shim.c`
 
-- [ ] **Step 1: Write the C shim**
+- [x] **Step 1: Write the C shim**
 
 Append to `~/forks/chibi-scheme/tein_shim.c`:
 
@@ -187,7 +247,7 @@ sexp tein_env_bindings_list(sexp ctx, sexp prefix) {
 }
 ```
 
-- [ ] **Step 2: Push the chibi fork**
+- [x] **Step 2: Push the chibi fork**
 
 ```bash
 cd ~/forks/chibi-scheme
@@ -196,7 +256,7 @@ git commit -m "feat: add tein_env_bindings_list shim for (tein introspect)"
 git push
 ```
 
-- [ ] **Step 3: Rebuild tein**
+- [x] **Step 3: Rebuild tein**
 
 ```bash
 cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
@@ -204,12 +264,12 @@ cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
 
 ---
 
-### Task 4: Add C shim — `tein_imported_modules_list`
+### Task 4: Add C shim — `tein_imported_modules_list` ✓
 
 **Files:**
 - Modify: `~/forks/chibi-scheme/tein_shim.c`
 
-- [ ] **Step 1: Write the C shim**
+- [x] **Step 1: Write the C shim**
 
 Append to `~/forks/chibi-scheme/tein_shim.c`:
 
@@ -251,7 +311,7 @@ sexp tein_imported_modules_list(sexp ctx) {
 }
 ```
 
-- [ ] **Step 2: Push the chibi fork**
+- [x] **Step 2: Push the chibi fork**
 
 ```bash
 cd ~/forks/chibi-scheme
@@ -260,7 +320,7 @@ git commit -m "feat: add tein_imported_modules_list shim for (tein introspect)"
 git push
 ```
 
-- [ ] **Step 3: Rebuild tein**
+- [x] **Step 3: Rebuild tein**
 
 ```bash
 cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
@@ -268,12 +328,12 @@ cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
 
 ---
 
-### Task 5: Add FFI extern declarations and safe wrappers
+### Task 5: Add FFI extern declarations and safe wrappers ✓
 
 **Files:**
 - Modify: `tein/src/ffi.rs` (add extern declarations inside `extern "C"` block near line 270, add safe wrappers after existing ones near line 850)
 
-- [ ] **Step 1: Add extern declarations**
+- [x] **Step 1: Add extern declarations**
 
 Add inside the `extern "C"` block in `src/ffi.rs` (before the closing `}`), near the other `tein_*` declarations:
 
@@ -291,7 +351,7 @@ Add inside the `extern "C"` block in `src/ffi.rs` (before the closing `}`), near
     pub fn tein_imported_modules_list(ctx: sexp) -> sexp;
 ```
 
-- [ ] **Step 2: Add safe wrappers**
+- [x] **Step 2: Add safe wrappers**
 
 Add after the existing safe wrappers in `src/ffi.rs` (after the `vfs_lookup` wrapper area):
 
@@ -317,7 +377,7 @@ pub(crate) fn imported_modules_list(ctx: sexp) -> sexp {
 }
 ```
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 ```bash
 cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
@@ -325,14 +385,14 @@ cd ~/projects/tein && cargo build -p tein 2>&1 | tail -5
 
 Expected: build succeeds (wrappers aren't called yet but link against the shims)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tein/src/ffi.rs
 git commit -m "feat: FFI declarations and safe wrappers for introspection shims"
 ```
 
-- [ ] **Step 5: Lint**
+- [x] **Step 5: Lint**
 
 ```bash
 just lint
@@ -342,13 +402,13 @@ just lint
 
 ## Chunk 2: Rust Trampolines
 
-### Task 6: Create `src/introspect.rs` with `available_modules` trampoline
+### Task 6: Create `src/introspect.rs` with `available_modules` trampoline ✓
 
 **Files:**
 - Create: `tein/src/introspect.rs`
 - Modify: `tein/src/lib.rs` (add `mod introspect;`)
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 Add to `tein/src/context.rs` at the bottom with other tests (inside `#[cfg(test)] mod tests`):
 
@@ -394,7 +454,7 @@ fn test_available_modules_sandboxed() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cargo test -p tein test_available_modules -- --nocapture 2>&1 | tail -10
@@ -402,7 +462,7 @@ cargo test -p tein test_available_modules -- --nocapture 2>&1 | tail -10
 
 Expected: FAIL (module doesn't exist yet)
 
-- [ ] **Step 3: Create `src/introspect.rs` with the trampoline**
+- [x] **Step 3: Create `src/introspect.rs` with the trampoline**
 
 Create `tein/src/introspect.rs`:
 
@@ -497,11 +557,11 @@ pub(crate) fn register_introspect_trampolines(ctx: &crate::Context) -> crate::Re
 }
 ```
 
-- [ ] **Step 4: Add `mod introspect;` to `lib.rs`**
+- [x] **Step 4: Add `mod introspect;` to `lib.rs`**
 
 Add `mod introspect;` to `tein/src/lib.rs` alongside the other module declarations.
 
-- [ ] **Step 5: Register the trampoline in `build()`**
+- [x] **Step 5: Register the trampoline in `build()`**
 
 In `tein/src/context.rs`, inside the `if self.standard_env { ... }` block (near line 2596, after `register_modules_module()`), add:
 
@@ -509,7 +569,7 @@ In `tein/src/context.rs`, inside the `if self.standard_env { ... }` block (near 
 crate::introspect::register_introspect_trampolines(&context)?;
 ```
 
-- [ ] **Step 6: Add VFS registry entry**
+- [x] **Step 6: Add VFS registry entry**
 
 In `tein/src/vfs_registry.rs`, add a new `VfsEntry` before the closing bracket of `VFS_REGISTRY`:
 
@@ -532,7 +592,7 @@ VfsEntry {
 },
 ```
 
-- [ ] **Step 7: Create minimal `.sld` and `.scm` in chibi fork**
+- [x] **Step 7: Create minimal `.sld` and `.scm` in chibi fork**
 
 Create `~/forks/chibi-scheme/lib/tein/introspect.sld`:
 
@@ -589,7 +649,7 @@ git commit -m "feat: add (tein introspect) scheme module skeleton"
 git push
 ```
 
-- [ ] **Step 8: Run tests**
+- [x] **Step 8: Run tests**
 
 ```bash
 cargo test -p tein test_available_modules -- --nocapture 2>&1 | tail -20
@@ -597,7 +657,7 @@ cargo test -p tein test_available_modules -- --nocapture 2>&1 | tail -20
 
 Expected: PASS
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add tein/src/introspect.rs tein/src/lib.rs tein/src/context.rs tein/src/vfs_registry.rs
@@ -608,7 +668,7 @@ available-modules returns importable module paths as scheme lists,
 respecting the VFS allowlist in sandboxed contexts."
 ```
 
-- [ ] **Step 10: Lint**
+- [x] **Step 10: Lint**
 
 ```bash
 just lint
@@ -745,14 +805,16 @@ unsafe extern "C" fn module_exports_trampoline(
 }
 
 **NOTE**: `spec_to_path` already exists in `context.rs:1224`. make it `pub(crate)` and import it in `introspect.rs` as `crate::context::spec_to_path` — do NOT redefine it.
+
+**NOTE**: trampoline registration uses `register_native_trampoline(ctx, prim_env, name, fn)` NOT `define_fn_variadic`. see Progress section.
 ```
 
 - [ ] **Step 4: Register the trampoline**
 
-In `register_introspect_trampolines`, add:
+In `register_introspect_trampolines(ctx, prim_env)`, add:
 
 ```rust
-ctx.define_fn_variadic("tein-module-exports-internal", module_exports_trampoline)?;
+crate::context::register_native_trampoline(ctx, prim_env, "tein-module-exports-internal", module_exports_trampoline)?;
 ```
 
 - [ ] **Step 5: Update the scheme files**
@@ -870,10 +932,10 @@ unsafe extern "C" fn procedure_arity_trampoline(
 
 - [ ] **Step 4: Register the trampoline**
 
-In `register_introspect_trampolines`, add:
+In `register_introspect_trampolines(ctx, prim_env)`, add:
 
 ```rust
-ctx.define_fn_variadic("tein-procedure-arity-internal", procedure_arity_trampoline)?;
+crate::context::register_native_trampoline(ctx, prim_env, "tein-procedure-arity-internal", procedure_arity_trampoline)?;
 ```
 
 - [ ] **Step 5: Update scheme files**
@@ -1008,10 +1070,10 @@ unsafe extern "C" fn env_bindings_trampoline(
 
 - [ ] **Step 4: Register the trampoline**
 
-In `register_introspect_trampolines`, add:
+In `register_introspect_trampolines(ctx, prim_env)`, add:
 
 ```rust
-ctx.define_fn_variadic("tein-env-bindings-internal", env_bindings_trampoline)?;
+crate::context::register_native_trampoline(ctx, prim_env, "tein-env-bindings-internal", env_bindings_trampoline)?;
 ```
 
 - [ ] **Step 5: Update scheme files**
@@ -1138,10 +1200,10 @@ unsafe extern "C" fn imported_modules_trampoline(
 
 - [ ] **Step 4: Register the trampoline**
 
-In `register_introspect_trampolines`, add:
+In `register_introspect_trampolines(ctx, prim_env)`, add:
 
 ```rust
-ctx.define_fn_variadic("tein-imported-modules-internal", imported_modules_trampoline)?;
+crate::context::register_native_trampoline(ctx, prim_env, "tein-imported-modules-internal", imported_modules_trampoline)?;
 ```
 
 - [ ] **Step 5: Update scheme files**
@@ -1273,10 +1335,10 @@ unsafe extern "C" fn binding_kind_trampoline(
 }
 ```
 
-Register it in `register_introspect_trampolines`:
+Register it in `register_introspect_trampolines(ctx, prim_env)`:
 
 ```rust
-ctx.define_fn_variadic("tein-binding-kind-internal", binding_kind_trampoline)?;
+crate::context::register_native_trampoline(ctx, prim_env, "tein-binding-kind-internal", binding_kind_trampoline)?;
 ```
 
 - [ ] **Step 4: Implement `binding-info` and the reverse index in scheme**

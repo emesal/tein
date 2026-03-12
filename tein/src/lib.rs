@@ -68,6 +68,7 @@ mod filesystem;
 pub mod foreign;
 #[cfg(feature = "http")]
 mod http;
+mod introspect;
 #[cfg(feature = "json")]
 mod json;
 pub mod managed;

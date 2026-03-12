@@ -82,6 +82,7 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 | `tein/http` | ✗ | `http-request`, `http-get`, `http-post`, `http-put`, `http-delete` (feature: `http`) — TLS-capable HTTP client via `ureq`; returns response alist `((status . N) (headers ...) (body . "..."))` |
 | `tein/file` | ✓ | R7RS file operations with `FsPolicy` enforcement |
 | `tein/load` | ✓ | `load` (VFS-restricted) |
+| `tein/introspect` | ✓ | `available-modules`, `imported-modules`, `module-exports`, `env-bindings`, `procedure-arity`, `binding-info`, `describe-environment`, `describe-environment/text`, `introspect-docs` |
 | `tein/process` | ✓ | `exit`, `emergency-exit`, `command-line`, `get-environment-variable`, `get-environment-variables` |
 
 ### scheme/* modules
