@@ -242,6 +242,43 @@ unsafe extern "C" fn imported_modules_trampoline(
     }
 }
 
+/// `binding-kind-internal` trampoline: looks up a symbol in the current env
+/// and returns its kind symbol (`procedure`, `syntax`, `variable`), or `#f`.
+///
+/// uses `CONTEXT_PTR` for the real top-level ctx, same as `env_bindings_trampoline`.
+unsafe extern "C" fn binding_kind_trampoline(
+    ctx: ffi::sexp,
+    _self: ffi::sexp,
+    _n: ffi::sexp_sint_t,
+    args: ffi::sexp,
+) -> ffi::sexp {
+    unsafe {
+        if ffi::sexp_nullp(args) != 0 {
+            let msg = "binding-kind: expected 1 argument (symbol)";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+        let sym = ffi::sexp_car(args);
+        if ffi::sexp_symbolp(sym) == 0 {
+            let msg = "binding-kind: argument must be a symbol";
+            let c_msg = CString::new(msg).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
+        // use real ctx for env lookup (same null-ctx issue as env_bindings_trampoline)
+        let real_ctx = crate::context::CONTEXT_PTR.with(|c| {
+            let ptr = c.get();
+            if ptr.is_null() { ctx } else { (*ptr).raw_ctx() }
+        });
+        let env = ffi::sexp_context_env(real_ctx);
+        let value = ffi::sexp_env_ref(real_ctx, env, sym, ffi::get_void());
+        if ffi::sexp_voidp(value) != 0 {
+            return ffi::get_false();
+        }
+        ffi::binding_kind(real_ctx, value)
+    }
+}
+
 /// register all (tein introspect) trampolines into the primitive env.
 ///
 /// called from `Context::build()` BEFORE `load_standard_env` so that
@@ -280,6 +317,12 @@ pub(crate) fn register_introspect_trampolines(
         prim_env,
         "tein-imported-modules-internal",
         imported_modules_trampoline,
+    )?;
+    crate::context::register_native_trampoline(
+        ctx,
+        prim_env,
+        "tein-binding-kind-internal",
+        binding_kind_trampoline,
     )?;
     Ok(())
 }

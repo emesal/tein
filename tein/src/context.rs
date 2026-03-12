@@ -11927,4 +11927,86 @@ mod tests {
             panic!("expected list, got: {:?}", r);
         }
     }
+
+    #[test]
+    fn test_binding_info_procedure() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(binding-info 'map)").unwrap();
+        // should be an alist with at least name and kind
+        if let Value::List(entries) = &r {
+            let has_name = entries.iter().any(|e| {
+                if let Value::Pair(k, v) = e {
+                    **k == Value::Symbol("name".into()) && **v == Value::Symbol("map".into())
+                } else {
+                    false
+                }
+            });
+            let has_kind = entries.iter().any(|e| {
+                if let Value::Pair(k, v) = e {
+                    **k == Value::Symbol("kind".into())
+                        && **v == Value::Symbol("procedure".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_name, "should have name entry, got: {:?}", r);
+            assert!(has_kind, "should have kind entry, got: {:?}", r);
+        } else {
+            panic!("expected list (alist), got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_binding_info_undefined() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(binding-info 'nonexistent-xyz-42)").unwrap();
+        assert_eq!(r, Value::Boolean(false));
+    }
+
+    #[test]
+    fn test_describe_environment() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(describe-environment)").unwrap();
+        // should be an alist with a 'modules key.
+        // note: (cons 'modules list) collapses to Value::List([Symbol("modules"), ...])
+        // via from_raw's dotted-pair-with-list-cdr collapsing.
+        if let Value::List(entries) = &r {
+            let has_modules = entries.iter().any(|e| {
+                if let Value::List(items) = e {
+                    items.first() == Some(&Value::Symbol("modules".into()))
+                } else if let Value::Pair(k, _) = e {
+                    **k == Value::Symbol("modules".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_modules, "should have modules key, got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_describe_environment_text() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(describe-environment/text)").unwrap();
+        if let Value::String(text) = &r {
+            assert!(
+                text.contains("scheme base"),
+                "should mention scheme base, got: {}",
+                text
+            );
+            assert!(
+                text.contains("modules available"),
+                "should have header, got: {}",
+                text
+            );
+        } else {
+            panic!("expected string, got: {:?}", r);
+        }
+    }
 }
