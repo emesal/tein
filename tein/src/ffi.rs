@@ -211,6 +211,18 @@ unsafe extern "C" {
     // make-immutable wrapper (chibi SEXP_API, for r7rs environment)
     pub fn tein_sexp_make_immutable(ctx: sexp, x: sexp) -> sexp;
 
+    // introspection shims (tein_shim.c, #83)
+    /// returns cons(min, max) where max is SEXP_FALSE if variadic.
+    /// returns SEXP_FALSE for non-procedures.
+    pub fn tein_procedure_arity(ctx: sexp, proc: sexp) -> sexp;
+    /// returns an interned kind symbol: procedure, syntax, or variable.
+    pub fn tein_binding_kind(ctx: sexp, value: sexp) -> sexp;
+    /// returns alist of (name-symbol . kind-symbol) for all bindings in env chain.
+    /// prefix is a scheme string for filtering, or SEXP_FALSE for no filter.
+    pub fn tein_env_bindings_list(ctx: sexp, prefix: sexp) -> sexp;
+    /// returns list of module name lists for loaded modules from meta env *modules*.
+    pub fn tein_imported_modules_list(ctx: sexp) -> sexp;
+
     // module search path (chibi SEXP_API — adds a dir to SEXP_G_MODULE_PATH).
     // note: the chibi header defines `sexp_add_module_directory` as a macro
     // expanding to `sexp_add_module_directory_op(ctx, NULL, 1, d, a)`.
@@ -846,6 +858,34 @@ pub unsafe fn vfs_gate_set(level: i32) {
 #[inline]
 pub unsafe fn fs_policy_gate_set(level: i32) {
     unsafe { tein_fs_policy_gate_set(level as c_int) }
+}
+
+/// safe wrapper for `tein_procedure_arity`.
+/// returns cons(min, max) where max is SEXP_FALSE if variadic, SEXP_FALSE for non-procedures.
+#[inline]
+pub(crate) unsafe fn procedure_arity(ctx: sexp, proc: sexp) -> sexp {
+    unsafe { tein_procedure_arity(ctx, proc) }
+}
+
+/// safe wrapper for `tein_binding_kind`.
+/// returns an interned kind symbol: procedure, syntax, or variable.
+#[inline]
+pub(crate) unsafe fn binding_kind(ctx: sexp, value: sexp) -> sexp {
+    unsafe { tein_binding_kind(ctx, value) }
+}
+
+/// safe wrapper for `tein_env_bindings_list`.
+/// returns alist of (name . kind) pairs for all bindings in env chain.
+#[inline]
+pub(crate) unsafe fn env_bindings_list(ctx: sexp, prefix: sexp) -> sexp {
+    unsafe { tein_env_bindings_list(ctx, prefix) }
+}
+
+/// safe wrapper for `tein_imported_modules_list`.
+/// returns list of module name lists for loaded modules.
+#[inline]
+pub(crate) unsafe fn imported_modules_list(ctx: sexp) -> sexp {
+    unsafe { tein_imported_modules_list(ctx) }
 }
 
 /// Prepend or append a directory string to chibi's module search path.
