@@ -70,6 +70,7 @@ pub mod foreign;
 mod http;
 #[cfg(feature = "json")]
 mod json;
+mod introspect;
 pub mod managed;
 mod port;
 #[cfg(feature = "regex")]

@@ -253,6 +253,32 @@ const VFS_REGISTRY: &[VfsEntry] = &[
         feature: None,
         shadow_sld: None,
     },
+    VfsEntry {
+        path: "tein/introspect",
+        // scheme/write for describe-environment/text, scheme/eval for doc alist loading
+        deps: &["scheme/base", "scheme/write", "scheme/eval"],
+        files: &[
+            "lib/tein/introspect.sld",
+            "lib/tein/introspect.scm",
+            "lib/tein/introspect/docs.sld",
+            "lib/tein/introspect/docs.scm",
+        ],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
+    VfsEntry {
+        path: "tein/introspect/docs",
+        deps: &["scheme/base"],
+        files: &["lib/tein/introspect/docs.sld", "lib/tein/introspect/docs.scm"],
+        clib: None,
+        default_safe: true,
+        source: VfsSource::Embedded,
+        feature: None,
+        shadow_sld: None,
+    },
     // -------------------------------------------------------------------------
     // r7rs standard libraries (safe subset)
     // -------------------------------------------------------------------------

@@ -1473,7 +1473,7 @@ fn register_eval_trampolines(ctx: ffi::sexp, env: ffi::sexp) -> Result<()> {
 /// so they end up in `*chibi-env*` and are visible to library bodies via
 /// `(import (chibi))`.
 #[allow(dead_code)] // generic utility — currently used by http, ready for future modules
-fn register_native_trampoline(
+pub(crate) fn register_native_trampoline(
     ctx: ffi::sexp,
     env: ffi::sexp,
     name: &str,
@@ -2260,6 +2260,8 @@ impl ContextBuilder {
                     "http-request-internal",
                     crate::http::http_request_trampoline,
                 )?;
+
+                crate::introspect::register_introspect_trampolines(ctx, prim_env)?;
 
                 let env = ffi::sexp_context_env(ctx);
                 // H9: chibi uses a char[128] stack buffer for the init file path
@@ -11716,5 +11718,50 @@ mod tests {
             .evaluate(&code)
             .expect("create/delete directory roundtrip");
         assert_eq!(r, Value::Boolean(true));
+    }
+
+    // --- (tein introspect) tests ---
+
+    #[test]
+    fn test_available_modules_unsandboxed() {
+        let ctx = Context::new_standard().unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(available-modules)").unwrap();
+        // unsandboxed: returns all registry modules; must include scheme/base
+        if let Value::List(modules) = &r {
+            let has_scheme_base = modules.iter().any(|m| {
+                if let Value::List(parts) = m {
+                    parts.len() == 2
+                        && parts[0] == Value::Symbol("scheme".into())
+                        && parts[1] == Value::Symbol("base".into())
+                } else {
+                    false
+                }
+            });
+            assert!(has_scheme_base, "should include (scheme base), got: {:?}", r);
+        } else {
+            panic!("expected list, got: {:?}", r);
+        }
+    }
+
+    #[test]
+    fn test_available_modules_sandboxed() {
+        use crate::sandbox::Modules;
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(Modules::Only(vec![
+                "scheme/base".into(),
+                "tein/introspect".into(),
+            ]))
+            .build()
+            .unwrap();
+        ctx.evaluate("(import (tein introspect))").unwrap();
+        let r = ctx.evaluate("(length (available-modules))").unwrap();
+        // Only scheme/base, tein/introspect, and their resolved deps
+        if let Value::Integer(n) = r {
+            assert!(n >= 2, "should have at least 2 modules, got {}", n);
+        } else {
+            panic!("expected integer, got: {:?}", r);
+        }
     }
 }
