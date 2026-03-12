@@ -68,9 +68,9 @@ mod filesystem;
 pub mod foreign;
 #[cfg(feature = "http")]
 mod http;
+mod introspect;
 #[cfg(feature = "json")]
 mod json;
-mod introspect;
 pub mod managed;
 mod port;
 #[cfg(feature = "regex")]

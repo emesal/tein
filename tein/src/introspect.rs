@@ -7,7 +7,7 @@
 use std::ffi::CString;
 
 use crate::ffi;
-use crate::sandbox::{registry_all_allowlist, VFS_ALLOWLIST};
+use crate::sandbox::{VFS_ALLOWLIST, registry_all_allowlist};
 
 /// `available-modules` trampoline: returns list of importable module paths.
 ///

@@ -11738,7 +11738,11 @@ mod tests {
                     false
                 }
             });
-            assert!(has_scheme_base, "should include (scheme base), got: {:?}", r);
+            assert!(
+                has_scheme_base,
+                "should include (scheme base), got: {:?}",
+                r
+            );
         } else {
             panic!("expected list, got: {:?}", r);
         }
