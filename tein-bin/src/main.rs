@@ -348,7 +348,7 @@ fn run_repl(args: &Args) {
                         // the return value. the tracker records the last
                         // byte written, so blank-line suppression is correct.
                         let flushed = format!(
-                            "(let ((__r__ (begin {}))) (flush-output (current-output-port)) __r__)",
+                            "(let ((__r__ (begin {}))) (flush-output-port (current-output-port)) __r__)",
                             input
                         );
                         match ctx.evaluate(&flushed) {
