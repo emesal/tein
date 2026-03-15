@@ -43,3 +43,27 @@
              ((> i (- (string-length d) 14)) #f)
              ((string=? (substring d i (+ i 14)) "(tein testmod)") #t)
              (else (loop (+ i 1))))))))
+
+;; describe — symbol input returns helpful error, not crash
+(test-true "docs/describe-symbol-returns-helpful-string"
+  (let ((d (describe 'some-symbol)))
+    (and (string? d) (not (= (string-length d) 0)))))
+
+;; describe — number input returns helpful error, not crash
+(test-true "docs/describe-number-returns-helpful-string"
+  (let ((d (describe 42)))
+    (and (string? d) (not (= (string-length d) 0)))))
+
+;; describe — string input returns helpful error (not a list)
+(test-true "docs/describe-string-returns-helpful-string"
+  (let ((d (describe "hello")))
+    (and (string? d) (not (= (string-length d) 0)))))
+
+;; describe — flat list (not pairs) returns helpful error
+(test-true "docs/describe-flat-list-returns-helpful-string"
+  (let ((d (describe '(a b c))))
+    (and (string? d) (not (= (string-length d) 0)))))
+
+;; describe — empty list is a valid alist (vacuously)
+(test-true "docs/describe-empty-list"
+  (string? (describe '())))

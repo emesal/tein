@@ -3,7 +3,7 @@
 All notable changes to tein are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.2.4] - 2026-03-12
+## [0.2.5] - 2026-03-15
 
 ### Bug Fixes
 
@@ -164,6 +164,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - **introspect:** Use CONTEXT_PTR for env_bindings ctx ([`be14973`](https://github.com/emesal/tein/commit/be149731579b59e4ac26f7d20bcc0f151b123db2))
 
 - **introspect:** GC root sexp accumulators in rust list-building loops ([`06785e9`](https://github.com/emesal/tein/commit/06785e9ac31f2fbce6f8c8cf9da1723878e4af5b))
+
+- **tein-bin:** Use flush-output-port in REPL wrapper for sandbox compat ([`176d53d`](https://github.com/emesal/tein/commit/176d53df5982acb5317dfbc9570c693054964a0b))
 
 
 ### Chores
@@ -657,6 +659,10 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 - Update implementation plan — all tasks complete ([`2de089a`](https://github.com/emesal/tein/commit/2de089ac0ac29245125707b4a6fd68a20e8ebe83))
 
+- Update CHANGELOG for v0.2.4 ([`4d29e32`](https://github.com/emesal/tein/commit/4d29e3295cac1bbaa56386f0e097efca3bf9f710))
+
+- Add introspect.md — prompt-injectable (tein introspect) reference ([`3b496df`](https://github.com/emesal/tein/commit/3b496dfeecda9ee783e1b5ad2dc26863fef6fbc0))
+
 
 ### Features
 
@@ -1059,5 +1065,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Unsandboxed module availability + chibi/diff integration ([`d660b80`](https://github.com/emesal/tein/commit/d660b8093598db832f39ef7d040c2c19a9c5f4ec))
 
 - **introspect:** Scheme integration tests ([`6b68961`](https://github.com/emesal/tein/commit/6b68961f812810941f89153c13826fd2f139e6d4))
+
+- Add describe input validation tests ([`8eebc6c`](https://github.com/emesal/tein/commit/8eebc6ce4c4bddbb522cbbee9ac4836c66f562af))
 
 

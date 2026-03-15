@@ -234,8 +234,9 @@ check:
   cargo fmt --check
   cargo clippy --all-targets --locked -- -D warnings
 
-# Run all tests
+# Run all tests (builds test extension first so ext_loading tests find the .so)
 test:
+  cargo build -p tein-test-ext --locked
   cargo nextest run --all-targets --locked
 
 # Full pre-push check (format, clippy, tests)
