@@ -29,7 +29,7 @@ impl HttpPolicy {
 }
 ```
 
-Exact prefix matching. No URL normalization beyond what ureq already does. The embedder controls trailing slashes, scheme, etc.
+Exact prefix matching. No URL normalization beyond what ureq already does. The embedder controls trailing slashes, scheme, etc. **Important**: embedders should use trailing slashes on path prefixes to avoid prefix-extension attacks — `"https://api.example.com/v1/"` is safe, but `"https://api.example.com/v1"` would also match `"https://api.example.com/v1-evil/exfil"`.
 
 ### Thread-local state
 
@@ -49,10 +49,13 @@ No separate gate u8. The VFS allowlist prevents `(import (tein http))` when no p
 pub fn http_allow(mut self, prefixes: &[&str]) -> Self
 ```
 
-Stores prefixes in the builder. During `build()`:
-1. Sets `HTTP_POLICY` thread-local with the provided prefixes.
-2. Adds `"tein/http"` to the VFS allowlist (auto-enables the module).
-3. Saves previous `HTTP_POLICY` value for RAII restoration.
+Stores prefixes as `http_prefixes: Option<Vec<String>>` on `ContextBuilder`. The method also calls `self.allow_module("tein/http")` (following the `allow_dynamic_modules` pattern), which handles VFS allowlist addition and transitive dep resolution. If no explicit `.sandboxed()` call is present, `http_allow` auto-activates `sandboxed(Modules::Safe)`, matching `file_read`/`file_write` behavior.
+
+During `build()`:
+1. If `http_prefixes` is `Some`, saves previous `HTTP_POLICY` thread-local value (at the same point as `prev_fs_policy`), then sets `HTTP_POLICY` with the new `HttpPolicy`.
+2. Module allowlist already handled at builder method time via `allow_module`.
+
+`Context` struct gets a `prev_http_policy: Option<HttpPolicy>` field, initialized to `None` by default.
 
 ### Trampoline enforcement
 
@@ -79,7 +82,9 @@ In `http.rs`, at the top of `do_http_request`, before the ureq call:
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Allowlist granularity | URL prefixes only | Method-level gating adds complexity the embedder can enforce at the scheme wrapper level. YAGNI. |
-| Auto-enable module | Yes, `http_allow` adds `tein/http` to VFS allowlist | Intent is unambiguous; two-knob design invites misconfiguration. |
+| Auto-enable module | Yes, `http_allow` calls `allow_module("tein/http")` | Intent is unambiguous; two-knob design invites misconfiguration. Follows `allow_dynamic_modules` pattern. |
+| Auto-activate sandbox | Yes, `http_allow` without explicit `sandboxed()` activates `Modules::Safe` | Matches `file_read`/`file_write` behavior. HTTP policy is meaningless without a sandbox. |
+| Empty prefixes | Intentional: `http_allow(&[])` enables import but blocks all requests | Allows scheme code to define error-handling paths; consistent with empty `FsPolicy` prefix lists. |
 | Error transparency | Clear policy error with URL | Sandboxed code already knows it's sandboxed. Matches filesystem error style. |
 | Separate gate u8 | No | VFS allowlist already prevents import; `Option<HttpPolicy>` suffices. |
 
