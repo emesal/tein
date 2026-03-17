@@ -115,6 +115,45 @@ thread_local! {
     pub(crate) static FS_POLICY: RefCell<Option<FsPolicy>> = const { RefCell::new(None) };
 }
 
+/// HTTP URL access policy for sandboxed contexts.
+///
+/// Controls which URLs scheme code can access via `(tein http)`.
+/// Uses prefix matching against the raw URL string.
+///
+/// **Important**: use trailing slashes on path prefixes to avoid
+/// prefix-extension attacks — `"https://api.example.com/v1/"` is safe,
+/// but `"https://api.example.com/v1"` also matches
+/// `"https://api.example.com/v1-evil/exfil"`.
+#[cfg(feature = "http")]
+#[derive(Clone)]
+pub(crate) struct HttpPolicy {
+    /// allowed URL prefixes
+    pub(crate) url_prefixes: Vec<String>,
+}
+
+#[cfg(feature = "http")]
+impl HttpPolicy {
+    /// Create a new HTTP policy with the given URL prefixes.
+    pub fn new(prefixes: Vec<String>) -> Self {
+        Self {
+            url_prefixes: prefixes,
+        }
+    }
+
+    /// Check if a URL is allowed by this policy.
+    ///
+    /// Returns true if `url` starts with any allowed prefix.
+    pub fn check_url(&self, url: &str) -> bool {
+        self.url_prefixes.iter().any(|p| url.starts_with(p))
+    }
+}
+
+#[cfg(feature = "http")]
+thread_local! {
+    /// Active HTTP URL policy for the current context (set during build, cleared on drop).
+    pub(crate) static HTTP_POLICY: RefCell<Option<HttpPolicy>> = const { RefCell::new(None) };
+}
+
 // VFS shadow modules:
 //
 // the following modules have `VfsSource::Shadow` entries in the registry.
@@ -644,5 +683,40 @@ mod exports_tests {
             "scheme/red or scheme/small should still contribute stubs for names \
              not covered by the allowlist"
         );
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_policy_check_url_allowed() {
+        let policy = HttpPolicy::new(vec![
+            "https://api.example.com/v1/".to_string(),
+            "https://cdn.example.com/".to_string(),
+        ]);
+        assert!(policy.check_url("https://api.example.com/v1/users"));
+        assert!(policy.check_url("https://cdn.example.com/image.png"));
+    }
+
+    #[test]
+    fn http_policy_check_url_blocked() {
+        let policy = HttpPolicy::new(vec!["https://api.example.com/v1/".to_string()]);
+        assert!(!policy.check_url("https://evil.com/exfil"));
+        assert!(!policy.check_url("https://api.example.com/v2/users"));
+    }
+
+    #[test]
+    fn http_policy_empty_prefixes_blocks_all() {
+        let policy = HttpPolicy::new(vec![]);
+        assert!(!policy.check_url("https://anything.com/"));
+    }
+
+    #[test]
+    fn http_policy_no_trailing_slash_prefix_extension() {
+        // documents that without trailing slash, prefix extends to unintended URLs
+        let policy = HttpPolicy::new(vec!["https://api.example.com/v1".to_string()]);
+        assert!(policy.check_url("https://api.example.com/v1-evil/exfil"));
     }
 }

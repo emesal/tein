@@ -79,7 +79,7 @@ All modules embedded in the VFS — available for import in `standard_env` conte
 | `tein/time` | ✓ | `current-second`, `current-jiffy`, `jiffies-per-second`, `timezone-offset-seconds` (feature: `time`) |
 | `tein/safe-regexp` | ✓ | `regexp`, `regexp?`, `regexp-search`, `regexp-matches`, `regexp-matches?`, `regexp-replace`, `regexp-replace-all`, `regexp-extract`, `regexp-split`, `regexp-match-count`, `regexp-match-submatch`, `regexp-match->list`, `regexp-fold` (feature: `regex`) — linear-time via rust `regex` crate, no ReDoS |
 | `tein/crypto` | ✓ | `sha256`, `sha256-bytes`, `sha512`, `sha512-bytes`, `blake3`, `blake3-bytes`, `random-bytes`, `random-integer`, `random-float` (feature: `crypto`) — hash fns accept string or bytevector; CSPRNG via `rand` |
-| `tein/http` | ✗ | `http-request`, `http-get`, `http-post`, `http-put`, `http-delete` (feature: `http`) — TLS-capable HTTP client via `ureq`; returns response alist `((status . N) (headers ...) (body . "..."))` |
+| `tein/http` | ✗ | `http-request`, `http-get`, `http-post`, `http-put`, `http-delete` (feature: `http`) — TLS-capable HTTP client via `ureq`; returns response alist `((status . N) (headers ...) (body . "..."))` — sandboxed via `http_allow()` URL-prefix policy |
 | `tein/file` | ✓ | R7RS file operations with `FsPolicy` enforcement |
 | `tein/load` | ✓ | `load` (VFS-restricted) |
 | `tein/introspect` | ✓ | `available-modules`, `imported-modules`, `module-exports`, `env-bindings`, `procedure-arity`, `binding-info`, `describe-environment`, `describe-environment/text`, `introspect-docs` |
