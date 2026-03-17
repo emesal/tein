@@ -12217,4 +12217,39 @@ mod tests {
             err
         );
     }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_raii_restoration() {
+        // verify that HTTP_POLICY is restored after context is dropped,
+        // so sequential contexts on the same thread don't leak state.
+
+        // first context: set http policy
+        {
+            let ctx = Context::builder()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
+                .http_allow(&["https://example.com/"])
+                .build()
+                .expect("build first");
+            // verify policy is active
+            ctx.evaluate("(import (tein http)) #t")
+                .expect("import should work");
+        } // ctx dropped here — HTTP_POLICY should be restored to None
+
+        // second context: no http policy — module should not be importable
+        {
+            let ctx2 = Context::builder()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
+                .build()
+                .expect("build second");
+            let err = ctx2.evaluate("(import (tein http))").unwrap_err();
+            assert!(
+                matches!(err, Error::SandboxViolation(_)),
+                "expected SandboxViolation after RAII restore, got: {:?}",
+                err
+            );
+        }
+    }
 }
