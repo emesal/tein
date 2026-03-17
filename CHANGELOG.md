@@ -3,7 +3,7 @@
 All notable changes to tein are documented here.
 Versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.2.5] - 2026-03-15
+## [0.2.6] - 2026-03-17
 
 ### Bug Fixes
 
@@ -663,6 +663,16 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 - Add introspect.md — prompt-injectable (tein introspect) reference ([`3b496df`](https://github.com/emesal/tein/commit/3b496dfeecda9ee783e1b5ad2dc26863fef6fbc0))
 
+- Update CHANGELOG for v0.2.5 ([`b1ec2e5`](https://github.com/emesal/tein/commit/b1ec2e595438f867c2e224b1f8235aad998841c9))
+
+- Add HttpPolicy design spec ([`fcb8b06`](https://github.com/emesal/tein/commit/fcb8b06c1c3d7c3066b825d0d14a2bf22cb20539))
+
+- Address spec review feedback for HttpPolicy ([`6ef3d4d`](https://github.com/emesal/tein/commit/6ef3d4d356f988fca2d142a6550d03eecb7882ad))
+
+- Add HttpPolicy implementation plan ([`95f34f8`](https://github.com/emesal/tein/commit/95f34f874de8ee0cff7dc6d54610fcd6cb39a4c3))
+
+- Document HttpPolicy flow in AGENTS.md, sandboxing guide, and reference ([`eeb2af4`](https://github.com/emesal/tein/commit/eeb2af4703c950967d4aac40ddf0ba0f94a31229))
+
 
 ### Features
 
@@ -946,6 +956,12 @@ Versions follow [Semantic Versioning](https://semver.org/).
 
 - **introspect:** Binding-info + describe-environment + describe-environment/text ([`33bc6cb`](https://github.com/emesal/tein/commit/33bc6cbbd15e6d68d266e5f7f429e35d55246570))
 
+- Add HttpPolicy struct and HTTP_POLICY thread-local ([`37d7bb2`](https://github.com/emesal/tein/commit/37d7bb22169fc2b788a6454b36a78a76262393ab))
+
+- Http_allow builder method with sandbox auto-activation ([`1d4162f`](https://github.com/emesal/tein/commit/1d4162f81629bc17f342b4344110c87d543e9dd7))
+
+- Enforce HttpPolicy in http_request_trampoline ([`317a5ed`](https://github.com/emesal/tein/commit/317a5edec35615f0df62bc6a504d6a66cca763aa))
+
 
 ### Refactoring
 
@@ -972,6 +988,8 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - Convert 9 shadow modules to embedded, fix deps ([`33673d1`](https://github.com/emesal/tein/commit/33673d1446371357e2ebe991d9209f81e6ae6fe6))
 
 - Remove old file-exists?/delete-file trampolines ([`22b9650`](https://github.com/emesal/tein/commit/22b96508ad4777c395936488ba9d887d7e3f8cb1))
+
+- Gate HttpPolicy on feature=http, tighten field visibility ([`7dad973`](https://github.com/emesal/tein/commit/7dad97303d2a95e352da62d25d9a4fb550f1d780))
 
 
 ### Tests
@@ -1067,5 +1085,7 @@ Versions follow [Semantic Versioning](https://semver.org/).
 - **introspect:** Scheme integration tests ([`6b68961`](https://github.com/emesal/tein/commit/6b68961f812810941f89153c13826fd2f139e6d4))
 
 - Add describe input validation tests ([`8eebc6c`](https://github.com/emesal/tein/commit/8eebc6ce4c4bddbb522cbbee9ac4836c66f562af))
+
+- Verify HTTP_POLICY RAII restoration across contexts ([`5062e89`](https://github.com/emesal/tein/commit/5062e898e5aae9e6c3accf20ea56b508a0d40271))
 
 
