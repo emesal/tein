@@ -1122,6 +1122,26 @@ pub(crate) fn check_fs_access(path: &str, access: FsAccess) -> bool {
     })
 }
 
+/// Check if an HTTP request to `url` is allowed by the active HTTP policy.
+///
+/// - unsandboxed (`IS_SANDBOXED=false`): allows unconditionally
+/// - sandboxed + `Some(policy)`: prefix match
+/// - sandboxed + `None`: deny (defense-in-depth, unreachable via public API)
+#[cfg(feature = "http")]
+pub(crate) fn check_http_access(url: &str) -> bool {
+    let sandboxed = IS_SANDBOXED.with(|c| c.get());
+    if !sandboxed {
+        return true;
+    }
+    crate::sandbox::HTTP_POLICY.with(|cell| {
+        let policy = cell.borrow();
+        match &*policy {
+            Some(p) => p.check_url(url),
+            None => false, // sandboxed + no policy = deny
+        }
+    })
+}
+
 // --- open-*-file enforcement ---
 //
 // open-*-file policy enforcement is handled at the C opcode level
@@ -1908,6 +1928,10 @@ pub struct ContextBuilder {
     standard_env: bool,
     file_read_prefixes: Option<Vec<String>>,
     file_write_prefixes: Option<Vec<String>>,
+    /// URL prefixes allowed for `(tein http)` in sandboxed contexts.
+    /// when set, auto-enables sandboxing and adds `tein/http` to the allowlist.
+    #[cfg(feature = "http")]
+    http_prefixes: Option<Vec<String>>,
     /// module-level sandbox configuration.
     /// when set, activates the registry-based sandbox path in build().
     sandbox_modules: Option<crate::sandbox::Modules>,
@@ -2045,6 +2069,45 @@ impl ContextBuilder {
             self.sandbox_modules = Some(crate::sandbox::Modules::Safe);
         }
         self
+    }
+
+    /// Allow HTTP requests to URLs matching the given prefixes.
+    ///
+    /// Enables `(tein http)` in sandboxed contexts with a URL-prefix allowlist.
+    /// Requests to URLs not matching any prefix are blocked with a scheme exception.
+    ///
+    /// Auto-activates `sandboxed(Modules::Safe)` when called without an explicit
+    /// `sandboxed()` call. Automatically adds `tein/http` to the module allowlist.
+    ///
+    /// **Important**: use trailing slashes on path prefixes to avoid prefix-extension
+    /// attacks — `"https://api.example.com/v1/"` is safe, but without a trailing
+    /// slash, `"https://api.example.com/v1"` also matches
+    /// `"https://api.example.com/v1-evil/"`.
+    ///
+    /// # examples
+    ///
+    /// ```
+    /// use tein::{Context, sandbox::Modules};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let ctx = Context::builder()
+    ///     .standard_env()
+    ///     .sandboxed(Modules::Safe)
+    ///     .http_allow(&["https://api.example.com/v1/"])
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "http")]
+    pub fn http_allow(mut self, prefixes: &[&str]) -> Self {
+        let list = self.http_prefixes.get_or_insert_with(Vec::new);
+        for p in prefixes {
+            list.push(p.to_string());
+        }
+        if self.sandbox_modules.is_none() {
+            self.sandbox_modules = Some(crate::sandbox::Modules::Safe);
+        }
+        self.allow_module("tein/http")
     }
 
     /// add a module (+ its transitive deps) to the VFS gate allowlist.
@@ -2350,6 +2413,8 @@ impl ContextBuilder {
             let prev_vfs_gate = VFS_GATE.with(|cell| cell.get());
             let prev_fs_gate = FS_GATE.with(|cell| cell.get());
             let prev_fs_policy = FS_POLICY.with(|cell| cell.borrow().clone());
+            #[cfg(feature = "http")]
+            let prev_http_policy = crate::sandbox::HTTP_POLICY.with(|cell| cell.borrow().clone());
             let prev_vfs_allowlist = VFS_ALLOWLIST.with(|cell| cell.borrow().clone());
             let prev_is_sandboxed = IS_SANDBOXED.with(|c| c.get());
             let prev_sandbox_env = SANDBOX_ENV.with(|cell| cell.borrow().clone());
@@ -2527,12 +2592,26 @@ impl ContextBuilder {
                 }
             }
 
+            // set HttpPolicy if http_allow() was configured.
+            // same pattern as FS_POLICY: http_allow() auto-activates sandboxing,
+            // so HTTP_POLICY is always paired with IS_SANDBOXED=true in practice.
+            #[cfg(feature = "http")]
+            {
+                if let Some(prefixes) = self.http_prefixes.take() {
+                    crate::sandbox::HTTP_POLICY.with(|cell| {
+                        *cell.borrow_mut() = Some(crate::sandbox::HttpPolicy::new(prefixes));
+                    });
+                }
+            }
+
             let context = Context {
                 ctx,
                 step_limit: self.step_limit,
                 prev_vfs_gate,
                 prev_fs_gate,
                 prev_fs_policy,
+                #[cfg(feature = "http")]
+                prev_http_policy,
                 prev_vfs_allowlist,
                 prev_is_sandboxed,
                 prev_sandbox_env,
@@ -2675,6 +2754,9 @@ pub struct Context {
     prev_fs_gate: u8,
     /// previous FS_POLICY value, restored on drop
     prev_fs_policy: Option<FsPolicy>,
+    /// previous HTTP_POLICY value, restored on drop
+    #[cfg(feature = "http")]
+    prev_http_policy: Option<crate::sandbox::HttpPolicy>,
     /// previous VFS_ALLOWLIST, restored on drop
     prev_vfs_allowlist: Vec<String>,
     /// previous IS_SANDBOXED value, restored on drop
@@ -2756,6 +2838,8 @@ impl Context {
             standard_env: false,
             file_read_prefixes: None,
             file_write_prefixes: None,
+            #[cfg(feature = "http")]
+            http_prefixes: None,
             sandbox_modules: None,
             with_vfs_shadows: false,
             sandbox_env: None,
@@ -4218,6 +4302,11 @@ impl Drop for Context {
         // restore previous FS_POLICY (typically None, unless sequential sandboxed contexts)
         FS_POLICY.with(|cell| {
             *cell.borrow_mut() = std::mem::take(&mut self.prev_fs_policy);
+        });
+        // restore previous HTTP_POLICY
+        #[cfg(feature = "http")]
+        crate::sandbox::HTTP_POLICY.with(|cell| {
+            *cell.borrow_mut() = std::mem::take(&mut self.prev_http_policy);
         });
         // restore sandbox flag for the thread (defensive restore-previous pattern)
         IS_SANDBOXED.with(|c| c.set(self.prev_is_sandboxed));
@@ -11998,6 +12087,168 @@ mod tests {
             );
         } else {
             panic!("expected string, got: {:?}", r);
+        }
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_allow_makes_module_importable() {
+        // without http_allow, sandboxed context cannot import (tein http)
+        let ctx_blocked = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .build()
+            .expect("build");
+        let err = ctx_blocked.evaluate("(import (tein http))").unwrap_err();
+        assert!(matches!(err, Error::SandboxViolation(_)));
+
+        // with http_allow, sandboxed context CAN import (tein http)
+        let ctx_allowed = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&["https://example.com/"])
+            .build()
+            .expect("build");
+        // should not error — module is importable
+        ctx_allowed
+            .evaluate("(import (tein http)) #t")
+            .expect("import should succeed");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_allow_auto_activates_sandbox() {
+        // http_allow without explicit sandboxed() should auto-activate sandbox
+        let ctx = Context::builder()
+            .standard_env()
+            .http_allow(&["https://example.com/"])
+            .build()
+            .expect("build");
+        // verify sandboxed by checking that unrestricted modules are blocked
+        let err = ctx.evaluate("(import (scheme regex))").unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected sandbox to be active, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_blocks_disallowed_url() {
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&["https://allowed.example.com/"])
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(r#"(import (tein http)) (http-get "https://blocked.example.com/secret" '())"#)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("http request blocked"),
+            "expected 'http request blocked', got: {}",
+            msg
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_allows_matching_url() {
+        // this test actually makes a network request — use a URL that will fail
+        // at the transport level (connection refused) AFTER passing the policy check.
+        // the error should be EvalError (transport), NOT SandboxViolation (policy).
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&["http://127.0.0.1:1/"])
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(r#"(import (tein http)) (http-get "http://127.0.0.1:1/test" '())"#)
+            .unwrap_err();
+        // should be a transport error, NOT a sandbox violation
+        assert!(
+            matches!(err, Error::EvalError(_)),
+            "expected EvalError (transport), got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_unsandboxed_ignores_policy() {
+        // unsandboxed context — http requests should work without any policy.
+        // use connection-refused to verify the request actually reaches ureq.
+        let ctx = Context::builder().standard_env().build().expect("build");
+        let err = ctx
+            .evaluate(r#"(import (tein http)) (http-get "http://127.0.0.1:1/test" '())"#)
+            .unwrap_err();
+        // should be transport error, not sandbox violation
+        assert!(
+            matches!(err, Error::EvalError(_)),
+            "expected EvalError (transport), got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_empty_blocks_all() {
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&[])
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(r#"(import (tein http)) (http-get "http://127.0.0.1:1/test" '())"#)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_raii_restoration() {
+        // verify that HTTP_POLICY is restored after context is dropped,
+        // so sequential contexts on the same thread don't leak state.
+
+        // first context: set http policy
+        {
+            let ctx = Context::builder()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
+                .http_allow(&["https://example.com/"])
+                .build()
+                .expect("build first");
+            // verify policy is active
+            ctx.evaluate("(import (tein http)) #t")
+                .expect("import should work");
+        } // ctx dropped here — HTTP_POLICY should be restored to None
+
+        // second context: no http policy — module should not be importable
+        {
+            let ctx2 = Context::builder()
+                .standard_env()
+                .sandboxed(crate::sandbox::Modules::Safe)
+                .build()
+                .expect("build second");
+            let err = ctx2.evaluate("(import (tein http))").unwrap_err();
+            assert!(
+                matches!(err, Error::SandboxViolation(_)),
+                "expected SandboxViolation after RAII restore, got: {:?}",
+                err
+            );
         }
     }
 }

@@ -171,6 +171,36 @@ In sandboxed contexts, `(scheme file)` is a shadow module that re-exports from `
 
 ---
 
+## HTTP policy
+
+Control which URLs sandboxed Scheme code can access via `(tein http)`:
+
+```rust
+let ctx = Context::builder()
+    .standard_env()
+    .sandboxed(Modules::Safe)
+    .http_allow(&["https://api.example.com/v1/"])
+    .build()?;
+```
+
+`.http_allow()` does three things:
+
+- adds `tein/http` to the module allowlist (so `(import (tein http))` works)
+- sets a URL-prefix policy checked before every outbound request
+- auto-activates `sandboxed(Modules::Safe)` if `.sandboxed()` was not called explicitly
+
+A request to a URL not matching any prefix raises `Error::SandboxViolation` with a message like:
+
+```
+http request blocked: URL not in allowlist: https://evil.com/exfil
+```
+
+**Trailing slash warning**: `"https://api.example.com/v1"` without a trailing slash also matches `"https://api.example.com/v1-evil/"`. Use trailing slashes on path prefixes to avoid this.
+
+**Empty allowlist**: `.http_allow(&[])` makes `(tein http)` importable but blocks all requests — useful for testing or staged rollouts.
+
+---
+
 ## fake environment variables and command-line
 
 In sandboxed contexts, `get-environment-variable`, `get-environment-variables`, and `command-line` consult thread-local fake state rather than the real process environment. defaults:
