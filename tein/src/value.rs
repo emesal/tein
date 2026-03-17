@@ -472,6 +472,11 @@ impl Value {
                 return Error::SandboxViolation(format!("file access denied: {}", path));
             }
 
+            // sentinel: HTTP policy denial
+            if let Some(rest) = message.strip_prefix("[sandbox:http] ") {
+                return Error::SandboxViolation(rest.to_string());
+            }
+
             // C-level FS policy gate denial (eval.c patches F, G)
             if message.contains("access denied by sandbox policy") {
                 let path = irritant_str.as_deref().unwrap_or("unknown");

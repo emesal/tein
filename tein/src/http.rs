@@ -238,6 +238,16 @@ pub(crate) unsafe extern "C" fn http_request_trampoline(
         }
         let url = ffi::sexp_to_rust_string(url_sexp);
 
+        // check HTTP URL policy before making the request
+        if !crate::context::check_http_access(&url) {
+            let msg = format!(
+                "[sandbox:http] http request blocked: URL not in allowlist: {}",
+                url
+            );
+            let c_msg = CString::new(msg.as_str()).unwrap_or_default();
+            return ffi::make_error(ctx, c_msg.as_ptr(), msg.len() as ffi::sexp_sint_t);
+        }
+
         // extract headers (list of pairs)
         let headers_sexp = ffi::sexp_car(args);
         args = ffi::sexp_cdr(args);

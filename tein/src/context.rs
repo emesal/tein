@@ -12126,4 +12126,95 @@ mod tests {
             err
         );
     }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_blocks_disallowed_url() {
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&["https://allowed.example.com/"])
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(
+                r#"(import (tein http)) (http-get "https://blocked.example.com/secret" '())"#,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("http request blocked"),
+            "expected 'http request blocked', got: {}",
+            msg
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_allows_matching_url() {
+        // this test actually makes a network request — use a URL that will fail
+        // at the transport level (connection refused) AFTER passing the policy check.
+        // the error should be EvalError (transport), NOT SandboxViolation (policy).
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&["http://127.0.0.1:1/"])
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(r#"(import (tein http)) (http-get "http://127.0.0.1:1/test" '())"#)
+            .unwrap_err();
+        // should be a transport error, NOT a sandbox violation
+        assert!(
+            matches!(err, Error::EvalError(_)),
+            "expected EvalError (transport), got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_unsandboxed_ignores_policy() {
+        // unsandboxed context — http requests should work without any policy.
+        // use connection-refused to verify the request actually reaches ureq.
+        let ctx = Context::builder()
+            .standard_env()
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(r#"(import (tein http)) (http-get "http://127.0.0.1:1/test" '())"#)
+            .unwrap_err();
+        // should be transport error, not sandbox violation
+        assert!(
+            matches!(err, Error::EvalError(_)),
+            "expected EvalError (transport), got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn test_http_policy_empty_blocks_all() {
+        let ctx = Context::builder()
+            .standard_env()
+            .sandboxed(crate::sandbox::Modules::Safe)
+            .http_allow(&[])
+            .build()
+            .expect("build");
+        let err = ctx
+            .evaluate(
+                r#"(import (tein http)) (http-get "http://127.0.0.1:1/test" '())"#,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::SandboxViolation(_)),
+            "expected SandboxViolation, got: {:?}",
+            err
+        );
+    }
 }
