@@ -124,16 +124,21 @@ thread_local! {
 /// prefix-extension attacks — `"https://api.example.com/v1/"` is safe,
 /// but `"https://api.example.com/v1"` also matches
 /// `"https://api.example.com/v1-evil/exfil"`.
+// struct, field, and methods are dead without the http feature — that's expected.
+#[cfg_attr(not(feature = "http"), allow(dead_code))]
 #[derive(Clone)]
 pub(crate) struct HttpPolicy {
     /// allowed URL prefixes
     pub url_prefixes: Vec<String>,
 }
 
+#[cfg_attr(not(feature = "http"), allow(dead_code))]
 impl HttpPolicy {
     /// Create a new HTTP policy with the given URL prefixes.
     pub fn new(prefixes: Vec<String>) -> Self {
-        Self { url_prefixes: prefixes }
+        Self {
+            url_prefixes: prefixes,
+        }
     }
 
     /// Check if a URL is allowed by this policy.
